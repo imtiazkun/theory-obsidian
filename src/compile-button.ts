@@ -145,8 +145,7 @@ export class CompileButton {
 			return { compile: { kind: "hidden" }, changed: [] };
 		}
 		const vaultPath = plugin.getVaultPath();
-		// Obsidian's own settings aren't part of the model.
-		const changed = (await changedFiles(vaultPath)).filter((path) => !path.startsWith(".obsidian/"));
+		const changed = await changedFiles(vaultPath);
 
 		if (plugin.isCompiling()) return { compile: { kind: "running" }, changed };
 		if (!plugin.settings.projectFolder) return { compile: { kind: "setup" }, changed };

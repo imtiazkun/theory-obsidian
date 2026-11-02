@@ -68,7 +68,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Read-only snapshot, deny rules and the post-compile check | Done |
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
 | Realized box and compile state in each note's header | Done |
-| Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer | Done |
+| Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
 ## Install for development

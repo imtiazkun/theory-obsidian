@@ -21,10 +21,12 @@ export const TOOL_PATH = [
 const GITIGNORE_LINES = [
 	".DS_Store",
 	".trash/",
-	".obsidian/workspace*.json",
-	// Holds each person's own author details.
-	".obsidian/plugins/theory-md/data.json",
+	// Obsidian's settings, the plugin's build and its data with the compile reports. None of it is model.
+	".obsidian/",
 ];
+
+/** Obsidian's config folder isn't part of the model, even in vaults that track it from before. */
+const OBSIDIAN_CONFIG = ".obsidian/";
 
 export interface Author {
 	fullName: string;
@@ -114,7 +116,7 @@ export async function changedFiles(basePath: string): Promise<string[]> {
 		// Renames are followed by their original path, which isn't a separate change.
 		if (status.includes("R") || status.includes("C")) i++;
 	}
-	return paths;
+	return paths.filter((path) => !path.startsWith(OBSIDIAN_CONFIG));
 }
 
 /**
@@ -129,7 +131,7 @@ export async function commit(
 ): Promise<string> {
 	const identity = await identityArgs(basePath, author);
 	if (paths === "all") {
-		await git(basePath, ["add", "-A"]);
+		await git(basePath, ["add", "-A", "--", ".", `:(exclude)${OBSIDIAN_CONFIG}`]);
 		await git(basePath, [...identity, "commit", "-m", message]);
 	} else {
 		await git(basePath, ["add", "-A", "--", ...paths]);

@@ -15,6 +15,14 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 // Larger diffs are cut; Claude can still read every file in the snapshot.
 const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
+// Git pathspecs for vault files that are never sent to Claude: hidden folders (name starts
+// with `_`, at any depth), Obsidian's config folder, and the human-only Instructions.md.
+const NOT_SENT = [
+	":(exclude,glob)**/_*/**",
+	":(exclude).obsidian/",
+	":(exclude,icase)instructions.md",
+	":(exclude,icase)instruction.md",
+];
 
 export type PermissionMode = "acceptEdits" | "auto" | "bypassPermissions";
 
@@ -161,14 +169,14 @@ async function revisionsBetween(vaultPath: string, from: string | null, to: stri
 }
 
 async function modelDiff(vaultPath: string, from: string | null, to: string): Promise<string> {
-	const { stdout } = await git(vaultPath, ["diff", "--stat", "--patch", from ?? EMPTY_TREE, to]);
+	const { stdout } = await git(vaultPath, ["diff", "--stat", "--patch", from ?? EMPTY_TREE, to, "--", ...NOT_SENT]);
 	if (stdout.length <= MAX_DIFF_CHARS) return stdout;
 	return stdout.slice(0, MAX_DIFF_CHARS) + "\n\n[Diff cut short. Read the changed files in the model directory.]\n";
 }
 
 /** Notes that changed between the two commits, to point at when a failed compile names no spot. */
 async function changedNotes(vaultPath: string, from: string | null, to: string): Promise<string[]> {
-	const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", "--diff-filter=d", from ?? EMPTY_TREE, to]);
+	const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", "--diff-filter=d", from ?? EMPTY_TREE, to, "--", ...NOT_SENT]);
 	return stdout.split("\0").filter((path) => path.toLowerCase().endsWith(".md"));
 }
 
@@ -186,11 +194,11 @@ async function workingTreeState(vaultPath: string): Promise<Map<string, string>>
 	return state;
 }
 
-/** Checks out `commit` into a fresh read-only directory outside the vault. */
+/** Checks out `commit`, minus the files never sent to Claude, into a fresh read-only directory outside the vault. */
 async function createSnapshot(vaultPath: string, commit: string): Promise<string> {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "theory-model-")));
 	const archive = `${dir}.tar`;
-	await git(vaultPath, ["archive", "--format=tar", "-o", archive, commit]);
+	await git(vaultPath, ["archive", "--format=tar", "-o", archive, commit, "--", ...NOT_SENT]);
 	await runTool("tar", ["-xf", archive, "-C", dir]);
 	await rm(archive, { force: true });
 	await runTool("chmod", ["-R", "a-w", dir]);

@@ -18,7 +18,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | Revision | A git commit in the vault repo. |
 | Last compile marker | Git tag `theory/compiled` in the vault repo. It points at the last compiled commit. |
 | Pending revisions | Commits in `theory/compiled..HEAD`. On the first compile (no tag yet), all commits up to `HEAD`. |
-| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. |
+| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. It leaves out the files never sent to Claude (`NOT_SENT` in `src/compile.ts`): hidden folders, `.obsidian/` and `Instructions.md`. |
+| Hidden folder | A folder whose name starts with `_`, at any depth, like `_templates`. Committed, but never sent to Claude. |
 | Compile report | JSON record of one compile run. Kept in plugin data, never in the vault. |
 | Plugin data | `.obsidian/plugins/theory-md/data.json`. Holds the settings and the last 20 reports. Git ignores it. |
 | Anchor | Where a problem sits in the model: `{path, heading?, quote?}`. Claude proposes it, and the plugin checks it against the snapshot before keeping it. |
@@ -93,7 +94,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 
 ### W2. Setup vault (command "Setup vault")
 - **Check first:** the vault isn't already a git repo (no `.git`). An author name and email exist in the settings or the git config. Otherwise it fails with a notice.
-- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/workspace*.json`, `.obsidian/plugins/theory-md/data.json`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
+- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
 - **Output:** the vault is a git repo whose initial commit includes the starter files. The UI refreshes and `Index.md` opens.
 
 ### W3. Edit and commit
@@ -117,8 +118,8 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 6. `from` = the commit the `theory/compiled` tag points to, or `null` if there is no tag.
 7. If `from === head`, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
 8. `revisions` = `git log --reverse from..head` (hash, author, ISO date, subject).
-9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`), kept as suspects for the overlay.
-10. Snapshot: `git archive head` into a new temp folder, extract it, then `chmod -R a-w`.
+9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes hidden folders, `.obsidian/` and `Instructions.md`.
+10. Snapshot: `git archive head -- <NOT_SENT>` into a new temp folder, extract it, then `chmod -R a-w`.
 11. Record the guards: a SHA-256 hash of the snapshot tree, and the vault's working-tree state (path → mtime, or "deleted").
 
 **Phase C: run Claude Code**
