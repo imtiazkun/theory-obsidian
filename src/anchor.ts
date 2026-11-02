@@ -72,6 +72,17 @@ async function checkAnchor(snapshot: string, claimed: unknown): Promise<Anchor |
 	return anchor;
 }
 
+/** Keeps at most five of the anchors Claude claimed, each checked. With no snapshot to check against, every anchor is dropped. */
+export async function checkAnchors(snapshot: string | null, claimed: unknown): Promise<Anchor[]> {
+	const checked: Anchor[] = [];
+	if (!snapshot || !Array.isArray(claimed)) return checked;
+	for (const claimedAnchor of claimed.slice(0, MAX_ANCHORS)) {
+		const anchor = await checkAnchor(snapshot, claimedAnchor).catch(() => null);
+		if (anchor) checked.push(anchor);
+	}
+	return checked;
+}
+
 /**
  * Turns the problems Claude reported into plain text plus checked anchors. With no snapshot to
  * check against, every anchor is dropped.
@@ -82,14 +93,7 @@ export async function checkProblems(snapshot: string | null, claimed: unknown): 
 	for (const item of claimed) {
 		const { problem, anchors } = (typeof item === "string" ? { problem: item } : (item ?? {})) as Record<string, unknown>;
 		if (typeof problem !== "string" || !problem.trim()) continue;
-		const checked: Anchor[] = [];
-		if (snapshot && Array.isArray(anchors)) {
-			for (const claimedAnchor of anchors.slice(0, MAX_ANCHORS)) {
-				const anchor = await checkAnchor(snapshot, claimedAnchor).catch(() => null);
-				if (anchor) checked.push(anchor);
-			}
-		}
-		problems.push({ text: problem.trim().slice(0, MAX_PROBLEM_CHARS), anchors: checked });
+		problems.push({ text: problem.trim().slice(0, MAX_PROBLEM_CHARS), anchors: await checkAnchors(snapshot, anchors) });
 	}
 	return problems;
 }

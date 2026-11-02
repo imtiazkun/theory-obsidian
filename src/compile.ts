@@ -4,7 +4,7 @@ import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, relative } from "path";
-import { Problem, checkProblems, plainProblem } from "./anchor";
+import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { findProjectRepos } from "./project";
 import { TOOL_PATH, git } from "./vault";
 
@@ -49,6 +49,8 @@ export interface Question {
 	question: string;
 	/** Model files the question is about, relative to the vault. */
 	notes: string[];
+	/** The text in the model the question is about, checked like problem anchors. Reply opens the note there. */
+	anchors?: Anchor[];
 }
 
 export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled";
@@ -91,6 +93,19 @@ export async function pendingRevisionCount(vaultPath: string): Promise<number> {
 /** Thrown when every committed revision has already been compiled. */
 export class NothingToCompileError extends Error {}
 
+const ANCHOR_SCHEMA = {
+	type: "object",
+	properties: {
+		path: { type: "string", description: "Model file path, relative to the model directory." },
+		heading: { type: "string", description: "Heading the text sits under, as written." },
+		quote: {
+			type: "string",
+			description: "Short text copied exactly from the note, Markdown included. One sentence at most.",
+		},
+	},
+	required: ["path"],
+};
+
 const REPORT_SCHEMA = {
 	type: "object",
 	properties: {
@@ -108,6 +123,11 @@ const REPORT_SCHEMA = {
 						items: { type: "string" },
 						description: "Model file paths the question is about, relative to the model directory.",
 					},
+					anchors: {
+						type: "array",
+						description: "Where in the model the text the question is about sits.",
+						items: ANCHOR_SCHEMA,
+					},
 				},
 				required: ["question", "notes"],
 			},
@@ -121,18 +141,7 @@ const REPORT_SCHEMA = {
 					anchors: {
 						type: "array",
 						description: "Where in the model the problem comes from. Empty when it isn't about the model.",
-						items: {
-							type: "object",
-							properties: {
-								path: { type: "string", description: "Model file path, relative to the model directory." },
-								heading: { type: "string", description: "Heading the problem sits under, as written." },
-								quote: {
-									type: "string",
-									description: "Short text copied exactly from the note, Markdown included. One sentence at most.",
-								},
-							},
-							required: ["path"],
-						},
+						items: ANCHOR_SCHEMA,
 					},
 				},
 				required: ["problem", "anchors"],
@@ -321,7 +330,8 @@ interface ClaudeResult {
 		status: "succeeded" | "failed";
 		summary: string;
 		changes: string[];
-		questions: Question[];
+		/** Question anchors are checked by `checkAnchors` before anything is shown. */
+		questions: (Omit<Question, "anchors"> & { anchors?: unknown })[];
 		/** Checked by `checkProblems` before anything is shown. */
 		problems: unknown;
 	};
@@ -500,6 +510,10 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
 			// Anchors are only checked against a snapshot that is still the compiled revision.
 			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			for (let i = 0; i < report.questions.length; i++) {
+				const anchors = await checkAnchors(intact ? snapshot : null, structured?.questions?.[i]?.anchors);
+				if (anchors.length > 0) report.questions[i].anchors = anchors;
+			}
 			if (!intact) {
 				report.status = "failed";
 				report.problems.unshift(plainProblem("Claude tried to change the model snapshot. Those changes were thrown away."));

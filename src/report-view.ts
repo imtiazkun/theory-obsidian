@@ -143,7 +143,16 @@ export class CompileReportView extends ItemView {
 			const section = this.section("Questions about the model", report.questions.length);
 			for (const q of report.questions) {
 				const item = section.createDiv({ cls: "theory-report-question" });
-				item.createDiv({ text: q.question });
+				const row = item.createDiv({ cls: "theory-report-question-row" });
+				row.createDiv({ text: q.question });
+				// Reply opens the note at the text the question is about. Engineers answer in the model.
+				const target: Anchor | undefined = q.anchors?.[0] ?? (q.notes[0] ? { path: q.notes[0] } : undefined);
+				if (target) {
+					const reply = row.createEl("button", { cls: "theory-report-reply", text: "Reply" });
+					setIcon(reply.createSpan({ cls: "theory-report-reply-icon" }), "reply");
+					reply.setAttr("aria-label", `Open ${target.path} at the text this question is about`);
+					reply.addEventListener("click", () => this.plugin.overlay.jump(target));
+				}
 				if (q.notes.length === 0) continue;
 				const notes = item.createDiv({ cls: "theory-report-notes" });
 				for (const note of q.notes) {

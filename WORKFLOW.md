@@ -131,7 +131,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
     - `-p --output-format stream-json --verbose --no-session-persistence`
     - `--permission-mode <permissionMode>`
     - `--add-dir <snapshot>`
-    - `--json-schema <REPORT_SCHEMA>` (fields: `status`, `summary`, `changes[]`, `questions[{question, notes[]}]`, `problems[{problem, anchors[{path, heading?, quote?}]}]`)
+    - `--json-schema <REPORT_SCHEMA>` (fields: `status`, `summary`, `changes[]`, `questions[{question, notes[], anchors?[{path, heading?, quote?}]}]`, `problems[{problem, anchors[{path, heading?, quote?}]}]`)
     - `--disallowedTools Edit/Write/NotebookEdit(//<vault>/**)` and the same for `//<snapshot>/**`
     - `--allowedTools <allowedTools>` when it isn't empty
 14. The prompt goes in through stdin (`buildPrompt`). It holds the role, the snapshot path, the list of repos in the project folder, the rules (the model is read-only and is the source of truth; ask questions instead of guessing; only edit the project folder; read and follow each repository's `AGENTS.md` (and `CLAUDE.md`) before changing it; end code commits with the trailer `Model-Revision: <head>`; prefix entries with `[repo]` when there are several repos; failures go in `problems`; set `status: failed` when the code doesn't match; don't build notes with `realized: false`; give model problems `anchors` with a file, heading and exact short quote), then the list of revisions and the diff.
@@ -142,7 +142,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 17. If the CLI couldn't start, `status = failed` and the marker **doesn't move** (it returns early). ENOENT gives "Couldn't find the Claude Code CLI".
 18. Claude has run, so `report.suspectNotes = notes`. If there is structured output, copy it into the report, but keep its `problems` aside for step 21. `status = succeeded` only if Claude said `succeeded` and the result isn't an error. Leading `./` is removed from note paths.
 19. If there is no structured output, `status = failed` and the problems always get "Claude Code exited with code N." and stderr.
-20. **Guard 1:** hash the snapshot again. Then run `checkProblems` on Claude's problems: the text is cut to 2,000 characters, and an anchor is kept only if its path resolves (after following symlinks) to a file inside the snapshot. Its heading and quote are kept only if they appear in that file, and at most 5 anchors are kept per problem. If the snapshot changed, every anchor is dropped, `status = failed`, and the problem "Claude tried to change the model snapshot…" is added.
+20. **Guard 1:** hash the snapshot again. Then run `checkProblems` on Claude's problems: the text is cut to 2,000 characters, and an anchor is kept only if its path resolves (after following symlinks) to a file inside the snapshot. Its heading and quote are kept only if they appear in that file, and at most 5 anchors are kept per problem. If the snapshot changed, every anchor is dropped, `status = failed`, and the problem "Claude tried to change the model snapshot…" is added. Each question's anchors go through the same check (`checkAnchors`); a question keeps `anchors` only when at least one survives.
 21. **Guard 2:** compare the vault's working tree both ways, so a file that was dirty before and is clean after counts too. Any path whose state changed is named in the problems ("revert them"). This doesn't change the status on its own.
 22. Move the marker with `git tag -f theory/compiled head`. This happens on **succeeded and failed** once Claude has run, but not on cancelled or when the CLI couldn't start.
 23. Always: set `finishedAt`, remove the snapshot (`chmod u+w`, then `rm -rf`).
@@ -152,7 +152,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 `cancelCompile()` sends SIGTERM to the Claude process if the report is still running. The result is `cancelled` and the marker stays where it was. Unloading the plugin also cancels.
 
 ### W6. Read the report and answer questions
-The report tab lists reports newest first: status, the commit range `from..to`, revisions, summary, changes, questions (each links to the model notes it names), problems and the tool log ("Activity", folded until opened). Sections with nothing in them are left out. Engineers answer questions by **editing the model, committing and compiling again** (back to W3, then W4). Reports are never written into the vault.
+The report tab lists reports newest first: status, the commit range `from..to`, revisions, summary, changes, questions (each links to the model notes it names and has a **Reply** button that opens the note at the text the question is about: its first checked anchor, else the top of its first note), problems and the tool log ("Activity", folded until opened). Sections with nothing in them are left out. Engineers answer questions by **editing the model, committing and compiling again** (back to W3, then W4). Reports are never written into the vault.
 
 ### W7. Failure overlay (`src/overlay.ts`)
 - **Which report:** the newest finished report, only if it `failed` and isn't `dismissed`. The next successful compile clears the overlay by itself.
