@@ -14,6 +14,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | Model / theoretical model | The Markdown notes and assets in the vault. Humans write them. Read-only for the AI. |
 | `Index.md` | Entry note at the vault root. Opened on app launch. |
 | `instruction.md` / `instructions.md` | File at the vault root with the human-only rules and the writing syntax rules. For humans; not sent to Claude and not required for compile. |
+| Model folder | A folder at the vault root named exactly like a repository in the project folder. Its notes describe that repository only. It has its own `index.md` and `instructions.md`; that `instructions.md` holds rules for Claude about the repository and is sent (only the root one isn't). |
+| Compile branch | `theory/compile-{short hash of the latest revision compiled}` in a code repository. The plugin checks it out before Claude runs; Claude commits there. It stays open until it is merged into its base or its pull request is closed. At most one open per repository. |
 | Project folder | Folder that holds the code. It is one git repo, or a folder whose direct subfolders are git repos. Claude runs here (`cwd`). |
 | Revision | A git commit in the vault repo. |
 | Last compile marker | Git tag `theory/compiled` in the vault repo. It points at the last compiled commit. |
@@ -42,7 +44,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |
 | `src/overlay.ts` | Failure overlay: CodeMirror highlights, the note banner, jump to spot, dismiss |
 | `src/note-status.ts` | Realized box and compile-state icon in each note's header |
-| `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. |
+| `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. Also marks `index.md`/`instructions.md` at the root and directly in a model folder (bold, house or scroll icon) through the explorer's internal `fileItems`. |
 | `src/compile-button.ts` | Floating bottom-right bar: commit button plus compile button with a state and pending count |
 | `src/report-view.ts` | Compile report tab, including permission cards and question suggestions |
 | `src/suggest.ts` | A question's Suggest button: asks Claude Code, with no tools, for ideas on answering it |
@@ -51,6 +53,12 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/commit-message.ts` | The commit modal's sparkle: asks Claude Code, with no tools, for a message from the uncommitted diff |
 | `src/settings.ts` | Settings tab |
 | `src/project.ts` | Finds the git repos in the project folder; native folder picker |
+| `src/branches.ts` | Compile branches: uncommitted-change check, finding the open compile branch, checking out before Claude runs, deleting empty ones after |
+| `src/github.ts` | `gh` and `origin` helpers: login check, pull request create/state/body, remote branches |
+| `src/create-pr-view.ts` | The Create PR page, and which repositories of a report still need a pull request |
+| `src/pr-body.ts` | The Create PR body's sparkle: asks Claude Code, with no tools, for a body from the report |
+| `src/repositories.ts` | Repository KPIs, fetch, Add model folder and New repository steps and file texts |
+| `src/repositories-view.ts` | The Repositories page and the New repository form |
 
 ## 4. Settings
 
@@ -93,7 +101,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 
 ### W1. Plugin load (`onload`)
 1. Load the settings and reports from plugin data. Any report still marked `running` becomes `failed` with the problem "Obsidian closed before this compile finished."
-2. Register the commands `setup-vault`, `show-commit-history`, `compile`, `show-compile-report` and `commit-current-note`, plus a ribbon hammer icon (Compile) and a status bar item.
+2. Register the commands `setup-vault`, `show-commit-history`, `compile`, `show-compile-report`, `commit-current-note` and `show-repositories`, plus a ribbon hammer icon (Compile), a ribbon Repositories icon and a status bar item.
 3. When the layout is ready: open `Index.md` (only on app launch, not when the plugin is turned on mid-session), add the history view to the right sidebar, sync the commit buttons and attach and refresh the compile bar.
 4. Event hooks: vault `modify/create/delete/rename`, workspace `layout-change/file-open` and window `focus` re-sync the buttons and the pending count (debounced).
 
@@ -123,10 +131,13 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 5. `head` = `git rev-parse HEAD`. If there are no commits, it errors.
 6. `from` = the commit the `theory/compiled` tag points to, or `null` if there is no tag.
 7. If `from === head`, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
+7a. Every repository in the project folder must have a clean working tree (`git status --porcelain`), else "These repositories have uncommitted changes: {repos}. Commit or stash them first."
 8. `revisions` = `git log --reverse from..head` (hash, author, ISO date, subject).
 9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes hidden folders, `.obsidian/` and `Instructions.md`.
 10. Snapshot: `git archive head -- <NOT_SENT>` into a new temp folder, extract it, then `chmod -R a-w`.
 11. Record the guards: a SHA-256 hash of the snapshot tree, and the vault's working-tree state (path → mtime, or "deleted").
+11a. Read each repository's model-folder `instructions.md` from the snapshot (matched ignoring case) for the prompt.
+11b. **Compile branches** (`prepareBranches`): in every repository, check out its open compile branch (a `theory/compile-*` branch that still exists, isn't merged into its base, and whose pull request isn't closed or merged, asking `gh` and else the reports), or else create `theory/compile-{head:7}` from the branch checked out now (from the recorded base when the repository sits on a finished compile branch). A detached HEAD or an existing branch of that name stops the compile. On any failure every repository goes back and the snapshot is removed. The plugin does this, never Claude.
 
 **Phase C: run Claude Code**
 12. Make the report `{status: "running", fromCommit, toCommit: head, revisions, …}`, add it to the front of `reports` (keep 20), save, open the report tab and show "Compiling…" in the status bar.
@@ -138,11 +149,12 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
     - `--disallowedTools Edit/Write/NotebookEdit(//<vault>/**)` and the same for `//<snapshot>/**`
     - `--model <model>` and `--effort <effort>` when they aren't empty. They're fixed when Claude Code starts, so a running compile keeps them.
     - `--allowedTools <allowedTools>` when it isn't empty
-14. The prompt goes in through stdin (`buildPrompt`) as a stream-json `user` message, after an `initialize` control request. Stdin stays open for permission answers and is closed when the `result` event arrives. It holds the role, the snapshot path, the list of repos in the project folder, the rules (the model is read-only and is the source of truth; ask questions instead of guessing; only edit the project folder; read and follow each repository's `AGENTS.md` (and `CLAUDE.md`) before changing it; end code commits with the trailer `Model-Revision: <head>`; prefix entries with `[repo]` when there are several repos; failures go in `problems`; set `status: failed` when the code doesn't match; don't build notes with `realized: false`; give model problems `anchors` with a file, heading and exact short quote), then the list of revisions and the diff.
+14. The prompt goes in through stdin (`buildPrompt`) as a stream-json `user` message, after an `initialize` control request. Stdin stays open for permission answers and is closed when the `result` event arrives. It holds the role, the snapshot path, the list of repos in the project folder with the compile branch checked out in each, the rules (the model is read-only and is the source of truth; ask questions instead of guessing; only edit the project folder; read and follow each repository's `AGENTS.md` (and `CLAUDE.md`) before changing it; root notes describe the whole system and a model folder's notes describe that repository only; also follow the model folder's `instructions.md`, which wins over `AGENTS.md`; commit on the checked-out branch and never create, switch, merge or push branches; end code commits with the trailer `Model-Revision: <head>`; prefix entries with `[repo]` when there are several repos; failures go in `problems`; set `status: failed` when the code doesn't match; don't build notes with `realized: false`; give model problems `anchors` with a file, heading and exact short quote), then each model folder's `instructions.md`, then the list of revisions and the diff.
 15. Stream: each `assistant` `tool_use` block (except `StructuredOutput`) becomes a log line (`Tool: detail`, last 500 kept, shown live). The `result` event holds `structured_output`.
 15a. **Permission requests.** A tool call the settings don't allow arrives as a `control_request` with subtype `can_use_tool`; it's never refused without asking. An Edit/Write/NotebookEdit/MultiEdit on a file inside the vault or the snapshot is denied at once, with no card. Anything else becomes a `PermissionRequest` (tool, the exact command or file, Claude's reason: the tool's `description`, else `decision_reason`) shown as a card in Activity, on the log line where Claude asked (`PermissionRequest.line`, kept in step as old lines drop off), with a Notice. While a card waits, Activity is open and scrolled to the oldest card. The Deny button counts down the time left, from "Deny (2:00)" to "Deny (0:00)". Each card has its own 120-second timer and is answered on its own: **Allow** (allow once), **Always allow** (allow, add the request's rules (`PermissionRequest.rules`) to the session through `updatedPermissions`, and append them to the `allowedTools` setting; the rules follow CFG-16: for a command, every rule Claude Code suggests for Bash in the request's `permission_suggestions`, e.g. `Bash(npm run:*)` (a compound command like `cd app && npm test` may get one per part, and all are added), else the exact command, e.g. `Bash(npm run build)`; for a file tool (Edit, Write, NotebookEdit, MultiEdit), that tool on that exact absolute file, e.g. `Edit(//Users/me/.zshrc)`, never the bare tool name or Claude Code's suggestion, and no Always allow button when the request names no file; for any other tool, Claude Code's suggestion, else the tool's name; the card shows every rule before the click; they go at the end of the list and none is ever added twice) or **Deny**. No answer in 120 seconds denies it. Once answered, the card's line becomes "Allowed: {command}", "Always allowed: {command}", "Denied: {command}" or "Timed out: {command}" and is saved with the report's log. Every denial, timeout and blocked model write is added to the report's problems after Claude's own, naming the command. Cancel, plugin unload and Claude Code exiting deny every open request. A `control_cancel_request` withdraws the request: its timer stops and its card becomes "Withdrawn: {command}", kept in the log but not a problem, because nobody refused it.
 
 **Phase D: finish** (`done` promise)
+15b. Whatever the outcome (`finishBranches`): record each repository's compile branch, base and the commits this compile added in `report.branches`. A branch this compile created that got no commits is deleted and its repository goes back to its base. A branch with commits stays checked out. Compile never pushes.
 16. If cancelled, `status = cancelled` and the marker **doesn't move**.
 17. If the CLI couldn't start, `status = failed` and the marker **doesn't move** (it returns early). ENOENT gives "Couldn't find the Claude Code CLI".
 18. Claude has run, so `report.suspectNotes = notes`. If there is structured output, copy it into the report, but keep its `problems` aside for step 21. `status = succeeded` only if Claude said `succeeded` and the result isn't an error. Leading `./` is removed from note paths.
@@ -180,6 +192,19 @@ Engineers answer questions by **editing the model, committing and compiling agai
 ### W9. Commit history view
 The right sidebar shows `git log --follow` for the active note (author, relative time, subject) and marks uncommitted changes.
 
+### W11. Create PR (`src/create-pr-view.ts`)
+- **Button:** a finished report shows Create PR beside its status when one of its kept compile branches is still open, has commits not in its base, and has no pull request in any report yet. Worked out from git and `gh` once per report while the report tab is open.
+- **Page:** opens in a new tab. A shared Title (the latest compiled revision's subject) and Body (empty), and one section per such repository: name, `branch → base`, its commits, Base (the `origin/*` branches git knows), Draft (off), Reviewers (comma-separated, empty) and "Use the shared title and body" (on; off shows its own Title and Body, filled from the shared ones). A repository without a GitHub `origin`, or no logged-in `gh`, shows why and is left out.
+- **Sparkle:** each Body box runs `claude -p --output-format json --tools "" --strict-mcp-config` in the temp folder with the model and effort from the settings. Claude gets the summary, the revisions, the open problems and questions, and the changes for that repository (all of them for the shared Body). The answer replaces the box.
+- **Create:** for each ready section, `git push -u origin <branch>`, then `gh pr create --head --base --title --body [--draft] [--reviewer]`. The pull request goes into `report.pullRequests` (repository, branch, base, url, state). A failure shows "Couldn't create the pull request: {reason}" and keeps the fields. Once every ready section has one, each body gets a footer (after `<!-- theory.md compile -->`, replaced on a second run) listing the vault revisions (linked when the vault has a GitHub `origin`) and the other repositories' pull requests.
+- **State:** the report lists its pull requests with their state (draft, open, merged, closed), refreshed with `gh pr view` when the report opens. Pull requests never move the marker. The page's text goes only to GitHub, never into the vault, and closing the page discards it.
+
+### W12. Repositories page (`src/repositories-view.ts`)
+- **Opens** from the ribbon or "Show repositories", in a tab. One card per repository in the project folder, sorted by name; clicking the name opens the model folder's `index.md`. No project folder: a message and an Open settings button. A single-repository project folder: a message, and New repository is disabled. None: "No repositories yet. Create one to start."
+- **KPIs** (worked out each time, never stored): Code (branch, last commit when and who, uncommitted files), Compile (the newest report that added commits to it, or "Never compiled", and its open compile branch with the recorded pull request state), Model (notes in its model folder, how many are `realized: false`, how many are waiting for a compile), Remote (the GitHub `origin` link and ahead/behind `origin/<branch>`, or "No remote"). Opening never fetches or asks GitHub; the Refresh action runs `git fetch` in every repository first.
+- **Add model folder:** for a repository without one, writes `index.md` ("Manifesting {name}") and `instructions.md` (the line pointing at the root Instructions) and commits only those two as "Add model folder for {name}".
+- **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
+
 ### W10. Compile history view
 A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do.
 
@@ -194,6 +219,7 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 7. **Failure overlays are display only.** They are built from checked anchors, set with `setText` or as attributes (never as HTML or Markdown), and only stored in plugin data.
 8. **Claude's text never goes into a note.** Not from a compile, not from a suggestion. Accept on a suggestion only copies it to the clipboard; the engineer writes the note.
 9. **Code commits link back to the model** through the `Model-Revision: <vault commit>` trailer. Claude adds it because the prompt tells it to.
+10. **Every compile lands on a compile branch,** checked out by the plugin, never by Claude. Compile never pushes; only Create PR does. A compile never starts on a repository with uncommitted changes.
 
 ## 8. Failure and outcome table
 
@@ -204,6 +230,8 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 | No project folder, or it doesn't exist | startCompile | No | "Compile failed: …" |
 | No commits in the vault | startCompile | No | "The vault has no commits yet…" |
 | Nothing new since the marker | startCompile | No | "Every committed revision is already compiled." |
+| A repository has uncommitted changes | startCompile | No | "Compile failed: These repositories have uncommitted changes: …" |
+| A compile branch can't be checked out | startCompile | No | "Compile failed: …", every repository back where it was |
 | CLI not found or can't start | done | No | Failed report: "Couldn't find the Claude Code CLI" |
 | Claude reports `failed`, or there is no structured output | done | Yes | Failed report with problems |
 | Snapshot changed | done | Yes | Failed, "Claude tried to change the model snapshot" |

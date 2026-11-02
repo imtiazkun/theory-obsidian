@@ -1,7 +1,9 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { basename } from "path";
+import type { PullRequestState } from "./github";
 import { timeAgo } from "./history-view";
 import type TheoryPlugin from "./main";
-import { STATUS_ICON, STATUS_TEXT } from "./report-view";
+import { PR_STATE_TEXT, STATUS_ICON, STATUS_TEXT } from "./report-view";
 
 export const COMPILE_HISTORY_VIEW_TYPE = "theory-compile-history";
 
@@ -62,6 +64,25 @@ export class CompileHistoryView extends ItemView {
 			meta.createSpan({
 				text: report.tokens === undefined ? "tokens unknown" : `${count.format(report.tokens)} tokens`,
 			});
+
+			// The state of its pull requests, one per repository when there are several.
+			const prs = report.pullRequests ?? [];
+			const repos = new Map<string, PullRequestState | null>();
+			for (const b of report.branches ?? []) if (b.kept && b.commits.length > 0) repos.set(b.repoPath, null);
+			for (const pr of prs) repos.set(pr.repoPath, pr.state);
+			const states = item.createDiv({ cls: "theory-history-meta theory-compile-history-prs" });
+			const state = (value: PullRequestState | null) =>
+				states.createSpan({ cls: `theory-pr-state is-${value ?? "none"}`, text: value ? PR_STATE_TEXT[value] : "None" });
+			if (repos.size <= 1) {
+				states.appendText("Pull request: ");
+				state([...repos.values()][0] ?? null);
+			} else {
+				[...repos].forEach(([path, value], i) => {
+					if (i > 0) states.appendText(" · ");
+					states.appendText(`${basename(path)}: `);
+					state(value);
+				});
+			}
 		}
 	}
 }

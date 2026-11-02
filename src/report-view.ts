@@ -8,6 +8,8 @@ import {
 	type PermissionRequest,
 	type Question,
 } from "./compile";
+import { pullRequestCandidates } from "./create-pr-view";
+import type { PullRequestState } from "./github";
 import type TheoryPlugin from "./main";
 import { startSuggest, type SuggestRun } from "./suggest";
 
@@ -25,6 +27,13 @@ export const STATUS_ICON:Record<CompileStatus, string> = {
 	succeeded: "check-circle",
 	failed: "alert-triangle",
 	cancelled: "x-circle",
+};
+
+export const PR_STATE_TEXT: Record<PullRequestState, string> = {
+	draft: "Draft",
+	open: "Open",
+	merged: "Merged",
+	closed: "Closed",
 };
 
 function shortHash(hash: string | null): string {
@@ -52,6 +61,10 @@ export class CompileReportView extends ItemView {
 	private countdowns: { el: HTMLElement; expiresAt: number }[] = [];
 	// Suggestions on screen, keyed by report id and question index. Closing the report discards them.
 	private suggestions = new Map<string, SuggestionState>();
+	// How many repositories of each finished report still need a pull request, worked out from git and gh.
+	private candidates = new Map<string, number>();
+	// Reports whose pull request states were refreshed since the report opened.
+	private refreshedStates = new Set<string>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -75,7 +88,15 @@ export class CompileReportView extends ItemView {
 		this.refresh();
 	}
 
+	/** Forgets which reports need a pull request, e.g. after one was created, so the next draw looks again. */
+	forgetPullRequests() {
+		this.candidates.clear();
+		this.refresh();
+	}
+
 	async onClose() {
+		this.refreshedStates.clear();
+		this.candidates.clear();
 		for (const s of this.suggestions.values()) if (s.state === "running") s.run.cancel();
 		this.suggestions.clear();
 	}
@@ -131,6 +152,7 @@ export class CompileReportView extends ItemView {
 			return;
 		}
 		this.renderReport(report);
+		this.checkPullRequests(report);
 		if (editing?.key) {
 			const box = contentEl.querySelector<HTMLTextAreaElement>(`textarea[data-suggestion="${editing.key}"]`);
 			box?.focus();
@@ -157,8 +179,24 @@ export class CompileReportView extends ItemView {
 				.createEl("button", { cls: "theory-report-cancel", text: "Clear highlights" })
 				.addEventListener("click", () => this.plugin.overlay.dismiss());
 		}
+		// Shown when a repository has an open compile branch with commits and no pull request yet.
+		if (report.status !== "running" && (this.candidates.get(report.id) ?? 0) > 0) {
+			const create = header.createEl("button", { cls: "theory-report-cancel theory-report-create-pr", text: "Create PR" });
+			setIcon(create.createSpan({ cls: "theory-report-reply-icon" }), "git-pull-request");
+			create.addEventListener("click", () => this.plugin.openCreatePullRequests(report.id));
+		}
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
+
+		if (report.pullRequests?.length) {
+			const section = this.section("Pull requests", report.pullRequests.length);
+			for (const pr of report.pullRequests) {
+				const item = section.createDiv({ cls: "theory-report-pr" });
+				item.createSpan({ cls: "theory-report-pr-repo", text: pr.repo });
+				item.createEl("a", { text: pr.url, href: pr.url });
+				item.createSpan({ cls: `theory-pr-state is-${pr.state}`, text: PR_STATE_TEXT[pr.state] });
+			}
+		}
 
 		if (report.problems.length > 0) {
 			const section = this.section("Problems", report.problems.length);
@@ -259,6 +297,23 @@ export class CompileReportView extends ItemView {
 		// Scrolled to the oldest waiting card.
 		const [card] = cards;
 		if (card) window.requestAnimationFrame(() => card.scrollIntoView({ block: "nearest" }));
+	}
+
+	/**
+	 * Works out, once per report on screen, whether Create PR shows, and refreshes the state of its pull
+	 * requests once after the report opens. Both need git and gh, so they redraw when done.
+	 */
+	private async checkPullRequests(report: CompileReport) {
+		if (report.status === "running") return;
+		if (!this.refreshedStates.has(report.id)) {
+			this.refreshedStates.add(report.id);
+			if (report.pullRequests?.length) this.plugin.refreshPullRequestStates(report);
+		}
+		if (this.candidates.has(report.id)) return;
+		this.candidates.set(report.id, 0);
+		const found = await pullRequestCandidates(report, this.plugin.reports).catch(() => []);
+		this.candidates.set(report.id, found.length);
+		if (found.length > 0) this.refresh();
 	}
 
 	/** Suggest asks Claude for ideas on answering the question. One question has at most one suggestion at a time. */

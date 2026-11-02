@@ -69,7 +69,7 @@ async function ensureGitignore(basePath: string) {
  * Git `-c` arguments that sign commits as the author from theory.md settings,
  * falling back to git's own config. Throws when neither has a name or email.
  */
-async function identityArgs(basePath: string, author: Author): Promise<string[]> {
+export async function identityArgs(basePath: string, author: Author): Promise<string[]> {
 	if (!author.fullName && !(await hasGitConfig(basePath, "user.name"))) {
 		throw new Error("Set your full name in theory.md settings first.");
 	}

@@ -17,7 +17,10 @@ import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
-import { HiddenFolders } from "./explorer";
+import { EntryFiles, HiddenFolders } from "./explorer";
+import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
+import { pullRequestState } from "./github";
+import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
 import { authorName, changedFiles, commit, isVaultSetUp, setUpVault } from "./vault";
 
@@ -36,6 +39,7 @@ export default class TheoryPlugin extends Plugin {
 	overlay = new FailureOverlay(this);
 	private noteStatus = new NoteStatus(this);
 	private hiddenFolders = new HiddenFolders(this);
+	private entryFiles = new EntryFiles(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	private statusBar: HTMLElement | null = null;
@@ -69,6 +73,14 @@ export default class TheoryPlugin extends Plugin {
 			callback: () => this.showReportView(),
 		});
 		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
+		this.registerView(CREATE_PR_VIEW_TYPE, (leaf) => new CreatePullRequestView(leaf, this));
+		this.registerView(REPOSITORIES_VIEW_TYPE, (leaf) => new RepositoriesView(leaf, this));
+		this.addCommand({
+			id: "show-repositories",
+			name: "Show repositories",
+			callback: () => this.showRepositories(),
+		});
+		this.addRibbonIcon("folder-git-2", "Show repositories", () => this.showRepositories());
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
@@ -85,9 +97,15 @@ export default class TheoryPlugin extends Plugin {
 			this.overlay.sync();
 			await this.noteStatus.sync();
 			this.hiddenFolders.attach();
+			this.entryFiles.sync();
 		});
-		// A file explorer opened later gets the same sorting.
+		// A file explorer opened later gets the same sorting and the same entry files.
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.hiddenFolders.attach()));
+		const syncEntryFiles = debounce(() => this.entryFiles.sync(), 200, true);
+		this.registerEvent(this.app.workspace.on("layout-change", syncEntryFiles));
+		for (const event of ["create", "delete", "rename"] as const) {
+			this.registerEvent(this.app.vault.on(event as "create", syncEntryFiles));
+		}
 
 		const syncStatus = () => this.noteStatus.sync();
 		const syncStatusSoon = debounce(syncStatus, 800, true);
@@ -131,6 +149,7 @@ export default class TheoryPlugin extends Plugin {
 		this.overlay.removeAll();
 		this.noteStatus.removeAll();
 		this.hiddenFolders.detach();
+		this.entryFiles.detach();
 		this.compileRun?.cancel();
 	}
 
@@ -177,6 +196,7 @@ export default class TheoryPlugin extends Plugin {
 					model,
 					effort,
 					author,
+					reports: this.reports,
 					onPermissionRequest: (request) => {
 						new Notice(`Claude is asking to use ${request.tool}. Answer in the compile report.`);
 						this.showReportView();
@@ -209,7 +229,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileRun = null;
 		this.statusBar?.hide();
 		await this.saveSettings();
-		this.refreshReportViews();
+		this.pullRequestsChanged();
 		this.compileButton.refresh();
 		this.overlay.sync();
 		this.noteStatus.sync();
@@ -272,6 +292,45 @@ export default class TheoryPlugin extends Plugin {
 	async showReport(id: string) {
 		await this.showReportView();
 		for (const view of this.reportViews()) view.show(id);
+	}
+
+	/** Opens the Create PR page for one compile in a new tab. */
+	async openCreatePullRequests(reportId: string) {
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.setViewState({ type: CREATE_PR_VIEW_TYPE, active: true, state: { reportId } });
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Redraws everything that shows pull requests or compile branches, after they changed. */
+	pullRequestsChanged() {
+		for (const view of this.reportViews()) view.forgetPullRequests();
+		this.refreshReportViews();
+	}
+
+	/** Asks GitHub for the state of each of the report's pull requests and saves what changed. */
+	async refreshPullRequestStates(report: CompileReport) {
+		let changed = false;
+		for (const pr of report.pullRequests ?? []) {
+			const state = await pullRequestState(pr.repoPath, pr.url).catch(() => null);
+			if (state && state !== pr.state) {
+				pr.state = state;
+				changed = true;
+			}
+		}
+		if (!changed) return;
+		await this.saveSettings();
+		this.pullRequestsChanged();
+	}
+
+	/** Opens the Repositories page in a main tab, reusing it if it's already open. */
+	async showRepositories() {
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({ type: REPOSITORIES_VIEW_TYPE, active: true });
+		}
+		await workspace.revealLeaf(leaf);
 	}
 
 	private reportViews(): CompileReportView[] {
@@ -431,6 +490,8 @@ export default class TheoryPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData({ ...this.settings, reports: this.reports });
 		this.compileButton.refresh();
+		// The project folder decides which folders are model folders.
+		this.entryFiles.sync();
 	}
 
 	getVaultPath(): string {

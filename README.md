@@ -72,6 +72,10 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
 | Realized box and compile state in each note's header | Done |
 | Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
+| Compile branches: every compile commits on `theory/compile-{revision}`, at most one open per repository; empty ones are deleted | Done |
+| Create PR: push the compile branches and open pull requests with `gh`, with a sparkle to write the body; the report and compile history show their state | Done |
+| Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
+| Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
 ## Install for development
@@ -114,6 +118,7 @@ Use `npm run dev` to rebuild on every change.
 
 - **What gets compiled.** Only committed revisions. Uncommitted edits are left out, and theory.md says how many when you click Compile.
 - **Last compile marker.** theory.md records the last compile in two places. In the vault repo, it moves the `theory/compiled` git tag to the compiled commit, so nothing is written into the notes. Once there is a server, the tag will be pushed so every engineer sees the same marker. In the code repositories, the commit message of each compile names the vault commit it was built from.
+- **Compile branches.** Before Claude runs, theory.md checks out a compile branch in every repository: the open one, or a new `theory/compile-{revision}` from the branch you're on. Claude commits there. A new branch that got no commits is deleted afterwards. Compile refuses to start while a repository has uncommitted changes, and it never pushes: **Create PR** in the report does.
 - **One compile at a time.** While a compile runs, clicking Compile again only tells you one is already running. For now the lock lives inside the app. With a server it will move to the shared remote, so a second engineer waits too.
 - **Failures.** The marker moves forward even when a compile fails. It doesn't move when you cancel, or when Compile can't start (no project folder, CLI not found). The failure is logged in the compile report, and the next compile only takes revisions committed after it. Re-applying a failed revision is a human decision.
 - **Questions back from Claude.** When the model is unclear or contradicts itself, Claude lists its questions in a compile report that theory.md shows in Obsidian. Each question links to the notes it refers to, and its **Reply** button opens the note at the rule that needs updating, else at its heading, else at the top of the note. Reports are kept in the plugin's own data file (`.obsidian/plugins/theory-md/data.json`, which git ignores), not in the model, so the model stays human-only. The last 20 are kept. Engineers answer by editing the model and compiling again.

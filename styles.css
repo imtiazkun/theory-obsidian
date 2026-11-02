@@ -725,3 +725,153 @@ body button.theory-compile-fab.is-ready:hover {
 .nav-folder:has(> .nav-folder-title:is([data-path^="_"], [data-path*="/_"])) .tree-item-self:not(:hover, .is-active) {
 	color: var(--text-faint);
 }
+
+/* index.md and instructions.md at the root and in each model folder, marked by explorer.ts. */
+
+.theory-entry-file .nav-file-title-content,
+.theory-entry-file .tree-item-inner {
+	font-weight: var(--font-bold);
+}
+
+.theory-entry-icon {
+	display: flex;
+	align-items: center;
+	margin-right: var(--size-4-1);
+	color: var(--text-muted);
+}
+
+.theory-entry-icon svg {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+}
+
+/* Pull request states, in the report, the compile history and the Repositories page. */
+
+.theory-pr-state {
+	font-weight: var(--font-semibold);
+}
+
+.theory-pr-state.is-open {
+	color: var(--text-success);
+}
+
+.theory-pr-state.is-merged {
+	color: var(--color-purple);
+}
+
+.theory-pr-state.is-closed {
+	color: var(--text-error);
+}
+
+.theory-pr-state.is-draft,
+.theory-pr-state.is-none {
+	color: var(--text-muted);
+}
+
+.theory-report-pr {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-1);
+}
+
+.theory-report-pr-repo {
+	font-weight: var(--font-semibold);
+}
+
+/* Create PR page. */
+
+.theory-create-pr {
+	max-width: 52em;
+}
+
+.theory-create-pr-title {
+	width: 100%;
+	margin-bottom: var(--size-4-2);
+}
+
+.theory-create-pr-body {
+	min-height: 10em;
+}
+
+.theory-create-pr-section {
+	margin-top: var(--size-4-6);
+	padding: var(--size-4-3) var(--size-4-4);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.theory-create-pr-header {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+}
+
+.theory-create-pr-icon {
+	display: flex;
+	color: var(--text-muted);
+}
+
+.theory-create-pr-repo {
+	font-weight: var(--font-semibold);
+}
+
+.theory-create-pr-commits {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.theory-create-pr-blocked {
+	color: var(--text-warning);
+}
+
+.theory-create-pr-error,
+.theory-new-repo-error {
+	color: var(--text-error);
+	margin-top: var(--size-4-2);
+}
+
+.theory-create-pr-footer {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: var(--size-4-6);
+}
+
+/* Repositories page. */
+
+.theory-repo-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(22em, 1fr));
+	gap: var(--size-4-4);
+}
+
+.theory-repo-card {
+	padding: var(--size-4-3) var(--size-4-4);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.theory-repo-title {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	font-size: var(--font-ui-medium);
+	font-weight: var(--font-semibold);
+}
+
+.theory-repo-icon {
+	display: flex;
+	color: var(--text-muted);
+}
+
+.theory-repo-group {
+	margin-top: var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+.theory-repo-group-title {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+}

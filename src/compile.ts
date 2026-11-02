@@ -3,8 +3,10 @@ import { createHash } from "crypto";
 import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
-import { isAbsolute, join, relative, resolve, sep } from "path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
+import { CompileBranch, PreparedBranch, dirtyRepos, finishBranches, prepareBranches, undoBranches } from "./branches";
+import type { PullRequest } from "./github";
 import { findProjectRepos } from "./project";
 import { TOOL_PATH, git } from "./vault";
 
@@ -71,6 +73,8 @@ export interface CompileOptions {
 	effort: CompileEffort;
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
+	/** Earlier reports, newest first. They hold each compile branch's base and pull request. */
+	reports: CompileReport[];
 	/** Called when Claude asks for a tool call the settings don't allow. */
 	onPermissionRequest?: (request: PermissionRequest) => void;
 }
@@ -115,6 +119,10 @@ export interface CompileReport {
 	author?: string;
 	/** Every token Claude Code counted in this compile: input, output and cache. Unset when it never reported usage. */
 	tokens?: number;
+	/** Each repository's compile branch, its base and the commits this compile added. Set once Claude has finished. */
+	branches?: CompileBranch[];
+	/** Pull requests opened from this report with Create PR. */
+	pullRequests?: PullRequest[];
 }
 
 /** How many committed revisions are waiting to be compiled. */
@@ -292,6 +300,16 @@ function runTool(command: string, args: string[]): Promise<void> {
 	});
 }
 
+/** The `instructions.md` in a repository's model folder, matched ignoring case, or null when it has none. */
+async function modelInstructions(snapshot: string, repo: string): Promise<{ path: string; text: string } | null> {
+	const folder = join(snapshot, repo);
+	const entries = await readdir(folder).catch(() => [] as string[]);
+	const name = entries.find((entry) => entry.toLowerCase() === "instructions.md");
+	if (!name) return null;
+	const text = await readFile(join(folder, name), "utf8").catch(() => null);
+	return text === null ? null : { path: `${repo}/${name}`, text };
+}
+
 function buildPrompt(params: {
 	snapshot: string;
 	projectFolder: string;
@@ -299,15 +317,24 @@ function buildPrompt(params: {
 	from: string | null;
 	revisions: Revision[];
 	diff: string;
+	branches: PreparedBranch[];
+	instructions: { repo: string; path: string; text: string }[];
 }): string {
-	const { snapshot, projectFolder, head, from, revisions, diff } = params;
+	const { snapshot, projectFolder, head, from, revisions, diff, branches, instructions } = params;
 	const found = findProjectRepos(projectFolder);
+	const branchOf = (path: string) => {
+		const branch = branches.find((b) => b.path === path)?.branch;
+		return branch ? ` (checked out on branch ${branch})` : "";
+	};
 	const repoList =
 		found.kind === "root"
-			? "The project folder is a single git repository."
+			? `The project folder is a single git repository${branchOf(projectFolder)}.`
 			: found.kind === "children"
-				? `Git repositories in the project folder:\n${found.repos.map((repo) => `- ${relative(projectFolder, repo)}`).join("\n")}`
+				? `Git repositories in the project folder:\n${found.repos.map((repo) => `- ${relative(projectFolder, repo)}${branchOf(repo)}`).join("\n")}`
 				: "The project folder has no git repositories yet.";
+	const instructionList = instructions
+		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
+		.join("\n\n");
 	const revisionList = revisions
 		.map((r) => `- ${r.hash.slice(0, 7)} ${r.date} ${r.author}: ${r.subject}`)
 		.join("\n");
@@ -326,12 +353,15 @@ Rules:
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
 - Only change files inside the project folder.
 - Before changing a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and follow its rules, including how to test.
+- Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
+- Before changing a repository, also read \`instructions.md\` in that repository's folder in the model directory and follow it. When it disagrees with AGENTS.md, the model's \`instructions.md\` wins, because the model is the source of truth.
 - When you commit in a code repository, end each commit message with the trailer \`Model-Revision: ${head}\`.
 - When the project has several repositories, start each entry in \`changes\` and \`problems\` with the repository name in brackets, e.g. "[mobile] ...".
 - Put anything that went wrong (steps you couldn't do) in \`problems\`.
 - When a problem comes from something in the model, give it \`anchors\`: the model file, the heading it sits under, and a short quote copied exactly from the note (under 200 characters). Engineers see these as highlights in the note. Leave \`anchors\` empty when the problem isn't about the model.
 - Set \`status\` to "failed" if the code doesn't match the model at the end.
-
+- Commit on the branch that is checked out in each repository. Never create, switch, merge or push branches.
+${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}
 ## Revisions since the last compile
 
 ${from ? `Last compiled revision: ${from}` : "This is the first compile, so the whole model is new."}
@@ -464,6 +494,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const head = await headCommit(vaultPath);
 	const from = await tagCommit(vaultPath);
 	if (from === head) throw new NothingToCompileError("Every committed revision is already compiled.");
+	// The engineer's unfinished work must never end up on a compile branch.
+	const dirty = await dirtyRepos(projectFolder);
+	if (dirty.length > 0) {
+		throw new Error(`These repositories have uncommitted changes: ${dirty.join(", ")}. Commit or stash them first.`);
+	}
 
 	const revisions = await revisionsBetween(vaultPath, from, head);
 	const diff = await modelDiff(vaultPath, from, head);
@@ -472,6 +507,24 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 
 	const snapshotHash = await hashTree(snapshot);
 	const vaultBefore = await workingTreeState(vaultPath);
+
+	const instructions: { repo: string; path: string; text: string }[] = [];
+	const found = findProjectRepos(projectFolder);
+	if (found.kind === "root" || found.kind === "children") {
+		for (const repo of found.repos) {
+			const name = relative(projectFolder, repo) || basename(repo);
+			const file = await modelInstructions(snapshot, name);
+			if (file) instructions.push({ repo: name, ...file });
+		}
+	}
+	// The plugin, never Claude, puts every repository on a compile branch before Claude runs.
+	let branches: PreparedBranch[];
+	try {
+		branches = await prepareBranches(projectFolder, head, options.reports);
+	} catch (error) {
+		await removeSnapshot(snapshot);
+		throw error;
+	}
 
 	const report: CompileReport = {
 		id: `${Date.now()}`,
@@ -484,7 +537,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		changes: [],
 		questions: [],
 		problems: [],
-		log: [],
+		log: branches.map((b) => `Checked out ${b.branch} in ${b.name}${b.created ? ` (new, from ${b.base})` : ""}`),
 		author: options.author,
 	};
 
@@ -525,6 +578,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			env: { ...process.env, PATH: TOOL_PATH },
 		});
 	} catch (error) {
+		await undoBranches(branches);
 		await removeSnapshot(snapshot);
 		throw error;
 	}
@@ -708,7 +762,10 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			// Keeps the prompt out of the argument list, which has a size limit.
 			send({
 				type: "user",
-				message: { role: "user", content: buildPrompt({ snapshot, projectFolder, head, from, revisions, diff }) },
+				message: {
+					role: "user",
+					content: buildPrompt({ snapshot, projectFolder, head, from, revisions, diff, branches, instructions }),
+				},
 				parent_tool_use_id: null,
 				session_id: "",
 			});
@@ -718,6 +775,14 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const done = (async () => {
 		const { result, code, error, stderr } = await claudeDone;
 		try {
+			// Whatever the outcome, a new branch without commits goes, and its repository goes back to its base.
+			report.branches = await finishBranches(branches);
+			for (const b of report.branches) {
+				if (!b.kept) log(`Deleted ${b.branch} in ${b.repo}, which got no commits, and checked out ${b.base}`);
+			}
+			// Uncommitted work would block the next compile, so the engineer must hear about it.
+			const left = await dirtyRepos(projectFolder).catch(() => []);
+			if (left.length > 0) skipped.push(`These repositories have uncommitted changes after the compile: ${left.join(", ")}.`);
 			if (cancelled) {
 				report.status = "cancelled";
 				report.summary = "You cancelled this compile. The last compile marker didn't move.";
