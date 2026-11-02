@@ -353,13 +353,6 @@
 	color: var(--interactive-accent);
 }
 
-.theory-permission-countdown {
-	margin-left: auto;
-	color: var(--text-muted);
-	font-size: var(--font-ui-small);
-	font-weight: normal;
-}
-
 .theory-permission-target {
 	margin: var(--size-4-2) 0;
 	white-space: pre-wrap;
@@ -422,12 +415,20 @@
 	margin-top: var(--size-4-6);
 }
 
-.theory-report-log pre {
+.theory-report-log-lines {
 	max-height: 320px;
 	overflow: auto;
+}
+
+.theory-report-log-lines > pre {
+	margin: 0;
 	font-size: var(--font-ui-smaller);
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+.theory-report-log-lines > .theory-permission-card {
+	margin: var(--size-4-2) 0;
 }
 
 /* Floating action bar, bottom right of the editor area: commit and compile.

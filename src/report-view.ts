@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
-import type { CompileReport, CompileStatus, PermissionAnswer } from "./compile";
+import type { CompileReport, CompileStatus, PermissionAnswer, PermissionRequest } from "./compile";
 import type TheoryPlugin from "./main";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -29,7 +29,7 @@ export class CompileReportView extends ItemView {
 	// The report on screen; null follows the newest one.
 	private selectedId: string | null = null;
 	private activityOpen = false;
-	// Time left on the permission cards on screen.
+	// Deny buttons on the permission cards on screen, with the time each request is denied by itself.
 	private countdowns: { el: HTMLElement; expiresAt: number }[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
@@ -121,8 +121,6 @@ export class CompileReportView extends ItemView {
 				.addEventListener("click", () => this.plugin.overlay.dismiss());
 		}
 
-		if (report.status === "running") this.permissionCards();
-
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
 
 		if (report.problems.length > 0) {
@@ -188,49 +186,68 @@ export class CompileReportView extends ItemView {
 		}
 
 		if (report.log.length === 0 && report.status !== "running") return;
-		// Folded until the engineer opens it, and kept that way as new lines arrive.
+		// Waiting permission requests show as cards on their own line of the log.
+		const waiting = report.status === "running" ? this.plugin.permissionRequests() : [];
+		const cardAt = new Map(waiting.map((request) => [request.line, request]));
+		// Folded until the engineer opens it, and kept that way as new lines arrive. Open while a card waits.
 		const details = contentEl.createEl("details", { cls: "theory-report-log" });
-		details.open = this.activityOpen;
-		details.addEventListener("toggle", () => (this.activityOpen = details.open));
+		details.open = this.activityOpen || waiting.length > 0;
+		details.addEventListener("toggle", () => {
+			if (waiting.length === 0) this.activityOpen = details.open;
+		});
 		details.createEl("summary", { text: `Activity (${report.log.length})` });
-		const log = details.createEl("pre");
-		log.setText(report.log.length > 0 ? report.log.join("\n") : "Waiting for Claude…");
-	}
-
-	/** One card per waiting permission request, each answered on its own. */
-	private permissionCards() {
-		const requests = this.plugin.permissionRequests();
-		if (requests.length === 0) return;
-		const section = this.section("Claude is asking", requests.length);
-		for (const request of requests) {
-			const card = section.createDiv({ cls: "theory-permission-card" });
-			const title = card.createDiv({ cls: "theory-permission-title" });
-			setIcon(title.createSpan({ cls: "theory-permission-icon" }), "shield-question");
-			title.createSpan({ text: request.tool });
-			const countdown = title.createSpan({ cls: "theory-permission-countdown" });
-			this.countdowns.push({ el: countdown, expiresAt: request.expiresAt });
-			card.createEl("pre", { cls: "theory-permission-target", text: request.target });
-			card.createDiv({ cls: "theory-report-meta", text: request.reason });
-			const buttons = card.createDiv({ cls: "theory-permission-buttons" });
-			const choices: [PermissionAnswer, string][] = [
-				["allow", "Allow"],
-				["always", "Always allow"],
-				["deny", "Deny"],
-			];
-			for (const [answer, text] of choices) {
-				const button = buttons.createEl("button", { text, cls: answer === "allow" ? "mod-cta" : "" });
-				if (answer === "always") button.setAttr("title", `Also adds ${request.rule} to Allowed commands`);
-				button.addEventListener("click", () => this.plugin.answerPermission(request.id, answer));
+		const lines = details.createDiv({ cls: "theory-report-log-lines" });
+		if (report.log.length === 0) lines.createEl("pre", { text: "Waiting for Claude…" });
+		let chunk: string[] = [];
+		const flush = () => {
+			if (chunk.length > 0) lines.createEl("pre", { text: chunk.join("\n") });
+			chunk = [];
+		};
+		const cards: HTMLElement[] = [];
+		report.log.forEach((line, index) => {
+			const request = cardAt.get(index);
+			if (!request) {
+				chunk.push(line);
+				return;
 			}
-		}
+			flush();
+			cards.push(this.permissionCard(lines, request));
+		});
+		flush();
 		this.tick();
+		// Scrolled to the oldest waiting card.
+		const [card] = cards;
+		if (card) window.requestAnimationFrame(() => card.scrollIntoView({ block: "nearest" }));
 	}
 
-	/** Updates the time left on each permission card. */
+	/** A card for one waiting permission request, answered on its own. */
+	private permissionCard(container: HTMLElement, request: PermissionRequest): HTMLElement {
+		const card = container.createDiv({ cls: "theory-permission-card" });
+		const title = card.createDiv({ cls: "theory-permission-title" });
+		setIcon(title.createSpan({ cls: "theory-permission-icon" }), "shield-question");
+		title.createSpan({ text: request.tool });
+		card.createEl("pre", { cls: "theory-permission-target", text: request.target });
+		card.createDiv({ cls: "theory-report-meta", text: request.reason });
+		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
+		const choices: [PermissionAnswer, string][] = [
+			["allow", "Allow"],
+			["always", "Always allow"],
+			["deny", "Deny"],
+		];
+		for (const [answer, text] of choices) {
+			const button = buttons.createEl("button", { text, cls: answer === "allow" ? "mod-cta" : "" });
+			if (answer === "always") button.setAttr("title", `Also adds ${request.rule} to Allowed commands`);
+			if (answer === "deny") this.countdowns.push({ el: button, expiresAt: request.expiresAt });
+			button.addEventListener("click", () => this.plugin.answerPermission(request.id, answer));
+		}
+		return card;
+	}
+
+	/** Counts down the time left on each Deny button, from "Deny (2:00)" to "Deny (0:00)". */
 	private tick() {
 		for (const { el, expiresAt } of this.countdowns) {
 			const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-			el.setText(`Denied in ${seconds}s`);
+			el.setText(`Deny (${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")})`);
 		}
 	}
 

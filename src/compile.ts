@@ -45,6 +45,8 @@ export interface PermissionRequest {
 	rule: string;
 	/** When the request is denied by itself, in milliseconds since the epoch. */
 	expiresAt: number;
+	/** Where the request sits in the report's activity log. Its card shows there, and its answer replaces that line. */
+	line: number;
 }
 
 export interface CompileOptions {
@@ -498,9 +500,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 
 	let cancelled = false;
+	const requests: PermissionRequest[] = [];
 	const log = (line: string) => {
 		report.log.push(line);
-		if (report.log.length > MAX_LOG_LINES) report.log.shift();
+		if (report.log.length > MAX_LOG_LINES) {
+			report.log.shift();
+			for (const request of requests) request.line--;
+		}
 		onUpdate(report);
 	};
 
@@ -510,7 +516,6 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	// The process may exit while an answer is on its way.
 	child.stdin?.on("error", () => {});
 
-	const requests: PermissionRequest[] = [];
 	const pending = new Map<string, { input: Record<string, unknown>; timer: ReturnType<typeof setTimeout> }>();
 	// Steps that didn't run because a request was denied or timed out. Each becomes a problem.
 	const skipped: string[] = [];
@@ -519,29 +524,33 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		send({ type: "control_response", response: { subtype: "success", request_id: id, response } });
 	const deny = (id: string, message: string) => reply(id, { behavior: "deny", message });
 
-	const close = (id: string) => {
+	/** Closes a request. Its card becomes one line in the activity log, e.g. "Allowed: npm test". */
+	const close = (id: string, outcome: string) => {
 		const open = pending.get(id);
 		if (!open) return null;
 		clearTimeout(open.timer);
 		pending.delete(id);
 		const index = requests.findIndex((r) => r.id === id);
 		const [request] = index >= 0 ? requests.splice(index, 1) : [];
+		if (request) {
+			const text = `${outcome}: ${request.target}`;
+			if (request.line >= 0 && request.line < report.log.length) report.log[request.line] = text;
+			else report.log.push(text);
+		}
 		onUpdate(report);
 		return request ? { request, input: open.input } : null;
 	};
 
 	const answer = (id: string, choice: PermissionAnswer) => {
-		const closed = close(id);
+		const closed = close(id, choice === "deny" ? "Denied" : choice === "always" ? "Always allowed" : "Allowed");
 		if (!closed) return;
 		const { request, input } = closed;
 		const step = `${request.tool}: ${request.target}`;
 		if (choice === "deny") {
 			skipped.push(`You denied ${step}. Claude carried on without it.`);
-			log(`Denied ${step}`);
 			deny(id, "The engineer denied this. Carry on without this step and name it in problems.");
 			return;
 		}
-		log(`${choice === "always" ? "Always allowed" : "Allowed"} ${step}`);
 		const [toolName, ruleContent] = request.rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
 		reply(id, {
 			behavior: "allow",
@@ -572,7 +581,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		// Writes to the model never reach a card.
 		if (file && protectedPaths.some((dir) => isInside(file, dir))) {
 			skipped.push(`Claude tried to write to the model (${file}). That was denied.`);
-			log(`Denied ${tool}: ${file}`);
+			log(`Denied: ${file}`);
 			deny(id, "Writing to the model is forbidden. Carry on without this step.");
 			return;
 		}
@@ -585,24 +594,25 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			reason: reason || "Claude didn't give a reason.",
 			rule: requestRule(tool, input, request.permission_suggestions, file),
 			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
+			line: report.log.length,
 		};
 		const timer = setTimeout(() => {
-			if (!close(id)) return;
+			if (!close(id, "Timed out")) return;
 			const step = `${permission.tool}: ${permission.target}`;
 			skipped.push(`Nobody answered the request for ${step} within 120 seconds, so it was denied. Claude carried on without it.`);
-			log(`Timed out ${step}`);
 			deny(id, "Nobody answered in time, so this was denied. Carry on without this step and name it in problems.");
 		}, PERMISSION_TIMEOUT_MS);
 		pending.set(id, { input, timer });
 		requests.push(permission);
-		log(`Asking ${permission.tool}: ${permission.target}`);
+		// The card shows on this line until it's answered.
+		log(`Asking: ${permission.target}`);
 		options.onPermissionRequest?.(permission);
 	};
 
 	/** Denies every open request, e.g. on cancel or when Claude Code exits. */
 	const denyAll = (message: string) => {
 		for (const id of [...pending.keys()]) {
-			const closed = close(id);
+			const closed = close(id, "Denied");
 			if (!closed) continue;
 			skipped.push(`${closed.request.tool}: ${closed.request.target} was denied because ${message}.`);
 			deny(id, `Denied because ${message}.`);
@@ -631,7 +641,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				} else if (event.type === "control_request") {
 					handleControlRequest(String(event.request_id), event.request);
 				} else if (event.type === "control_cancel_request") {
-					close(String(event.request_id));
+					close(String(event.request_id), "Withdrawn");
 				} else if (event.type === "result") {
 					report.tokens = totalTokens(event.usage);
 					result = {
