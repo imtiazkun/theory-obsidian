@@ -142,7 +142,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Permission mode")
 			.setDesc(
-				"How much Claude may do without asking. Compile runs unattended, so anything not allowed here is refused.",
+				"How much Claude may do without asking. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
 			)
 			.addDropdown((dropdown) =>
 				dropdown

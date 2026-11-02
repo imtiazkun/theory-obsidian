@@ -3,7 +3,7 @@ import { createHash } from "crypto";
 import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
-import { join, relative } from "path";
+import { isAbsolute, join, relative, resolve, sep } from "path";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { findProjectRepos } from "./project";
 import { TOOL_PATH, git } from "./vault";
@@ -26,6 +26,27 @@ export const NOT_SENT = [
 
 export type PermissionMode = "acceptEdits" | "auto" | "bypassPermissions";
 
+/** A request nobody answers in this time is denied, so a compile never hangs. */
+export const PERMISSION_TIMEOUT_MS = 120_000;
+// Tools that write files. Their writes to the vault or the snapshot are denied before any card is shown.
+const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
+
+export type PermissionAnswer = "allow" | "always" | "deny";
+
+/** A tool call the Allowed commands setting doesn't cover, waiting for the engineer to answer. */
+export interface PermissionRequest {
+	id: string;
+	tool: string;
+	/** The exact command or file. */
+	target: string;
+	/** Why Claude wants it, in Claude's words. */
+	reason: string;
+	/** The rule Always allow adds to Allowed commands. */
+	rule: string;
+	/** When the request is denied by itself, in milliseconds since the epoch. */
+	expiresAt: number;
+}
+
 export interface CompileOptions {
 	vaultPath: string;
 	/** Folder holding the project's code: one repository, or several side by side. Claude works here. */
@@ -36,6 +57,8 @@ export interface CompileOptions {
 	allowedTools: string;
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
+	/** Called when Claude asks for a tool call the settings don't allow. */
+	onPermissionRequest?: (request: PermissionRequest) => void;
 }
 
 export interface Revision {
@@ -316,6 +339,55 @@ function describeToolUse(name: string, input: Record<string, unknown>): string {
 	return text ? `${name}: ${text.length > 160 ? text.slice(0, 157) + "…" : text}` : name;
 }
 
+/** The exact command, file or address a tool call is about, as shown on its permission card. */
+function requestTarget(tool: string, input: Record<string, unknown>): string {
+	const detail = input.command ?? input.file_path ?? input.notebook_path ?? input.url ?? input.pattern ?? input.path;
+	if (typeof detail === "string" && detail) return detail;
+	const json = JSON.stringify(input);
+	return json === "{}" ? tool : json;
+}
+
+/** The file a write tool would change, made absolute against the project folder. */
+function writtenFile(tool: string, input: Record<string, unknown>, projectFolder: string): string | null {
+	if (!WRITE_TOOLS.includes(tool)) return null;
+	const path = input.file_path ?? input.notebook_path;
+	if (typeof path !== "string" || !path) return null;
+	return isAbsolute(path) ? resolve(path) : resolve(projectFolder, path);
+}
+
+function isInside(path: string, dir: string): boolean {
+	const root = resolve(dir);
+	return path === root || path.startsWith(root + sep);
+}
+
+/**
+ * The rule Always allow adds to Allowed commands: Claude Code's own suggestion when it has one,
+ * else a rule for this exact command or file. Never a rule that lets a write tool loose everywhere.
+ */
+function requestRule(tool: string, input: Record<string, unknown>, suggestions: unknown, file: string | null): string {
+	const exact = () => {
+		if (file) return `${tool}(//${file.replace(/^\//, "")})`;
+		if (tool === "Bash" && typeof input.command === "string") return `Bash(${input.command})`;
+		if (tool === "WebFetch" && typeof input.url === "string") {
+			try {
+				return `WebFetch(domain:${new URL(input.url).hostname})`;
+			} catch {
+				return tool;
+			}
+		}
+		return tool;
+	};
+	if (!Array.isArray(suggestions)) return exact();
+	for (const suggestion of suggestions) {
+		if (suggestion?.type !== "addRules" || suggestion.behavior !== "allow") continue;
+		for (const rule of suggestion.rules ?? []) {
+			if (rule?.toolName !== tool || WRITE_TOOLS.includes(tool)) continue;
+			return rule.ruleContent ? `${tool}(${rule.ruleContent})` : tool;
+		}
+	}
+	return exact();
+}
+
 /** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
 function totalTokens(usage: unknown): number | undefined {
 	if (!usage || typeof usage !== "object") return undefined;
@@ -341,6 +413,10 @@ interface ClaudeResult {
 export interface CompileRun {
 	report: CompileReport;
 	done: Promise<CompileReport>;
+	/** Permission requests waiting for an answer, oldest first. */
+	requests: PermissionRequest[];
+	/** Answers one request. Each request is answered on its own, never in bulk. */
+	answer(id: string, answer: PermissionAnswer): void;
 	cancel(): void;
 }
 
@@ -389,8 +465,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	);
 	const args = [
 		"-p",
+		"--input-format",
+		"stream-json",
 		"--output-format",
 		"stream-json",
+		// Tool calls the settings don't allow come back to us as `can_use_tool` requests on stdout.
+		"--permission-prompt-tool",
+		"stdio",
 		"--verbose",
 		"--no-session-persistence",
 		"--permission-mode",
@@ -423,6 +504,111 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		onUpdate(report);
 	};
 
+	const send = (message: unknown) => {
+		if (child.stdin?.writable) child.stdin.write(JSON.stringify(message) + "\n");
+	};
+	// The process may exit while an answer is on its way.
+	child.stdin?.on("error", () => {});
+
+	const requests: PermissionRequest[] = [];
+	const pending = new Map<string, { input: Record<string, unknown>; timer: ReturnType<typeof setTimeout> }>();
+	// Steps that didn't run because a request was denied or timed out. Each becomes a problem.
+	const skipped: string[] = [];
+
+	const reply = (id: string, response: Record<string, unknown>) =>
+		send({ type: "control_response", response: { subtype: "success", request_id: id, response } });
+	const deny = (id: string, message: string) => reply(id, { behavior: "deny", message });
+
+	const close = (id: string) => {
+		const open = pending.get(id);
+		if (!open) return null;
+		clearTimeout(open.timer);
+		pending.delete(id);
+		const index = requests.findIndex((r) => r.id === id);
+		const [request] = index >= 0 ? requests.splice(index, 1) : [];
+		onUpdate(report);
+		return request ? { request, input: open.input } : null;
+	};
+
+	const answer = (id: string, choice: PermissionAnswer) => {
+		const closed = close(id);
+		if (!closed) return;
+		const { request, input } = closed;
+		const step = `${request.tool}: ${request.target}`;
+		if (choice === "deny") {
+			skipped.push(`You denied ${step}. Claude carried on without it.`);
+			log(`Denied ${step}`);
+			deny(id, "The engineer denied this. Carry on without this step and name it in problems.");
+			return;
+		}
+		log(`${choice === "always" ? "Always allowed" : "Allowed"} ${step}`);
+		const [toolName, ruleContent] = request.rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
+		reply(id, {
+			behavior: "allow",
+			updatedInput: input,
+			...(choice === "always"
+				? {
+						updatedPermissions: [
+							{
+								type: "addRules",
+								rules: [ruleContent ? { toolName, ruleContent } : { toolName }],
+								behavior: "allow",
+								destination: "session",
+							},
+						],
+					}
+				: {}),
+		});
+	};
+
+	const handleControlRequest = (id: string, request: any) => {
+		if (request?.subtype !== "can_use_tool") {
+			send({ type: "control_response", response: { subtype: "error", request_id: id, error: "Not supported." } });
+			return;
+		}
+		const tool = String(request.tool_name ?? "");
+		const input: Record<string, unknown> = request.input ?? {};
+		const file = writtenFile(tool, input, projectFolder);
+		// Writes to the model never reach a card.
+		if (file && protectedPaths.some((dir) => isInside(file, dir))) {
+			skipped.push(`Claude tried to write to the model (${file}). That was denied.`);
+			log(`Denied ${tool}: ${file}`);
+			deny(id, "Writing to the model is forbidden. Carry on without this step.");
+			return;
+		}
+		const description = typeof input.description === "string" ? input.description : "";
+		const reason = description || (typeof request.decision_reason === "string" ? request.decision_reason : "");
+		const permission: PermissionRequest = {
+			id,
+			tool,
+			target: requestTarget(tool, input),
+			reason: reason || "Claude didn't give a reason.",
+			rule: requestRule(tool, input, request.permission_suggestions, file),
+			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
+		};
+		const timer = setTimeout(() => {
+			if (!close(id)) return;
+			const step = `${permission.tool}: ${permission.target}`;
+			skipped.push(`Nobody answered the request for ${step} within 120 seconds, so it was denied. Claude carried on without it.`);
+			log(`Timed out ${step}`);
+			deny(id, "Nobody answered in time, so this was denied. Carry on without this step and name it in problems.");
+		}, PERMISSION_TIMEOUT_MS);
+		pending.set(id, { input, timer });
+		requests.push(permission);
+		log(`Asking ${permission.tool}: ${permission.target}`);
+		options.onPermissionRequest?.(permission);
+	};
+
+	/** Denies every open request, e.g. on cancel or when Claude Code exits. */
+	const denyAll = (message: string) => {
+		for (const id of [...pending.keys()]) {
+			const closed = close(id);
+			if (!closed) continue;
+			skipped.push(`${closed.request.tool}: ${closed.request.target} was denied because ${message}.`);
+			deny(id, `Denied because ${message}.`);
+		}
+	};
+
 	const claudeDone = new Promise<{ result: ClaudeResult | null; code: number | null; error?: Error; stderr: string }>(
 		(resolve) => {
 			let result: ClaudeResult | null = null;
@@ -442,6 +628,10 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 							log(describeToolUse(block.name, block.input ?? {}));
 						}
 					}
+				} else if (event.type === "control_request") {
+					handleControlRequest(String(event.request_id), event.request);
+				} else if (event.type === "control_cancel_request") {
+					close(String(event.request_id));
 				} else if (event.type === "result") {
 					report.tokens = totalTokens(event.usage);
 					result = {
@@ -449,6 +639,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 						text: typeof event.result === "string" ? event.result : "",
 						structured: event.structured_output,
 					};
+					// Claude is done; closing stdin lets Claude Code exit.
+					denyAll("Claude finished");
+					child.stdin?.end();
 				}
 			};
 			child.stdout?.on("data", (chunk) => {
@@ -458,13 +651,24 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				lines.forEach(handleLine);
 			});
 			child.stderr?.on("data", (chunk) => (stderr += chunk));
-			child.on("error", (error) => resolve({ result, code: null, error, stderr }));
+			child.on("error", (error) => {
+				denyAll("Claude Code couldn't run");
+				resolve({ result, code: null, error, stderr });
+			});
 			child.on("close", (code) => {
 				handleLine(buffer);
+				denyAll("Claude Code exited");
 				resolve({ result, code, stderr });
 			});
+			// Stdin stays open for the answers to permission requests until the result arrives.
+			send({ type: "control_request", request_id: "initialize", request: { subtype: "initialize", hooks: null } });
 			// Keeps the prompt out of the argument list, which has a size limit.
-			child.stdin?.end(buildPrompt({ snapshot, projectFolder, head, from, revisions, diff }));
+			send({
+				type: "user",
+				message: { role: "user", content: buildPrompt({ snapshot, projectFolder, head, from, revisions, diff }) },
+				parent_tool_use_id: null,
+				session_id: "",
+			});
 		},
 	);
 
@@ -511,6 +715,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
 			// Anchors are only checked against a snapshot that is still the compiled revision.
 			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			// The engineer must know which steps didn't run, whatever Claude reported.
+			report.problems.push(...skipped.map(plainProblem));
 			for (let i = 0; i < report.questions.length; i++) {
 				const anchors = await checkAnchors(intact ? snapshot : null, structured?.questions?.[i]?.anchors);
 				if (anchors.length > 0) report.questions[i].anchors = anchors;
@@ -544,9 +750,12 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	return {
 		report,
 		done,
+		requests,
+		answer,
 		cancel() {
 			if (report.status !== "running" || cancelled) return;
 			cancelled = true;
+			denyAll("the compile was cancelled");
 			child.kill("SIGTERM");
 		},
 	};

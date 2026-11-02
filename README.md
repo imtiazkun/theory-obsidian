@@ -104,7 +104,7 @@ Use `npm run dev` to rebuild on every change.
 | --- | --- |
 | Project folder (under Vault) | Folder Claude works in. Compile always runs Claude Code here. Settings lists the git repositories in it: the folder itself, or its immediate subfolders. The list is for your information only. |
 | Claude Code command | `claude` by default, or an absolute path to the CLI. |
-| Permission mode | Compile runs unattended, so anything not allowed is refused. *Edit files, run only allowed commands* is the default. *Auto* lets Claude decide what's safe. *Run anything* turns off checks. |
+| Permission mode | Anything not allowed becomes a permission card in the compile report: **Allow**, **Always allow** (also adds the rule to Allowed commands) or **Deny**. A card nobody answers is denied after 120 seconds, and every denied step is listed in the report's problems. Writes to the model are denied without asking. *Edit files, run only allowed commands* is the default. *Auto* lets Claude decide what's safe. *Run anything* turns off checks. |
 | Allowed commands | Claude Code permission rules, separated by spaces. Defaults to `Bash(git *)`. Writes to the model are always denied, whatever this says. |
 
 ## Compile rules

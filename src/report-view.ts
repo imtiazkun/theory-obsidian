@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
-import type { CompileReport, CompileStatus } from "./compile";
+import type { CompileReport, CompileStatus, PermissionAnswer } from "./compile";
 import type TheoryPlugin from "./main";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -29,6 +29,8 @@ export class CompileReportView extends ItemView {
 	// The report on screen; null follows the newest one.
 	private selectedId: string | null = null;
 	private activityOpen = false;
+	// Time left on the permission cards on screen.
+	private countdowns: { el: HTMLElement; expiresAt: number }[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -48,6 +50,7 @@ export class CompileReportView extends ItemView {
 	}
 
 	async onOpen() {
+		this.registerInterval(window.setInterval(() => this.tick(), 1000));
 		this.refresh();
 	}
 
@@ -69,6 +72,7 @@ export class CompileReportView extends ItemView {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass("theory-report");
+		this.countdowns = [];
 
 		const toolbar = contentEl.createDiv({ cls: "theory-report-toolbar" });
 		if (reports.length > 0) {
@@ -116,6 +120,8 @@ export class CompileReportView extends ItemView {
 				.createEl("button", { cls: "theory-report-cancel", text: "Clear highlights" })
 				.addEventListener("click", () => this.plugin.overlay.dismiss());
 		}
+
+		if (report.status === "running") this.permissionCards();
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
 
@@ -189,6 +195,43 @@ export class CompileReportView extends ItemView {
 		details.createEl("summary", { text: `Activity (${report.log.length})` });
 		const log = details.createEl("pre");
 		log.setText(report.log.length > 0 ? report.log.join("\n") : "Waiting for Claude…");
+	}
+
+	/** One card per waiting permission request, each answered on its own. */
+	private permissionCards() {
+		const requests = this.plugin.permissionRequests();
+		if (requests.length === 0) return;
+		const section = this.section("Claude is asking", requests.length);
+		for (const request of requests) {
+			const card = section.createDiv({ cls: "theory-permission-card" });
+			const title = card.createDiv({ cls: "theory-permission-title" });
+			setIcon(title.createSpan({ cls: "theory-permission-icon" }), "shield-question");
+			title.createSpan({ text: request.tool });
+			const countdown = title.createSpan({ cls: "theory-permission-countdown" });
+			this.countdowns.push({ el: countdown, expiresAt: request.expiresAt });
+			card.createEl("pre", { cls: "theory-permission-target", text: request.target });
+			card.createDiv({ cls: "theory-report-meta", text: request.reason });
+			const buttons = card.createDiv({ cls: "theory-permission-buttons" });
+			const choices: [PermissionAnswer, string][] = [
+				["allow", "Allow"],
+				["always", "Always allow"],
+				["deny", "Deny"],
+			];
+			for (const [answer, text] of choices) {
+				const button = buttons.createEl("button", { text, cls: answer === "allow" ? "mod-cta" : "" });
+				if (answer === "always") button.setAttr("title", `Also adds ${request.rule} to Allowed commands`);
+				button.addEventListener("click", () => this.plugin.answerPermission(request.id, answer));
+			}
+		}
+		this.tick();
+	}
+
+	/** Updates the time left on each permission card. */
+	private tick() {
+		for (const { el, expiresAt } of this.countdowns) {
+			const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+			el.setText(`Denied in ${seconds}s`);
+		}
 	}
 
 	/** Links that open each anchor's note at the spot it names. */

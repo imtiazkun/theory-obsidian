@@ -3,7 +3,14 @@ import { CommitButtons, CommitModal } from "./commit";
 import { generateCommitMessage } from "./commit-message";
 import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
-import { CompileReport, CompileRun, NothingToCompileError, startCompile } from "./compile";
+import {
+	CompileReport,
+	CompileRun,
+	NothingToCompileError,
+	PermissionAnswer,
+	PermissionRequest,
+	startCompile,
+} from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
@@ -161,7 +168,18 @@ export default class TheoryPlugin extends Plugin {
 		let run: CompileRun;
 		try {
 			run = await startCompile(
-				{ vaultPath, projectFolder, claudeCommand, permissionMode, allowedTools, author },
+				{
+					vaultPath,
+					projectFolder,
+					claudeCommand,
+					permissionMode,
+					allowedTools,
+					author,
+					onPermissionRequest: (request) => {
+						new Notice(`Claude is asking to use ${request.tool}. Answer in the compile report.`);
+						this.showReportView();
+					},
+				},
 				() => this.refreshReportViews(),
 			);
 		} catch (error) {
@@ -198,6 +216,24 @@ export default class TheoryPlugin extends Plugin {
 
 	cancelCompile() {
 		this.compileRun?.cancel();
+	}
+
+	/** Permission requests from the running compile that are waiting for an answer. */
+	permissionRequests(): PermissionRequest[] {
+		return this.compileRun?.requests ?? [];
+	}
+
+	/** Answers one permission request. Always allow also adds its rule to Allowed commands. */
+	async answerPermission(id: string, answer: PermissionAnswer) {
+		const request = this.compileRun?.requests.find((r) => r.id === id);
+		if (!request) return;
+		this.compileRun?.answer(id, answer);
+		if (answer !== "always") return;
+		const rules = this.settings.allowedTools.trim();
+		if (!` ${rules} `.includes(` ${request.rule} `)) {
+			this.settings.allowedTools = rules ? `${rules} ${request.rule}` : request.rule;
+		}
+		await this.saveSettings();
 	}
 
 	/** Opens theory.md's tab in Obsidian settings. */

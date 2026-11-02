@@ -333,6 +333,46 @@
 	color: var(--text-error);
 }
 
+.theory-permission-card {
+	padding: var(--size-4-2) var(--size-4-3);
+	margin-bottom: var(--size-4-2);
+	border-left: 3px solid var(--interactive-accent);
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.theory-permission-title {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	font-weight: var(--font-semibold);
+}
+
+.theory-permission-icon {
+	display: flex;
+	color: var(--interactive-accent);
+}
+
+.theory-permission-countdown {
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: normal;
+}
+
+.theory-permission-target {
+	margin: var(--size-4-2) 0;
+	white-space: pre-wrap;
+	word-break: break-all;
+	font-size: var(--font-ui-small);
+}
+
+.theory-permission-buttons {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+}
+
 .theory-report-question {
 	padding: var(--size-4-2) var(--size-4-3);
 	margin-bottom: var(--size-4-2);
