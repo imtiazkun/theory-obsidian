@@ -51,8 +51,8 @@ export interface PermissionRequest {
 	target: string;
 	/** Why Claude wants it, in Claude's words. */
 	reason: string;
-	/** The rule Always allow adds to Allowed commands. */
-	rule: string;
+	/** The rule Always allow adds to Allowed commands, or null when there is none to add (a file tool with no file). */
+	rule: string | null;
 	/** When the request is denied by itself, in milliseconds since the epoch. */
 	expiresAt: number;
 	/** Where the request sits in the report's activity log. Its card shows there, and its answer replaces that line. */
@@ -374,11 +374,39 @@ function isInside(path: string, dir: string): boolean {
 	return path === root || path.startsWith(root + sep);
 }
 
+/** A Claude Code permission rule as written in Allowed commands, e.g. `Bash(npm run:*)`. */
+function ruleText(rule: unknown): string | null {
+	if (!rule || typeof rule !== "object") return null;
+	const { toolName, ruleContent } = rule as Record<string, unknown>;
+	if (typeof toolName !== "string" || !toolName) return null;
+	return typeof ruleContent === "string" && ruleContent ? `${toolName}(${ruleContent})` : toolName;
+}
+
+/** The first allow rule Claude Code suggests for this tool with a permission request, if any. */
+function suggestedRule(tool: string, suggestions: unknown): string | null {
+	if (!Array.isArray(suggestions)) return null;
+	for (const update of suggestions) {
+		if (update?.type !== "addRules" || update.behavior !== "allow" || !Array.isArray(update.rules)) continue;
+		for (const rule of update.rules) {
+			if (rule?.toolName === tool) return ruleText(rule);
+		}
+	}
+	return null;
+}
+
 /**
- * The rule Always allow adds to Allowed commands: the exact command, never a wildcard,
- * so the engineer approves one command and not a family of them. Any other tool gets its name.
+ * The rule Always allow adds to Allowed commands, shown on the card before the engineer clicks.
+ * A command gets Claude Code's suggestion, which may cover a family of commands, else the exact command.
+ * A file tool gets that tool on that exact file, never the bare tool name nor Claude Code's suggestion,
+ * so one approval opens one file only. Any other tool gets Claude Code's suggestion, else its name.
  */
-function requestRule(tool: string, input: Record<string, unknown>): string {
+function requestRule(tool: string, input: Record<string, unknown>, projectFolder: string, suggestions: unknown): string | null {
+	if (WRITE_TOOLS.includes(tool)) {
+		const file = writtenFile(tool, input, projectFolder);
+		return file ? `${tool}(//${file.replace(/^\//, "")})` : null;
+	}
+	const suggested = suggestedRule(tool, suggestions);
+	if (suggested) return suggested;
 	if (tool === "Bash" && typeof input.command === "string" && input.command) return `Bash(${input.command})`;
 	return tool;
 }
@@ -547,11 +575,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			deny(id, "The engineer denied this. Carry on without this step and name it in problems.");
 			return;
 		}
-		const [toolName, ruleContent] = request.rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
+		const [toolName, ruleContent] = request.rule?.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
 		reply(id, {
 			behavior: "allow",
 			updatedInput: input,
-			...(choice === "always"
+			...(choice === "always" && request.rule
 				? {
 						updatedPermissions: [
 							{
@@ -588,7 +616,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			tool,
 			target: requestTarget(tool, input),
 			reason: reason || "Claude didn't give a reason.",
-			rule: requestRule(tool, input),
+			rule: requestRule(tool, input, projectFolder, request.permission_suggestions),
 			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
 			line: report.log.length,
 		};

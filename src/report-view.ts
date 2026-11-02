@@ -1,7 +1,15 @@
-import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
-import { timeLeft, type CompileReport, type CompileStatus, type PermissionAnswer, type PermissionRequest } from "./compile";
+import {
+	timeLeft,
+	type CompileReport,
+	type CompileStatus,
+	type PermissionAnswer,
+	type PermissionRequest,
+	type Question,
+} from "./compile";
 import type TheoryPlugin from "./main";
+import { startSuggest, type SuggestRun } from "./suggest";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
 
@@ -23,6 +31,17 @@ function shortHash(hash: string | null): string {
 	return hash ? hash.slice(0, 7) : "start";
 }
 
+/** A suggestion for one question. It lives only on screen: never in the report, plugin data or the vault. */
+type SuggestionState =
+	| { state: "running"; run: SuggestRun }
+	| { state: "shown"; text: string; why: string }
+	| { state: "failed"; reason: string };
+
+/** Where Reply and Accept open the note: the first anchor, else the top of the first note. */
+function questionTarget(q: Question): Anchor | undefined {
+	return q.anchors?.[0] ?? (q.notes[0] ? { path: q.notes[0] } : undefined);
+}
+
 /** Shows compile reports. They live in plugin data, never in the model. */
 export class CompileReportView extends ItemView {
 	plugin: TheoryPlugin;
@@ -31,6 +50,8 @@ export class CompileReportView extends ItemView {
 	private activityOpen = false;
 	// Deny buttons on the permission cards on screen, with the time each request is denied by itself.
 	private countdowns: { el: HTMLElement; expiresAt: number }[] = [];
+	// Suggestions on screen, keyed by report id and question index. Closing the report discards them.
+	private suggestions = new Map<string, SuggestionState>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -54,6 +75,11 @@ export class CompileReportView extends ItemView {
 		this.refresh();
 	}
 
+	async onClose() {
+		for (const s of this.suggestions.values()) if (s.state === "running") s.run.cancel();
+		this.suggestions.clear();
+	}
+
 	/** Shows the newest report, e.g. when a compile starts. */
 	showLatest() {
 		this.selectedId = null;
@@ -70,6 +96,12 @@ export class CompileReportView extends ItemView {
 		const reports = this.plugin.reports;
 		const report = reports.find((r) => r.id === this.selectedId) ?? reports[0];
 		const { contentEl } = this;
+		// A suggestion box being edited keeps its focus and cursor across redraws.
+		const focused = document.activeElement;
+		const editing =
+			focused instanceof HTMLTextAreaElement && contentEl.contains(focused)
+				? { key: focused.dataset.suggestion, start: focused.selectionStart, end: focused.selectionEnd }
+				: null;
 		contentEl.empty();
 		contentEl.addClass("theory-report");
 		this.countdowns = [];
@@ -99,6 +131,11 @@ export class CompileReportView extends ItemView {
 			return;
 		}
 		this.renderReport(report);
+		if (editing?.key) {
+			const box = contentEl.querySelector<HTMLTextAreaElement>(`textarea[data-suggestion="${editing.key}"]`);
+			box?.focus();
+			box?.setSelectionRange(editing.start, editing.end);
+		}
 	}
 
 	private renderReport(report: CompileReport) {
@@ -145,28 +182,32 @@ export class CompileReportView extends ItemView {
 
 		if (report.questions.length > 0) {
 			const section = this.section("Questions about the model", report.questions.length);
-			for (const q of report.questions) {
+			report.questions.forEach((q, index) => {
 				const item = section.createDiv({ cls: "theory-report-question" });
 				const row = item.createDiv({ cls: "theory-report-question-row" });
 				row.createDiv({ text: q.question });
 				// Reply opens the note at the rule that needs updating, else its heading, else the top. Engineers answer in the model.
-				const target: Anchor | undefined = q.anchors?.[0] ?? (q.notes[0] ? { path: q.notes[0] } : undefined);
+				const target = questionTarget(q);
 				if (target) {
-					const reply = row.createEl("button", { cls: "theory-report-reply", text: "Reply" });
+					const buttons = row.createDiv({ cls: "theory-report-question-buttons" });
+					const reply = buttons.createEl("button", { cls: "theory-report-reply", text: "Reply" });
 					setIcon(reply.createSpan({ cls: "theory-report-reply-icon" }), "reply");
 					reply.setAttr("aria-label", `Open ${target.path} at the rule this question is about`);
 					reply.addEventListener("click", () => this.plugin.overlay.jump(target));
+					this.suggestButton(buttons, report, q, `${report.id}:${index}`);
 				}
-				if (q.notes.length === 0) continue;
-				const notes = item.createDiv({ cls: "theory-report-notes" });
-				for (const note of q.notes) {
-					const link = notes.createEl("a", { cls: "internal-link", text: note, href: note });
-					link.addEventListener("click", (event) => {
-						event.preventDefault();
-						this.app.workspace.openLinkText(note, "", false);
-					});
+				if (q.notes.length > 0) {
+					const notes = item.createDiv({ cls: "theory-report-notes" });
+					for (const note of q.notes) {
+						const link = notes.createEl("a", { cls: "internal-link", text: note, href: note });
+						link.addEventListener("click", (event) => {
+							event.preventDefault();
+							this.app.workspace.openLinkText(note, "", false);
+						});
+					}
 				}
-			}
+				this.suggestionBox(item, q, `${report.id}:${index}`);
+			});
 		}
 
 		if (report.changes.length > 0) {
@@ -220,6 +261,74 @@ export class CompileReportView extends ItemView {
 		if (card) window.requestAnimationFrame(() => card.scrollIntoView({ block: "nearest" }));
 	}
 
+	/** Suggest asks Claude for ideas on answering the question. One question has at most one suggestion at a time. */
+	private suggestButton(container: HTMLElement, report: CompileReport, q: Question, key: string) {
+		const current = this.suggestions.get(key);
+		const running = current?.state === "running";
+		const button = container.createEl("button", { cls: "theory-report-suggest", text: running ? "Suggesting…" : "Suggest" });
+		setIcon(button.createSpan({ cls: "theory-report-reply-icon" }), "sparkles");
+		button.disabled = running || current?.state === "shown";
+		button.addEventListener("click", () => this.suggest(report, q, key));
+	}
+
+	private async suggest(report: CompileReport, q: Question, key: string) {
+		if (this.suggestions.get(key)?.state === "running") return;
+		const { claudeCommand, model, effort } = this.plugin.settings;
+		// The current text of every note the question names, uncommitted edits included.
+		const paths = [...new Set([...q.notes, ...(q.anchors ?? []).map((a) => a.path)])];
+		const notes = new Map<string, string | null>();
+		for (const path of paths) {
+			const file = this.app.vault.getAbstractFileByPath(path);
+			notes.set(path, file instanceof TFile ? await this.app.vault.read(file) : null);
+		}
+		const run = startSuggest({ claudeCommand, model, effort, question: q, summary: report.summary, notes });
+		this.suggestions.set(key, { state: "running", run });
+		this.refresh();
+		try {
+			const suggestion = await run.done;
+			if (this.suggestions.get(key)?.state !== "running") return;
+			this.suggestions.set(key, { state: "shown", ...suggestion });
+		} catch (error) {
+			if (this.suggestions.get(key)?.state !== "running") return;
+			const reason = error instanceof Error ? error.message : String(error);
+			this.suggestions.set(key, { state: "failed", reason });
+		}
+		this.refresh();
+	}
+
+	/** The suggestion under its question: the spot it is for, an editable box, why, Accept and Reject. */
+	private suggestionBox(container: HTMLElement, q: Question, key: string) {
+		const current = this.suggestions.get(key);
+		if (!current || current.state === "running") return;
+		const box = container.createDiv({ cls: "theory-suggestion" });
+		if (current.state === "failed") {
+			box.createDiv({ cls: "theory-suggestion-error", text: `Couldn't get a suggestion: ${current.reason}` });
+			return;
+		}
+		const target = questionTarget(q);
+		if (target) {
+			box.createDiv({
+				cls: "theory-report-meta",
+				text: `Suggestion for ${target.heading ? `${target.path} › ${target.heading}` : target.path}`,
+			});
+		}
+		const text = box.createEl("textarea", { cls: "theory-suggestion-text", attr: { "data-suggestion": key, rows: "6" } });
+		text.value = current.text;
+		text.addEventListener("input", () => (current.text = text.value));
+		if (current.why) box.createDiv({ cls: "theory-report-meta", text: current.why });
+		const buttons = box.createDiv({ cls: "theory-suggestion-buttons" });
+		// Accept never writes to a note: the engineer writes the words themselves.
+		buttons.createEl("button", { cls: "mod-cta", text: "Accept" }).addEventListener("click", async () => {
+			await navigator.clipboard.writeText(text.value);
+			if (target) await this.plugin.overlay.jump(target);
+			new Notice("Suggestion copied. Write it in the note in your own words.");
+		});
+		buttons.createEl("button", { text: "Reject" }).addEventListener("click", () => {
+			this.suggestions.delete(key);
+			this.refresh();
+		});
+	}
+
 	/** A card for one waiting permission request, answered on its own. */
 	private permissionCard(container: HTMLElement, request: PermissionRequest): HTMLElement {
 		const card = container.createDiv({ cls: "theory-permission-card" });
@@ -228,6 +337,13 @@ export class CompileReportView extends ItemView {
 		title.createSpan({ text: request.tool });
 		card.createEl("pre", { cls: "theory-permission-target", text: request.target });
 		card.createDiv({ cls: "theory-report-meta", text: request.reason });
+		// The engineer sees how much one click allows before clicking Always allow.
+		if (request.rule) {
+			const rule = card.createDiv({ cls: "theory-report-meta theory-permission-rule" });
+			rule.appendText("Always allow adds ");
+			rule.createEl("code", { text: request.rule });
+			rule.appendText(" to Allowed commands.");
+		}
 		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
 		const choices: [PermissionAnswer, string][] = [
 			["allow", "Allow"],
@@ -235,8 +351,8 @@ export class CompileReportView extends ItemView {
 			["deny", "Deny"],
 		];
 		for (const [answer, text] of choices) {
+			if (answer === "always" && !request.rule) continue;
 			const button = buttons.createEl("button", { text, cls: answer === "allow" ? "mod-cta" : "" });
-			if (answer === "always") button.setAttr("title", `Also adds ${request.rule} to Allowed commands`);
 			if (answer === "deny") this.countdowns.push({ el: button, expiresAt: request.expiresAt });
 			button.addEventListener("click", () => this.plugin.answerPermission(request.id, answer));
 		}

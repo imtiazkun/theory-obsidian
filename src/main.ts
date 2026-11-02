@@ -233,7 +233,7 @@ export default class TheoryPlugin extends Plugin {
 		const request = this.compileRun?.requests.find((r) => r.id === id);
 		if (!request) return;
 		this.compileRun?.answer(id, answer);
-		if (answer !== "always") return;
+		if (answer !== "always" || !request.rule) return;
 		const rules = this.settings.allowedTools.trim();
 		// One rule at the end of the list, never twice.
 		if (!` ${rules} `.includes(` ${request.rule} `)) {

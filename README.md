@@ -66,6 +66,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Last compile marker (local `theory/compiled` tag) | Done |
 | Compile lock within the app, so only one compile runs at a time | Done |
 | Compile report view, with questions linking to the notes and a Reply button that opens the note at the rule that needs updating | Done |
+| Suggest on each question: Claude, with no tools, offers text to copy and write into the note in your own words. Never saved, never written to a note | Done |
 | Floating compile button showing pending revisions and compile state | Done |
 | Read-only snapshot, deny rules and the post-compile check | Done |
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
@@ -106,7 +107,7 @@ Use `npm run dev` to rebuild on every change.
 | Claude Code command | `claude` by default, or an absolute path to the CLI. |
 | Model | *Claude Code default*, *Fable*, *Opus*, *Sonnet* or *Haiku*, passed to Claude Code as `--model`. The default passes nothing. Applies from the next compile. |
 | Effort | *Claude Code default*, *Low*, *Medium*, *High*, *Extra high* or *Max*, passed to Claude Code as `--effort`. The default passes nothing. Applies from the next compile. |
-| Permission mode | Anything not allowed becomes a permission card in the compile report: **Allow**, **Always allow** (also adds the exact command, or the tool's name for other tools, to Allowed commands) or **Deny**. A card nobody answers is denied after 120 seconds, and every denied step is listed in the report's problems. Writes to the model are denied without asking. *Edit files, run only allowed commands* is the default. *Auto* lets Claude decide what's safe. *Run anything* turns off checks. |
+| Permission mode | Anything not allowed becomes a permission card in the compile report: **Allow**, **Always allow** (also adds a rule to Allowed commands, shown on the card: Claude Code's suggested rule for a command, like `Bash(npm run:*)`, else the exact command; that tool on that exact file for Edit, Write and NotebookEdit; Claude Code's suggestion or the tool's name for other tools) or **Deny**. A card nobody answers is denied after 120 seconds, and every denied step is listed in the report's problems. Writes to the model are denied without asking. *Edit files, run only allowed commands* is the default. *Auto* lets Claude decide what's safe. *Run anything* turns off checks. |
 | Allowed commands | Claude Code permission rules, separated by spaces. Defaults to `Bash(git *)`. Writes to the model are always denied, whatever this says. |
 
 ## Compile rules

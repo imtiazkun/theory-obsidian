@@ -200,7 +200,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Allowed commands")
 			.setDesc(
-				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the exact command here. Writes to the model are always denied.",
+				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds one rule here: Claude Code's suggested rule for a command (else the exact command), the exact file for a file tool. Writes to the model are always denied.",
 			)
 			.addText((text) =>
 				text
