@@ -13,11 +13,24 @@ theory.md is a desktop-only Obsidian plugin. Humans write a "theoretical model" 
 
 ```bash
 npm install
-npm run build   # tsc type-check (noEmit), then esbuild production bundle
+npm run build   # tsc type-check (noEmit, src and tests), then esbuild production bundle
 npm run dev     # esbuild watch, inline sourcemaps (no type-check)
+npm test        # Vitest, every test once
+npm test -- test/branches.test.ts             # one test file
+npm test -- test/branches.test.ts -t "reuses" # one test, by name
 ```
 
-There are no tests and no linter. `tsc` (via `npm run build`) is the only check.
+There is no linter. Before every commit run `npm run build` and `npm test`; both must pass. Never commit past a failing test.
+
+## Tests
+
+The rules are in the model's `obsidian-plugin/instructions.md` (TEST-1 to TEST-8). In short:
+
+- Tests live in `test/*.test.ts`. Every change to branch, commit, compile or anchor logic comes with a test that would have failed before it.
+- Tests that need git make real repositories with `tempFolder()` and `initRepo()` from `test/helpers.ts`. The folder is new under the system temp folder and deleted after each test. Never point a test at the vault, the project folder or a real repository.
+- `test/setup.ts` puts fake `claude` and `gh` first on PATH (they always fail) and gives git a test config instead of the engineer's. Tests never reach Claude Code, GitHub or the network.
+- `obsidian` is replaced by the small stub in `test/obsidian.ts` (see `vitest.config.ts`). Add to it only what a tested module needs to load. Views, modals and the file explorer aren't tested automatically; check them by hand in Obsidian.
+- To test logic that lives in a view or in `main.ts`, move it into a plain exported function first (like `withAllowedRules` or `entryFileSelector`).
 
 The build writes a complete plugin folder to `dist/` (`main.js`, plus `manifest.json` and `styles.css` copied in). To try it, copy those files into `<vault>/.obsidian/plugins/theory-md/` and reload the plugin in Obsidian. `dist/data.json` is local plugin data (settings and reports) from a test install. Don't commit or rely on it.
 

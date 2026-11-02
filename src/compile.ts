@@ -256,7 +256,7 @@ async function workingTreeState(vaultPath: string): Promise<Map<string, string>>
 }
 
 /** Checks out `commit`, minus the files never sent to Claude, into a fresh read-only directory outside the vault. */
-async function createSnapshot(vaultPath: string, commit: string): Promise<string> {
+export async function createSnapshot(vaultPath: string, commit: string): Promise<string> {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "theory-model-")));
 	const archive = `${dir}.tar`;
 	await git(vaultPath, ["archive", "--format=tar", "-o", archive, commit, "--", ...NOT_SENT]);
@@ -266,7 +266,7 @@ async function createSnapshot(vaultPath: string, commit: string): Promise<string
 	return dir;
 }
 
-async function removeSnapshot(dir: string) {
+export async function removeSnapshot(dir: string) {
 	await runTool("chmod", ["-R", "u+w", dir]).catch(() => {});
 	await rm(dir, { recursive: true, force: true });
 }
@@ -433,7 +433,7 @@ function suggestedRules(tool: string, suggestions: unknown): string[] {
  * A file tool gets that tool on that exact file, never the bare tool name nor Claude Code's suggestion,
  * so one approval opens one file only. Any other tool gets Claude Code's suggestion, else its name.
  */
-function requestRules(tool: string, input: Record<string, unknown>, projectFolder: string, suggestions: unknown): string[] {
+export function requestRules(tool: string, input: Record<string, unknown>, projectFolder: string, suggestions: unknown): string[] {
 	if (WRITE_TOOLS.includes(tool)) {
 		const file = writtenFile(tool, input, projectFolder);
 		return file ? [`${tool}(//${file.replace(/^\//, "")})`] : [];
@@ -445,6 +445,16 @@ function requestRules(tool: string, input: Record<string, unknown>, projectFolde
 		return [tool];
 	}
 	return [suggested[0] ?? tool];
+}
+
+/** Allowed commands with `rules` added at the end, none of them twice. This is what Always allow saves. */
+export function withAllowedRules(allowedTools: string, rules: string[]): string {
+	// Matched with the spaces around it, because a rule like `Bash(npm run build)` has spaces inside.
+	let list = allowedTools.trim();
+	for (const rule of rules) {
+		if (!` ${list} `.includes(` ${rule} `)) list = list ? `${list} ${rule}` : rule;
+	}
+	return list;
 }
 
 /** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */

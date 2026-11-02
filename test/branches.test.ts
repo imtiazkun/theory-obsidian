@@ -1,0 +1,145 @@
+import { join } from "path";
+import { describe, expect, it } from "vitest";
+import { CompileBranch, currentBranch, finishBranches, prepareBranches } from "../src/branches";
+import type { CompileReport } from "../src/compile";
+import type { PullRequest } from "../src/github";
+import { commitFiles, initRepo, out, tempFolder } from "./helpers";
+
+const FIRST = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SECOND = "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/** A project folder holding the repositories `api` and `web` side by side, both on `main`. */
+async function project() {
+	const folder = tempFolder();
+	const api = join(folder, "api");
+	const web = join(folder, "web");
+	await initRepo(api);
+	await initRepo(web);
+	return { folder, api, web };
+}
+
+/** The report a finished compile leaves behind, as far as compile branches care. */
+function reportWith(branches: CompileBranch[], pullRequests: PullRequest[] = []): CompileReport {
+	return { branches, pullRequests } as CompileReport;
+}
+
+async function branches(repo: string): Promise<string[]> {
+	return (await out(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"])).split("\n").filter(Boolean);
+}
+
+describe("compile branches", () => {
+	it("creates the same new branch in every repository, from the branch checked out", async () => {
+		const { folder, api, web } = await project();
+		await out(web, ["checkout", "-b", "develop"]);
+
+		const prepared = await prepareBranches(folder, FIRST, []);
+
+		expect(prepared.map((p) => [p.name, p.branch, p.base, p.created])).toEqual([
+			["api", "theory/compile-1111111", "main", true],
+			["web", "theory/compile-1111111", "develop", true],
+		]);
+		expect(await currentBranch(api)).toBe("theory/compile-1111111");
+		expect(await currentBranch(web)).toBe("theory/compile-1111111");
+	});
+
+	it("deletes a new branch that got no commits and keeps one that did", async () => {
+		const { folder, api, web } = await project();
+		const prepared = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+
+		const records = await finishBranches(prepared);
+
+		expect(records.map((r) => [r.repo, r.kept, r.commits.map((c) => c.subject)])).toEqual([
+			["api", true, ["Add a"]],
+			["web", false, []],
+		]);
+		expect(await currentBranch(api)).toBe("theory/compile-1111111");
+		expect(await currentBranch(web)).toBe("main");
+		expect(await branches(web)).toEqual(["main"]);
+	});
+
+	it("reuses the open compile branch instead of starting a second one", async () => {
+		const { folder, api, web } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		await commitFiles(web, { "w.ts": "w\n" }, "Add w");
+		const reports = [reportWith(await finishBranches(first))];
+		// The engineer went back to main in one repository between compiles.
+		await out(api, ["checkout", "main"]);
+
+		const second = await prepareBranches(folder, SECOND, reports);
+
+		expect(second.map((p) => [p.name, p.branch, p.base, p.created, p.previous])).toEqual([
+			["api", "theory/compile-1111111", "main", false, "main"],
+			["web", "theory/compile-1111111", "main", false, "theory/compile-1111111"],
+		]);
+		expect(await currentBranch(api)).toBe("theory/compile-1111111");
+		expect(await branches(api)).toEqual(["main", "theory/compile-1111111"]);
+
+		// A reused branch that got nothing new stays, with its earlier commits.
+		const records = await finishBranches(second);
+		expect(records.map((r) => [r.repo, r.kept, r.commits.length])).toEqual([
+			["api", true, 0],
+			["web", true, 0],
+		]);
+		expect(await branches(web)).toEqual(["main", "theory/compile-1111111"]);
+	});
+
+	it("starts a fresh branch once the open one is merged into its base", async () => {
+		const { folder, api, web } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		await commitFiles(web, { "w.ts": "w\n" }, "Add w");
+		const reports = [reportWith(await finishBranches(first))];
+		for (const repo of [api, web]) {
+			await out(repo, ["checkout", "main"]);
+			await out(repo, ["merge", "--no-ff", "-m", "Merge compile", "theory/compile-1111111"]);
+		}
+
+		const second = await prepareBranches(folder, SECOND, reports);
+
+		expect(second.map((p) => [p.name, p.branch, p.base, p.created])).toEqual([
+			["api", "theory/compile-2222222", "main", true],
+			["web", "theory/compile-2222222", "main", true],
+		]);
+		expect(await out(api, ["rev-parse", "HEAD"])).toBe(await out(api, ["rev-parse", "main"]));
+	});
+
+	it("starts a fresh branch when the open one's pull request was closed", async () => {
+		const { folder, api, web } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		const records = await finishBranches(first);
+		const closed: PullRequest = {
+			repoPath: api,
+			repo: "api",
+			branch: "theory/compile-1111111",
+			base: "main",
+			url: "https://github.com/example/api/pull/1",
+			state: "closed",
+		};
+		await out(api, ["checkout", "main"]);
+
+		const second = await prepareBranches(folder, SECOND, [reportWith(records, [closed])]);
+
+		expect(second.map((p) => [p.name, p.branch, p.created])).toEqual([
+			["api", "theory/compile-2222222", true],
+			["web", "theory/compile-2222222", true],
+		]);
+		expect(await currentBranch(web)).toBe("theory/compile-2222222");
+	});
+
+	it("starting on a finished compile branch goes back to that branch's base", async () => {
+		const { folder, api } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		const records = await finishBranches(first);
+		await out(api, ["checkout", "main"]);
+		await out(api, ["merge", "--no-ff", "-m", "Merge compile", "theory/compile-1111111"]);
+		await out(api, ["checkout", "theory/compile-1111111"]);
+
+		const [prepared] = await prepareBranches(folder, SECOND, [reportWith(records)]);
+
+		expect([prepared.branch, prepared.base, prepared.created]).toEqual(["theory/compile-2222222", "main", true]);
+	});
+});

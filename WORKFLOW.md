@@ -44,7 +44,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |
 | `src/overlay.ts` | Failure overlay: CodeMirror highlights, the note banner, jump to spot, dismiss |
 | `src/note-status.ts` | Realized box and compile-state icon in each note's header |
-| `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. Also marks `index.md`/`instructions.md` at the root and directly in a model folder (bold, house or scroll icon) through the explorer's internal `fileItems`. |
+| `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. Also marks `index.md`/`instructions.md` at the root and directly in a model folder (bold, house or scroll icon) with one stylesheet on the explorer rows' `data-path` (`entryFileSelector`): the file name matches ignoring case, the model folder's name must match the repository exactly. |
 | `src/compile-button.ts` | Floating bottom-right bar: commit button plus compile button with a state and pending count |
 | `src/report-view.ts` | Compile report tab, including permission cards and question suggestions |
 | `src/suggest.ts` | A question's Suggest button: asks Claude Code, with no tools, for ideas on answering it |
@@ -115,7 +115,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 - **Check first:** the note is in the list of changed files (`git status --porcelain -z --untracked-files=all`). If not, the notice "No changes to commit in this note." The floating commit button commits the active note when it has changes, else every changed file, else shows "No changes to commit".
 - **Modal:** a message box (default `Update <basename>`, or `Update model` for all files) with a sparkle button that asks Claude to write the message, an "Include all changed files" toggle when other files changed, and the line "Signed as Name <email>". Cmd/Ctrl+Enter submits.
 - **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus hidden folders, `.obsidian/` and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
-- **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A` then `git commit -m <msg>`. Both use `-c user.name/-c user.email`.
+- **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A -- <each changed path outside .obsidian/>` (a deletion that is already staged is skipped, since git refuses its path) then `git commit -m <msg>`. Both use `-c user.name/-c user.email`.
 - **Output:** a notice "Committed <shortHash>". The buttons, the pending count and the history view refresh.
 
 ### W4. Compile (the core pipeline)
