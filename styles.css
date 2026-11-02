@@ -728,22 +728,7 @@ body button.theory-compile-fab.is-ready:hover {
 
 /* index.md and instructions.md at the root and in each model folder, marked by explorer.ts. */
 
-.theory-entry-file .nav-file-title-content,
-.theory-entry-file .tree-item-inner {
-	font-weight: var(--font-bold);
-}
-
-.theory-entry-icon {
-	display: flex;
-	align-items: center;
-	margin-right: var(--size-4-1);
-	color: var(--text-muted);
-}
-
-.theory-entry-icon svg {
-	width: var(--icon-xs);
-	height: var(--icon-xs);
-}
+/* Index and instructions files: the bold and the icon are generated in explorer.ts. */
 
 /* Pull request states, in the report, the compile history and the Repositories page. */
 

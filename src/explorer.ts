@@ -1,4 +1,4 @@
-import { TAbstractFile, TFile, TFolder, View, getIconIds, setIcon } from "obsidian";
+import { TAbstractFile, TFolder, View, getIcon, getIconIds } from "obsidian";
 import { projectRepos } from "./branches";
 import type TheoryPlugin from "./main";
 
@@ -16,7 +16,6 @@ interface ExplorerItem {
 interface FileExplorerView extends View {
 	getSortedFolderItems(folder: TFolder): ExplorerItem[];
 	requestSort?(): void;
-	fileItems?: Record<string, { selfEl?: HTMLElement }>;
 }
 
 /**
@@ -67,50 +66,53 @@ function entryIcon(name: string): string {
 	return names.find((icon) => ids.includes(`lucide-${icon}`)) ?? names[names.length - 1];
 }
 
+/** A quoted CSS string, for an attribute selector. */
+function cssString(value: string): string {
+	return `"${value.replace(/["\\]/g, "\\$&").replace(/\n/g, "\\a ")}"`;
+}
+
+/** The icon as a data URL, for a CSS mask that takes the text colour. */
+function iconMask(name: string): string {
+	const svg = getIcon(entryIcon(name));
+	return svg ? `url("data:image/svg+xml,${encodeURIComponent(svg.outerHTML)}")` : "none";
+}
+
 /**
  * Shows `index.md` and `instructions.md` in bold with an icon, at the vault root and directly inside a
- * model folder (a root folder named exactly like a repository in the project folder). The bold is in styles.css.
+ * model folder (a root folder named exactly like a repository in the project folder).
+ *
+ * It writes one stylesheet that targets the explorer rows by their `data-path`, the same attribute the
+ * hidden-folder styles use, so it needs none of the explorer's internals and survives every re-render.
  */
 export class EntryFiles {
-	private marked = new Set<HTMLElement>();
+	private styleEl: HTMLStyleElement | null = null;
 
 	constructor(private plugin: TheoryPlugin) {}
 
-	private isEntry(file: TAbstractFile, modelFolders: Set<string>): boolean {
-		if (!(file instanceof TFile) || !(file.name.toLowerCase() in ENTRY_ICONS)) return false;
-		const parent = file.parent;
-		if (!parent) return false;
-		return parent.isRoot() || (parent.parent?.isRoot() === true && modelFolders.has(parent.name));
-	}
-
-	/** Marks every entry file in every file explorer, and unmarks files that stopped being one. */
+	/** Rewrites the stylesheet for the current model folders. */
 	sync() {
-		const modelFolders = new Set(projectRepos(this.plugin.settings.projectFolder).map((repo) => repo.name));
-		const still = new Set<HTMLElement>();
-		for (const leaf of this.plugin.app.workspace.getLeavesOfType("file-explorer")) {
-			const items = (leaf.view as FileExplorerView).fileItems ?? {};
-			for (const [path, item] of Object.entries(items)) {
-				const el = item.selfEl;
-				const file = this.plugin.app.vault.getAbstractFileByPath(path);
-				if (!el || !file || !this.isEntry(file, modelFolders)) continue;
-				still.add(el);
-				if (this.marked.has(el) && el.querySelector(".theory-entry-icon")) continue;
-				el.addClass("theory-entry-file");
-				el.querySelector(".theory-entry-icon")?.remove();
-				setIcon(el.createSpan({ cls: "theory-entry-icon", prepend: true }), entryIcon(file.name));
-				this.marked.add(el);
-			}
-		}
-		for (const el of [...this.marked]) if (!still.has(el)) this.unmark(el);
-	}
-
-	private unmark(el: HTMLElement) {
-		el.removeClass("theory-entry-file");
-		el.querySelector(".theory-entry-icon")?.remove();
-		this.marked.delete(el);
+		const folders = ["", ...projectRepos(this.plugin.settings.projectFolder).map((repo) => `${repo.name}/`)];
+		const rules = Object.keys(ENTRY_ICONS).map((name) => {
+			const rows = folders.map((folder) => `.nav-file-title[data-path=${cssString(folder + name)} i]`).join(", ");
+			return `:is(${rows}) .nav-file-title-content { font-weight: var(--font-bold); }
+:is(${rows})::before {
+	content: "";
+	flex: none;
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+	margin-right: var(--size-4-1);
+	background-color: var(--text-muted);
+	mask: ${iconMask(name)} center / contain no-repeat;
+	-webkit-mask: ${iconMask(name)} center / contain no-repeat;
+}`;
+		});
+		const css = rules.join("\n");
+		this.styleEl ??= document.head.createEl("style", { attr: { id: "theory-entry-files" } });
+		if (this.styleEl.textContent !== css) this.styleEl.textContent = css;
 	}
 
 	detach() {
-		for (const el of [...this.marked]) this.unmark(el);
+		this.styleEl?.remove();
+		this.styleEl = null;
 	}
 }
