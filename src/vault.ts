@@ -142,7 +142,9 @@ export async function commit(
 ): Promise<string> {
 	const identity = await identityArgs(basePath, author);
 	if (paths === "all") {
-		await git(basePath, ["add", "-A", "--", ".", `:(exclude)${OBSIDIAN_CONFIG}`]);
+		// Stage the changed files by name. Excluding `.obsidian/` with a pathspec fails once
+		// .gitignore lists it, because git then refuses the ignored path outright.
+		await git(basePath, ["add", "-A", "--", ...(await changedFiles(basePath))]);
 		await git(basePath, [...identity, "commit", "-m", message]);
 	} else {
 		await git(basePath, ["add", "-A", "--", ...paths]);
