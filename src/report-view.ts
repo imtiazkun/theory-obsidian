@@ -5,14 +5,14 @@ import type TheoryPlugin from "./main";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
 
-const STATUS_TEXT: Record<CompileStatus, string> = {
+export const STATUS_TEXT:Record<CompileStatus, string> = {
 	running: "Compiling…",
 	succeeded: "Compiled",
 	failed: "Failed",
 	cancelled: "Cancelled",
 };
 
-const STATUS_ICON: Record<CompileStatus, string> = {
+export const STATUS_ICON:Record<CompileStatus, string> = {
 	running: "loader",
 	succeeded: "check-circle",
 	failed: "alert-triangle",
@@ -54,6 +54,12 @@ export class CompileReportView extends ItemView {
 	/** Shows the newest report, e.g. when a compile starts. */
 	showLatest() {
 		this.selectedId = null;
+		this.refresh();
+	}
+
+	/** Shows one report, e.g. when it's picked in the compile history. */
+	show(id: string) {
+		this.selectedId = this.plugin.reports[0]?.id === id ? null : id;
 		this.refresh();
 	}
 

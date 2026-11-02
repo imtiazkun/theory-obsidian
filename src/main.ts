@@ -1,5 +1,7 @@
 import { FileSystemAdapter, MarkdownView, Notice, Plugin, TAbstractFile, TFile, debounce } from "obsidian";
 import { CommitButtons, CommitModal } from "./commit";
+import { generateCommitMessage } from "./commit-message";
+import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
 import { CompileReport, CompileRun, NothingToCompileError, startCompile } from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
@@ -10,7 +12,7 @@ import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
 import { HiddenFolders } from "./explorer";
 import { starterFiles } from "./starter";
-import { changedFiles, commit, isVaultSetUp, setUpVault } from "./vault";
+import { authorName, changedFiles, commit, isVaultSetUp, setUpVault } from "./vault";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -47,6 +49,7 @@ export default class TheoryPlugin extends Plugin {
 			name: "Show commit history",
 			callback: () => this.showHistoryView(true),
 		});
+		this.registerView(COMPILE_HISTORY_VIEW_TYPE, (leaf) => new CompileHistoryView(leaf, this));
 		this.registerView(REPORT_VIEW_TYPE, (leaf) => new CompileReportView(leaf, this));
 		this.addCommand({
 			id: "compile",
@@ -68,6 +71,7 @@ export default class TheoryPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(async () => {
 			if (launching) await this.openIndex();
 			await this.showHistoryView(false);
+			await this.showCompileHistoryView();
 			await this.commitButtons.sync();
 			this.compileButton.attach();
 			await this.compileButton.refresh();
@@ -135,6 +139,7 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 		let vaultPath: string;
+		let author: string;
 		try {
 			vaultPath = this.getVaultPath();
 			if (!this.isVaultSetUp()) {
@@ -146,6 +151,7 @@ export default class TheoryPlugin extends Plugin {
 				const count = uncommitted.length;
 				new Notice(`${count} uncommitted ${count === 1 ? "file isn't" : "files aren't"} part of this compile.`);
 			}
+			author = await authorName(vaultPath, this.settings);
 		} catch (error) {
 			new Notice(`Compile failed: ${errorMessage(error)}`, 10000);
 			return;
@@ -155,7 +161,7 @@ export default class TheoryPlugin extends Plugin {
 		let run: CompileRun;
 		try {
 			run = await startCompile(
-				{ vaultPath, projectFolder, claudeCommand, permissionMode, allowedTools },
+				{ vaultPath, projectFolder, claudeCommand, permissionMode, allowedTools, author },
 				() => this.refreshReportViews(),
 			);
 		} catch (error) {
@@ -213,6 +219,12 @@ export default class TheoryPlugin extends Plugin {
 		await workspace.revealLeaf(leaf);
 	}
 
+	/** Opens the compile report on one past compile. */
+	async showReport(id: string) {
+		await this.showReportView();
+		for (const view of this.reportViews()) view.show(id);
+	}
+
 	private reportViews(): CompileReportView[] {
 		return this.app.workspace
 			.getLeavesOfType(REPORT_VIEW_TYPE)
@@ -220,8 +232,12 @@ export default class TheoryPlugin extends Plugin {
 			.filter((view): view is CompileReportView => view instanceof CompileReportView);
 	}
 
+	/** Redraws everything that shows the reports: the report tab and the compile history. */
 	refreshReportViews() {
 		for (const view of this.reportViews()) view.refresh();
+		for (const leaf of this.app.workspace.getLeavesOfType(COMPILE_HISTORY_VIEW_TYPE)) {
+			if (leaf.view instanceof CompileHistoryView) leaf.view.refresh();
+		}
 	}
 
 	async openCommitModal(file: TFile | null) {
@@ -269,6 +285,16 @@ export default class TheoryPlugin extends Plugin {
 		}
 	}
 
+	/** Asks Claude for a commit message describing the changes to `paths`. Returns null when it couldn't. */
+	async generateCommitMessage(paths: string[]): Promise<string | null> {
+		try {
+			return await generateCommitMessage(this.getVaultPath(), paths, this.settings.claudeCommand);
+		} catch (error) {
+			new Notice(`Couldn't generate a message: ${errorMessage(error)}`, 10000);
+			return null;
+		}
+	}
+
 	/** Opens the vault's root Index.md, reusing its tab if it's already open. */
 	async openIndex() {
 		const { vault, workspace } = this.app;
@@ -313,6 +339,15 @@ export default class TheoryPlugin extends Plugin {
 			leaf = right;
 		}
 		if (reveal) await workspace.revealLeaf(leaf);
+	}
+
+	/** Adds the compile history tab to the right sidebar, beside the commit history, if it isn't there yet. */
+	private async showCompileHistoryView() {
+		const { workspace } = this.app;
+		if (workspace.getLeavesOfType(COMPILE_HISTORY_VIEW_TYPE).length > 0) return;
+		const right = workspace.getRightLeaf(false);
+		if (!right) return;
+		await right.setViewState({ type: COMPILE_HISTORY_VIEW_TYPE, active: false });
 	}
 
 	/** Updates everything that shows git state after the repository changes. */

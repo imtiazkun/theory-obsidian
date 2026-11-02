@@ -17,7 +17,7 @@ const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
 // Git pathspecs for vault files that are never sent to Claude: hidden folders (name starts
 // with `_`, at any depth), Obsidian's config folder, and the human-only Instructions.md.
-const NOT_SENT = [
+export const NOT_SENT = [
 	":(exclude,glob)**/_*/**",
 	":(exclude).obsidian/",
 	":(exclude,icase)instructions.md",
@@ -34,6 +34,8 @@ export interface CompileOptions {
 	permissionMode: PermissionMode;
 	/** Space-separated Claude Code permission rules, e.g. `Bash(npm run *)`. */
 	allowedTools: string;
+	/** Who runs the compile, shown in the compile history. */
+	author: string;
 }
 
 export interface Revision {
@@ -70,6 +72,10 @@ export interface CompileReport {
 	dismissed?: boolean;
 	/** Tools Claude used, as they happened. */
 	log: string[];
+	/** Who ran the compile: the author name from settings, else from the git config. */
+	author?: string;
+	/** Every token Claude Code counted in this compile: input, output and cache. Unset when it never reported usage. */
+	tokens?: number;
 }
 
 /** How many committed revisions are waiting to be compiled. */
@@ -300,6 +306,14 @@ function describeToolUse(name: string, input: Record<string, unknown>): string {
 	return text ? `${name}: ${text.length > 160 ? text.slice(0, 157) + "…" : text}` : name;
 }
 
+/** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
+function totalTokens(usage: unknown): number | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const keys = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+	const counts = keys.map((key) => (usage as Record<string, unknown>)[key]).filter((n): n is number => typeof n === "number");
+	return counts.length > 0 ? counts.reduce((sum, n) => sum + n, 0) : undefined;
+}
+
 interface ClaudeResult {
 	isError: boolean;
 	text: string;
@@ -355,6 +369,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		questions: [],
 		problems: [],
 		log: [],
+		author: options.author,
 	};
 
 	const protectedPaths = [vaultPath, snapshot];
@@ -417,6 +432,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 						}
 					}
 				} else if (event.type === "result") {
+					report.tokens = totalTokens(event.usage);
 					result = {
 						isError: Boolean(event.is_error) || event.subtype !== "success",
 						text: typeof event.result === "string" ? event.result : "",

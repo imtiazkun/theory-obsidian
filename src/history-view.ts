@@ -14,7 +14,7 @@ const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
 ];
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
-function timeAgo(date: Date): string {
+export function timeAgo(date: Date): string {
 	const seconds = (date.getTime() - Date.now()) / 1000;
 	for (const [unit, size] of UNITS) {
 		if (Math.abs(seconds) >= size) return relative.format(Math.round(seconds / size), unit);

@@ -32,11 +32,31 @@ export class CommitModal extends Modal {
 		chip.createSpan({ text: file ? file.path : `${count} changed ${count === 1 ? "file" : "files"}` });
 		if (!file) chip.setAttr("title", this.otherChanges.join("\n"));
 
-		const message = contentEl.createEl("textarea", {
+		const messageBox = contentEl.createDiv({ cls: "theory-commit-message-box" });
+		const message = messageBox.createEl("textarea", {
 			cls: "theory-commit-message",
 			attr: { rows: "3", placeholder: "Describe what changed", "aria-label": "Commit message" },
 		});
 		message.value = file ? `Update ${file.basename}` : "Update model";
+
+		const generate = messageBox.createEl("button", {
+			cls: "clickable-icon theory-commit-generate",
+			attr: { "aria-label": "Generate the message with Claude" },
+		});
+		setIcon(generate, "sparkles");
+		generate.addEventListener("click", async () => {
+			if (generate.disabled) return;
+			generate.disabled = true;
+			generate.addClass("is-loading");
+			const paths = this.includeAll || !file ? [...(file ? [file.path] : []), ...this.otherChanges] : [file.path];
+			const generated = await this.plugin.generateCommitMessage(paths);
+			generate.disabled = false;
+			generate.removeClass("is-loading");
+			if (generated === null) return;
+			message.value = generated;
+			updateSubmit();
+			message.focus();
+		});
 
 		if (file && count > 0) {
 			new Setting(contentEl)

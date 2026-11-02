@@ -55,6 +55,42 @@
 	font-family: var(--font-monospace);
 }
 
+/* Compile history: one row per compile, opening its report. */
+.theory-compile-history-item {
+	cursor: pointer;
+}
+
+.theory-compile-history-item:hover .theory-history-subject {
+	color: var(--text-accent);
+}
+
+.theory-compile-history-status {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-1);
+}
+
+.theory-compile-history-icon {
+	display: flex;
+}
+
+.theory-compile-history-icon svg {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+}
+
+.theory-compile-history-item.is-succeeded .theory-compile-history-icon {
+	color: var(--text-success);
+}
+
+.theory-compile-history-item.is-failed .theory-compile-history-icon {
+	color: var(--text-error);
+}
+
+.theory-compile-history-item.is-running .theory-compile-history-icon svg {
+	animation: theory-spin 1.2s linear infinite;
+}
+
 /* Commit button in the note header: the accent dot marks uncommitted changes. */
 .theory-commit-button {
 	position: relative;
@@ -101,10 +137,26 @@
 	height: var(--icon-xs);
 }
 
+.theory-commit-message-box {
+	position: relative;
+}
+
 .theory-commit-message {
 	width: 100%;
 	min-height: 5em;
 	resize: vertical;
+	padding-right: var(--size-4-8);
+}
+
+/* Sparkle in the message box's corner: asks Claude to write the message. */
+.theory-commit-generate {
+	position: absolute;
+	top: var(--size-2-2);
+	right: var(--size-2-2);
+}
+
+.theory-commit-generate.is-loading svg {
+	animation: theory-spin 1.2s linear infinite;
 }
 
 .theory-commit .setting-item {

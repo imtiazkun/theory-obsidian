@@ -82,6 +82,17 @@ async function identityArgs(basePath: string, author: Author): Promise<string[]>
 	return args;
 }
 
+/** The author's name from theory.md settings, else from the git config, else "". */
+export async function authorName(basePath: string, author: Author): Promise<string> {
+	if (author.fullName) return author.fullName;
+	try {
+		const { stdout } = await git(basePath, ["config", "--get", "user.name"]);
+		return stdout.trim();
+	} catch {
+		return "";
+	}
+}
+
 /** Writes each starter file unless the vault root already has it, under any of its names. */
 async function addStarterFiles(basePath: string, files: StarterFile[]) {
 	const existing = new Set((await readdir(basePath)).map((name) => name.toLowerCase()));
@@ -177,6 +188,29 @@ export async function fileHistory(basePath: string, filePath: string): Promise<C
 			const [hash, author, email, date, subject] = line.split(FIELD);
 			return { hash, author, email, date: new Date(date), subject };
 		});
+}
+
+/**
+ * The uncommitted changes to `paths` as a diff, limited to `pathspecs`. Tracked files are diffed
+ * against HEAD; new files are shown whole.
+ */
+export async function uncommittedDiff(basePath: string, paths: string[], pathspecs: string[]): Promise<string> {
+	if (paths.length === 0) return "";
+	const { stdout: listed } = await git(basePath, ["ls-files", "-z", "--", ...paths, ...pathspecs]);
+	const tracked = listed.split("\0").filter(Boolean);
+	const { stdout: others } = await git(basePath, ["ls-files", "-z", "--others", "--exclude-standard", "--", ...paths, ...pathspecs]);
+	const untracked = others.split("\0").filter(Boolean);
+
+	const parts: string[] = [];
+	if (tracked.length > 0) {
+		const { stdout } = await git(basePath, ["diff", "--stat", "--patch", "HEAD", "--", ...tracked]);
+		parts.push(stdout);
+	}
+	for (const path of untracked) {
+		const content = await readFile(join(basePath, path), "utf8").catch(() => "");
+		parts.push(`New file: ${path}\n${content}`);
+	}
+	return parts.join("\n");
 }
 
 /** True when the file differs from its last committed version or isn't tracked yet. */

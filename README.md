@@ -58,7 +58,9 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Author settings: full name and email used to sign commits | Done |
 | Commit button in each note's header, marked when the note has changes | Done |
 | Commit modal: message, with an option to include all changed files | Done |
+| Generate the commit message with Claude (sparkle button in the commit modal) | Done |
 | Commit history view in the right sidebar | Done |
+| Compile history view in the right sidebar: when, who and tokens spent | Done |
 | Open `Index.md` on launch | Done |
 | Compile: send revisions since the last compile to Claude Code | Done |
 | Last compile marker (local `theory/compiled` tag) | Done |

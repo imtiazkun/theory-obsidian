@@ -46,6 +46,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/compile-button.ts` | Floating bottom-right bar: commit button plus compile button with a state and pending count |
 | `src/report-view.ts` | Compile report tab |
 | `src/history-view.ts` | Commit history of the active note, in the right sidebar |
+| `src/compile-history-view.ts` | Compile history (when, who, tokens), beside the commit history in the right sidebar |
+| `src/commit-message.ts` | The commit modal's sparkle: asks Claude Code, with no tools, for a message from the uncommitted diff |
 | `src/settings.ts` | Settings tab |
 | `src/project.ts` | Finds the git repos in the project folder; native folder picker |
 
@@ -100,7 +102,8 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 ### W3. Edit and commit
 - **Trigger:** the commit button in a note's header (marked `is-dirty` when the note has changes), the commit button in the floating bar, or the command "Commit current note".
 - **Check first:** the note is in the list of changed files (`git status --porcelain -z --untracked-files=all`). If not, the notice "No changes to commit in this note." The floating commit button commits the active note when it has changes, else every changed file, else shows "No changes to commit".
-- **Modal:** a message box (default `Update <basename>`, or `Update model` for all files), an "Include all changed files" toggle when other files changed, and the line "Signed as Name <email>". Cmd/Ctrl+Enter submits.
+- **Modal:** a message box (default `Update <basename>`, or `Update model` for all files) with a sparkle button that asks Claude to write the message, an "Include all changed files" toggle when other files changed, and the line "Signed as Name <email>". Cmd/Ctrl+Enter submits.
+- **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus hidden folders, `.obsidian/` and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
 - **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A` then `git commit -m <msg>`. Both use `-c user.name/-c user.email`.
 - **Output:** a notice "Committed <shortHash>". The buttons, the pending count and the history view refresh.
 
@@ -167,6 +170,9 @@ The report tab lists reports newest first: status, the commit range `from..to`, 
 
 ### W9. Commit history view
 The right sidebar shows `git log --follow` for the active note (author, relative time, subject) and marks uncommitted changes.
+
+### W10. Compile history view
+A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do.
 
 ## 7. Invariants (must always hold)
 
