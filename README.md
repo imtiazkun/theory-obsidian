@@ -94,6 +94,8 @@ Copy `manifest.json`, `styles.css` and `dist/main.js` into `<vault>/.obsidian/pl
 
 Use `npm run dev` to rebuild on every change.
 
+Run the tests with `npm test` (Vitest). Run one file or one test with `npm test -- test/branches.test.ts -t "reuses"`.
+
 ## First use
 
 1. Open Settings → theory.md and enter your full name and email.
