@@ -1,4 +1,4 @@
-import { TFile, setIcon, setTooltip } from "obsidian";
+import { Notice, TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
 import { pendingRevisionCount } from "./compile";
 import type TheoryPlugin from "./main";
@@ -235,6 +235,7 @@ export class CompileButton {
 		const active = this.activeChangedFile();
 		if (active) this.plugin.openCommitModal(active);
 		else if (this.state.changed.length > 0) this.plugin.openCommitAllModal();
+		else new Notice("No changes to commit");
 	}
 
 	private onCompileClick() {

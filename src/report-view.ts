@@ -28,6 +28,7 @@ export class CompileReportView extends ItemView {
 	plugin: TheoryPlugin;
 	// The report on screen; null follows the newest one.
 	private selectedId: string | null = null;
+	private activityOpen = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -165,8 +166,11 @@ export class CompileReportView extends ItemView {
 			});
 		}
 
+		if (report.log.length === 0 && report.status !== "running") return;
+		// Folded until the engineer opens it, and kept that way as new lines arrive.
 		const details = contentEl.createEl("details", { cls: "theory-report-log" });
-		if (report.status === "running") details.open = true;
+		details.open = this.activityOpen;
+		details.addEventListener("toggle", () => (this.activityOpen = details.open));
 		details.createEl("summary", { text: `Activity (${report.log.length})` });
 		const log = details.createEl("pre");
 		log.setText(report.log.length > 0 ? report.log.join("\n") : "Waiting for Claude…");

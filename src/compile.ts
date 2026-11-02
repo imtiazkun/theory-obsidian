@@ -469,9 +469,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			} else {
 				report.status = "failed";
 				report.summary = result?.text || "Claude Code finished without a report.";
-				if (code !== 0) {
-					report.problems.push(plainProblem(`Claude Code exited with code ${code}. ${stderr.trim()}`.trim()));
-				}
+				report.problems.push(plainProblem(`Claude Code exited with code ${code}. ${stderr.trim()}`.trim()));
 			}
 
 			// The model must come back exactly as it went in.
@@ -483,7 +481,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.problems.unshift(plainProblem("Claude tried to change the model snapshot. Those changes were thrown away."));
 			}
 			const vaultAfter = await workingTreeState(vaultPath);
-			const touched = [...vaultAfter].filter(([path, mark]) => vaultBefore.get(path) !== mark).map(([path]) => path);
+			// A file that was dirty before and is clean now changed too, so compare both ways.
+			const paths = new Set([...vaultBefore.keys(), ...vaultAfter.keys()]);
+			const touched = [...paths].filter((path) => vaultBefore.get(path) !== vaultAfter.get(path));
 			if (touched.length > 0) {
 				report.problems.unshift(
 					plainProblem(
