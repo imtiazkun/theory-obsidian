@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
-import type { CompileReport, CompileStatus, PermissionAnswer, PermissionRequest } from "./compile";
+import { timeLeft, type CompileReport, type CompileStatus, type PermissionAnswer, type PermissionRequest } from "./compile";
 import type TheoryPlugin from "./main";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -246,8 +246,7 @@ export class CompileReportView extends ItemView {
 	/** Counts down the time left on each Deny button, from "Deny (2:00)" to "Deny (0:00)". */
 	private tick() {
 		for (const { el, expiresAt } of this.countdowns) {
-			const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-			el.setText(`Deny (${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")})`);
+			el.setText(`Deny (${timeLeft(expiresAt)})`);
 		}
 	}
 

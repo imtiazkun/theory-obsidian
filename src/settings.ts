@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
-import type { PermissionMode } from "./compile";
+import type { CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { findProjectRepos, pickFolder } from "./project";
 import type TheoryPlugin from "./main";
 
@@ -15,6 +15,10 @@ export interface TheorySettings extends AuthorSettings {
 	claudeCommand: string;
 	permissionMode: PermissionMode;
 	allowedTools: string;
+	/** Passed to Claude Code as `--model`, unless it's "" (Claude Code default). */
+	model: CompileModel;
+	/** Passed to Claude Code as `--effort`, unless it's "" (Claude Code default). */
+	effort: CompileEffort;
 	showCompileButton: boolean;
 }
 
@@ -25,6 +29,8 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	claudeCommand: "claude",
 	permissionMode: "acceptEdits",
 	allowedTools: "Bash(git *)",
+	model: "",
+	effort: "",
 	showCompileButton: true,
 };
 
@@ -140,6 +146,41 @@ export class TheorySettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Model")
+			.setDesc("The Claude model that compiles. A change applies from the next compile.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("", "Claude Code default")
+					.addOption("fable", "Fable")
+					.addOption("opus", "Opus")
+					.addOption("sonnet", "Sonnet")
+					.addOption("haiku", "Haiku")
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model = value as CompileModel;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Effort")
+			.setDesc("How much Claude thinks while it compiles. A change applies from the next compile.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("", "Claude Code default")
+					.addOption("low", "Low")
+					.addOption("medium", "Medium")
+					.addOption("high", "High")
+					.addOption("xhigh", "Extra high")
+					.addOption("max", "Max")
+					.setValue(this.plugin.settings.effort)
+					.onChange(async (value) => {
+						this.plugin.settings.effort = value as CompileEffort;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName("Permission mode")
 			.setDesc(
 				"How much Claude may do without asking. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
@@ -159,7 +200,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Allowed commands")
 			.setDesc(
-				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Writes to the model are always denied.",
+				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the exact command here. Writes to the model are always denied.",
 			)
 			.addText((text) =>
 				text

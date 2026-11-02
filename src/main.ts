@@ -164,7 +164,7 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const { projectFolder, claudeCommand, permissionMode, allowedTools } = this.settings;
+		const { projectFolder, claudeCommand, permissionMode, allowedTools, model, effort } = this.settings;
 		let run: CompileRun;
 		try {
 			run = await startCompile(
@@ -174,13 +174,18 @@ export default class TheoryPlugin extends Plugin {
 					claudeCommand,
 					permissionMode,
 					allowedTools,
+					model,
+					effort,
 					author,
 					onPermissionRequest: (request) => {
 						new Notice(`Claude is asking to use ${request.tool}. Answer in the compile report.`);
 						this.showReportView();
 					},
 				},
-				() => this.refreshReportViews(),
+				() => {
+					this.refreshReportViews();
+					this.compileButton.render();
+				},
 			);
 		} catch (error) {
 			new Notice(
@@ -230,6 +235,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileRun?.answer(id, answer);
 		if (answer !== "always") return;
 		const rules = this.settings.allowedTools.trim();
+		// One rule at the end of the list, never twice.
 		if (!` ${rules} `.includes(` ${request.rule} `)) {
 			this.settings.allowedTools = rules ? `${rules} ${request.rule}` : request.rule;
 		}
@@ -253,6 +259,12 @@ export default class TheoryPlugin extends Plugin {
 			await leaf.setViewState({ type: REPORT_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+	}
+
+	/** Opens the compile report on the latest compile, scrolled to any waiting permission card. */
+	async showLatestReport() {
+		await this.showReportView();
+		for (const view of this.reportViews()) view.showLatest();
 	}
 
 	/** Opens the compile report on one past compile. */

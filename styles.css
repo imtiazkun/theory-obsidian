@@ -565,6 +565,14 @@ body button.theory-compile-fab.is-ready:hover {
 	animation: theory-spin 1.2s linear infinite;
 }
 
+.theory-compile-fab.is-asking .theory-compile-fab-icon {
+	color: var(--text-warning);
+}
+
+.theory-compile-fab.is-asking .theory-compile-fab-icon svg {
+	animation: none;
+}
+
 .theory-compile-fab.is-idle .theory-compile-fab-icon {
 	color: var(--text-success);
 }

@@ -1,6 +1,6 @@
 import { Notice, TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
-import { pendingRevisionCount } from "./compile";
+import { pendingRevisionCount, timeLeft } from "./compile";
 import type TheoryPlugin from "./main";
 import { changedFiles } from "./vault";
 
@@ -42,6 +42,8 @@ export class CompileButton {
 	private movedStatusBar: HTMLElement | null = null;
 	private resizeObserver = new ResizeObserver(() => this.position());
 	private onWindowResize = () => this.position();
+	// Counts down with a waiting permission card.
+	private ticker: number | null = null;
 
 	constructor(private plugin: TheoryPlugin) {
 		this.barEl = createDiv({ cls: "theory-action-bar" });
@@ -68,6 +70,9 @@ export class CompileButton {
 			document.body.appendChild(this.barEl);
 			window.addEventListener("resize", this.onWindowResize);
 		}
+		this.ticker ??= window.setInterval(() => {
+			if (this.state.compile.kind === "running") this.render();
+		}, 1000);
 		// The root split's element isn't in Obsidian's public types, though every split has one.
 		const root = this.plugin.app.workspace.rootSplit as unknown as { containerEl: HTMLElement };
 		if (this.observed !== root.containerEl) {
@@ -82,6 +87,8 @@ export class CompileButton {
 		this.resizeObserver.disconnect();
 		this.observed = null;
 		window.removeEventListener("resize", this.onWindowResize);
+		if (this.ticker !== null) window.clearInterval(this.ticker);
+		this.ticker = null;
 		this.restoreStatusBar();
 		this.barEl.remove();
 	}
@@ -155,7 +162,8 @@ export class CompileButton {
 		return { compile: { kind: "idle" }, changed };
 	}
 
-	private render() {
+	/** Redraws without reading git again, e.g. when a permission request opens or closes. */
+	render() {
 		const { compile } = this.state;
 		this.barEl.toggle(compile.kind !== "hidden");
 		if (compile.kind === "hidden") return;
@@ -182,6 +190,7 @@ export class CompileButton {
 
 	private renderCompile(compile: Exclude<CompileState, { kind: "hidden" }>) {
 		for (const kind of COMPILE_KINDS) this.compileEl.toggleClass(`is-${kind}`, compile.kind === kind);
+		this.compileEl.removeClass("is-asking");
 		this.badgeEl.empty();
 		this.badgeEl.hide();
 
@@ -190,9 +199,21 @@ export class CompileButton {
 			uncommitted > 0 ? `\n${plural(uncommitted, "file has", "files have")} uncommitted changes, which won't be compiled.` : "";
 
 		switch (compile.kind) {
-			case "running":
-				this.show("loader", "Compiling…", "A compile is running. Click to follow it.");
+			case "running": {
+				// The oldest waiting permission card, which the report scrolls to.
+				const [request] = this.plugin.permissionRequests();
+				this.compileEl.toggleClass("is-asking", Boolean(request));
+				if (request) {
+					this.show(
+						"message-circle-question",
+						`Claude is asking (${timeLeft(request.expiresAt)})`,
+						`Claude is asking to use ${request.tool}. Click to answer in the compile report.`,
+					);
+				} else {
+					this.show("loader", "Compiling…", "A compile is running. Click to follow it.");
+				}
 				break;
+			}
 			case "setup":
 				this.show("settings", "Set up Compile", "Choose the project folder this model compiles into.");
 				break;
@@ -244,6 +265,10 @@ export class CompileButton {
 				break;
 			case "setup":
 				this.plugin.openSettings();
+				break;
+			case "running":
+				// Opens the report at the waiting card, if there is one.
+				this.plugin.showLatestReport();
 				break;
 			default:
 				this.plugin.showReportView();

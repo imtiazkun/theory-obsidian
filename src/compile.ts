@@ -25,9 +25,19 @@ export const NOT_SENT = [
 ];
 
 export type PermissionMode = "acceptEdits" | "auto" | "bypassPermissions";
+/** A Claude Code model alias, or "" to let Claude Code decide. Aliases always mean the latest model of their kind. */
+export type CompileModel = "" | "fable" | "opus" | "sonnet" | "haiku";
+/** A Claude Code effort level, or "" to let Claude Code decide. */
+export type CompileEffort = "" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** A request nobody answers in this time is denied, so a compile never hangs. */
 export const PERMISSION_TIMEOUT_MS = 120_000;
+
+/** The time left until `expiresAt`, as "m:ss". */
+export function timeLeft(expiresAt: number): string {
+	const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
 // Tools that write files. Their writes to the vault or the snapshot are denied before any card is shown.
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
 
@@ -57,6 +67,8 @@ export interface CompileOptions {
 	permissionMode: PermissionMode;
 	/** Space-separated Claude Code permission rules, e.g. `Bash(npm run *)`. */
 	allowedTools: string;
+	model: CompileModel;
+	effort: CompileEffort;
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
 	/** Called when Claude asks for a tool call the settings don't allow. */
@@ -363,31 +375,12 @@ function isInside(path: string, dir: string): boolean {
 }
 
 /**
- * The rule Always allow adds to Allowed commands: Claude Code's own suggestion when it has one,
- * else a rule for this exact command or file. Never a rule that lets a write tool loose everywhere.
+ * The rule Always allow adds to Allowed commands: the exact command, never a wildcard,
+ * so the engineer approves one command and not a family of them. Any other tool gets its name.
  */
-function requestRule(tool: string, input: Record<string, unknown>, suggestions: unknown, file: string | null): string {
-	const exact = () => {
-		if (file) return `${tool}(//${file.replace(/^\//, "")})`;
-		if (tool === "Bash" && typeof input.command === "string") return `Bash(${input.command})`;
-		if (tool === "WebFetch" && typeof input.url === "string") {
-			try {
-				return `WebFetch(domain:${new URL(input.url).hostname})`;
-			} catch {
-				return tool;
-			}
-		}
-		return tool;
-	};
-	if (!Array.isArray(suggestions)) return exact();
-	for (const suggestion of suggestions) {
-		if (suggestion?.type !== "addRules" || suggestion.behavior !== "allow") continue;
-		for (const rule of suggestion.rules ?? []) {
-			if (rule?.toolName !== tool || WRITE_TOOLS.includes(tool)) continue;
-			return rule.ruleContent ? `${tool}(${rule.ruleContent})` : tool;
-		}
-	}
-	return exact();
+function requestRule(tool: string, input: Record<string, unknown>): string {
+	if (tool === "Bash" && typeof input.command === "string" && input.command) return `Bash(${input.command})`;
+	return tool;
 }
 
 /** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
@@ -485,6 +478,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		"--disallowedTools",
 		...disallowed,
 	];
+	// Fixed when Claude Code starts, so a running compile keeps the model and effort it started with.
+	if (options.model) args.push("--model", options.model);
+	if (options.effort) args.push("--effort", options.effort);
 	const allowed = options.allowedTools.trim();
 	if (allowed) args.push("--allowedTools", allowed);
 
@@ -592,7 +588,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			tool,
 			target: requestTarget(tool, input),
 			reason: reason || "Claude didn't give a reason.",
-			rule: requestRule(tool, input, request.permission_suggestions, file),
+			rule: requestRule(tool, input),
 			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
 			line: report.log.length,
 		};
