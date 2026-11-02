@@ -152,7 +152,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 `cancelCompile()` sends SIGTERM to the Claude process if the report is still running. The result is `cancelled` and the marker stays where it was. Unloading the plugin also cancels.
 
 ### W6. Read the report and answer questions
-The report tab lists reports newest first: status, the commit range `from..to`, revisions, summary, changes, questions (each links to the model notes it names and has a **Reply** button that opens the note at the text the question is about: its first checked anchor, else the top of its first note), problems and the tool log ("Activity", folded until opened). Sections with nothing in them are left out. Engineers answer questions by **editing the model, committing and compiling again** (back to W3, then W4). Reports are never written into the vault.
+The report tab lists reports newest first: status, the commit range `from..to`, revisions, summary, changes, questions (each links to the model notes it names and has a **Reply** button that opens the note at the rule that needs updating: its first checked anchor's quote, else that anchor's heading, else the top of the note; with no anchor, the top of its first note), problems and the tool log ("Activity", folded until opened). Sections with nothing in them are left out. Engineers answer questions by **editing the model, committing and compiling again** (back to W3, then W4). Reports are never written into the vault.
 
 ### W7. Failure overlay (`src/overlay.ts`)
 - **Which report:** the newest finished report, only if it `failed` and isn't `dismissed`. The next successful compile clears the overlay by itself.

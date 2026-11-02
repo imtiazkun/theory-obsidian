@@ -155,8 +155,24 @@
 	right: var(--size-2-2);
 }
 
+.theory-commit-generate svg {
+	animation: theory-sparkle-fade 2.4s ease-in-out infinite;
+}
+
 .theory-commit-generate.is-loading svg {
-	animation: theory-spin 1.2s linear infinite;
+	animation:
+		theory-spin 1.2s linear infinite,
+		theory-sparkle-fade 2.4s ease-in-out infinite;
+}
+
+@keyframes theory-sparkle-fade {
+	0%,
+	100% {
+		color: var(--icon-color);
+	}
+	50% {
+		color: var(--interactive-accent);
+	}
 }
 
 .theory-commit .setting-item {

@@ -160,7 +160,7 @@ export class FailureOverlay {
 		this.plugin.refreshReportViews();
 	}
 
-	/** Opens the note an anchor points to and selects the spot, when it can still be found. */
+	/** Opens the note an anchor points to at its quote, else its heading, else the top of the note. */
 	async jump(anchor: Anchor) {
 		const { vault, workspace } = this.plugin.app;
 		const file = vault.getAbstractFileByPath(anchor.path);
@@ -176,15 +176,14 @@ export class FailureOverlay {
 		else await leaf.openFile(file);
 
 		const view = leaf.view;
-		if (!(view instanceof MarkdownView) || (!anchor.quote && !anchor.heading)) return;
-		const found = findAnchor(view.getViewData(), anchor);
-		if (!found) {
+		if (!(view instanceof MarkdownView)) return;
+		const found = anchor.quote || anchor.heading ? findAnchor(view.getViewData(), anchor) : null;
+		if (!found && (anchor.quote || anchor.heading)) {
 			new Notice("Couldn't find this spot. The note has changed since the compile.");
-			return;
 		}
 		const { editor } = view;
-		const from = editor.offsetToPos(found.from);
-		const to = editor.offsetToPos(found.to);
+		const from = editor.offsetToPos(found?.from ?? 0);
+		const to = editor.offsetToPos(found?.to ?? 0);
 		if (view.getMode() === "source") {
 			editor.setSelection(from, to);
 			editor.scrollIntoView({ from, to }, true);

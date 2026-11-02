@@ -125,7 +125,8 @@ const REPORT_SCHEMA = {
 					},
 					anchors: {
 						type: "array",
-						description: "Where in the model the text the question is about sits.",
+						description:
+							"Where in the model the rule that needs updating sits: the file, its heading and a short quote of the rule.",
 						items: ANCHOR_SCHEMA,
 					},
 				},
@@ -285,7 +286,7 @@ Rules:
 - The model is read-only. Never create, edit, move or delete anything in the model directory, and never write to the Obsidian vault it came from. Writing to the model is forbidden.
 - The model is the source of truth. If the code disagrees with the model, change the code.
 - A note whose front matter has \`realized: false\` is written ahead of the code. Don't build what it describes yet, and don't count it as a mismatch.
-- If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Carry on with the parts that are clear.
+- If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
 - Only change files inside the project folder.
 - Before changing a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and follow its rules, including how to test.
 - When you commit in a code repository, end each commit message with the trailer \`Model-Revision: ${head}\`.
