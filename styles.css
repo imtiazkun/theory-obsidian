@@ -1,0 +1,554 @@
+.mecho-invalid {
+	border-color: var(--text-error) !important;
+}
+
+.mecho-history {
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+.mecho-history-header {
+	margin-bottom: var(--size-4-3);
+}
+
+.mecho-history-title {
+	font-weight: var(--font-semibold);
+}
+
+.mecho-history-dirty {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-1);
+	color: var(--text-warning);
+	font-size: var(--font-ui-smaller);
+}
+
+.mecho-history-commit {
+	height: auto;
+	padding: var(--size-2-1) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+}
+
+.mecho-history-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	margin-bottom: var(--size-4-3);
+}
+
+.mecho-history-item {
+	padding: var(--size-4-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mecho-history-subject {
+	font-size: var(--font-ui-small);
+	word-break: break-word;
+}
+
+.mecho-history-meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.mecho-history-hash {
+	font-family: var(--font-monospace);
+}
+
+/* Commit button in the note header: the accent dot marks uncommitted changes. */
+.mecho-commit-button {
+	position: relative;
+}
+
+.mecho-commit-button.is-dirty {
+	color: var(--interactive-accent);
+}
+
+.mecho-commit-button.is-dirty::after {
+	content: "";
+	position: absolute;
+	top: 3px;
+	right: 3px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background-color: var(--interactive-accent);
+	box-shadow: 0 0 0 2px var(--background-primary);
+}
+
+/* Commit modal */
+.mecho-commit-file {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	max-width: 100%;
+	margin-bottom: var(--size-4-3);
+	padding: var(--size-2-1) var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.mecho-commit-file-icon {
+	display: flex;
+	flex-shrink: 0;
+}
+
+.mecho-commit-file-icon svg {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+}
+
+.mecho-commit-message {
+	width: 100%;
+	min-height: 5em;
+	resize: vertical;
+}
+
+.mecho-commit .setting-item {
+	border-top: none;
+	padding: var(--size-4-3) 0 0;
+}
+
+.mecho-commit-footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-4);
+}
+
+.mecho-commit-author {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.mecho-commit-footer .modal-button-container {
+	margin-top: 0;
+	margin-left: auto;
+}
+
+/* Project folder in settings */
+.mecho-project-path {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.mecho-project-repos {
+	margin: 0 0 var(--size-4-3);
+	padding: var(--size-4-2) var(--size-4-3);
+	border-radius: var(--radius-m);
+	background-color: var(--background-secondary);
+}
+
+.mecho-project-repos-title {
+	margin-bottom: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.mecho-project-repo {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	padding: var(--size-2-1) 0;
+	font-size: var(--font-ui-small);
+}
+
+.mecho-project-repo-icon,
+.mecho-project-warning-icon {
+	display: flex;
+	flex-shrink: 0;
+}
+
+.mecho-project-repo-icon {
+	color: var(--text-faint);
+}
+
+.mecho-project-repo-icon svg,
+.mecho-project-warning-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.mecho-project-warning {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin: 0 0 var(--size-4-3);
+	padding: var(--size-4-2) var(--size-4-3);
+	border-radius: var(--radius-m);
+	background-color: rgba(var(--color-yellow-rgb), 0.1);
+	color: var(--text-warning);
+	font-size: var(--font-ui-small);
+}
+
+/* Compile report */
+.mecho-report {
+	padding: var(--size-4-4) var(--size-4-6);
+	max-width: 760px;
+}
+
+.mecho-report-toolbar {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-4);
+}
+
+.mecho-report-toolbar .dropdown {
+	flex: 1;
+	min-width: 0;
+}
+
+.mecho-report-empty {
+	color: var(--text-muted);
+}
+
+.mecho-report-status {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	font-size: var(--font-ui-large);
+	font-weight: var(--font-semibold);
+}
+
+.mecho-report-status-icon {
+	display: flex;
+}
+
+.mecho-report-status.is-succeeded .mecho-report-status-icon {
+	color: var(--text-success);
+}
+
+.mecho-report-status.is-failed .mecho-report-status-icon {
+	color: var(--text-error);
+}
+
+.mecho-report-status.is-cancelled .mecho-report-status-icon {
+	color: var(--text-muted);
+}
+
+.mecho-report-status.is-running .mecho-report-status-icon svg {
+	animation: mecho-spin 1.2s linear infinite;
+}
+
+@keyframes mecho-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.mecho-report-range {
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	font-weight: normal;
+}
+
+.mecho-report-cancel {
+	margin-left: auto;
+}
+
+.mecho-report-section h4 {
+	margin: var(--size-4-6) 0 var(--size-4-2);
+}
+
+.mecho-report-problems li {
+	color: var(--text-error);
+}
+
+.mecho-report-question {
+	padding: var(--size-4-2) var(--size-4-3);
+	margin-bottom: var(--size-4-2);
+	border-left: 3px solid var(--text-warning);
+	background-color: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.mecho-report-notes {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-1);
+	font-size: var(--font-ui-small);
+}
+
+.mecho-report-revision {
+	padding: var(--size-4-1) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mecho-report-meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.mecho-report-log {
+	margin-top: var(--size-4-6);
+}
+
+.mecho-report-log pre {
+	max-height: 320px;
+	overflow: auto;
+	font-size: var(--font-ui-smaller);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* Floating action bar, bottom right of the editor area: commit and compile.
+   `body button` outranks Obsidian's own button styles. */
+.mecho-action-bar {
+	position: fixed;
+	/* right and bottom are set from the editor area's bounds; the margin keeps it off the edges. */
+	margin: 0 var(--size-4-4) var(--size-4-4) 0;
+	z-index: var(--layer-status-bar);
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+}
+
+.mecho-action-bar.is-offscreen {
+	display: none;
+}
+
+body button.mecho-fab {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--size-4-2);
+	width: auto;
+	height: 40px;
+	margin: 0;
+	padding: 0 var(--size-4-4) 0 var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background-color: var(--background-primary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	white-space: nowrap;
+	box-shadow: var(--shadow-s);
+	cursor: pointer;
+	transition:
+		transform 120ms ease,
+		box-shadow 120ms ease,
+		background-color 120ms ease;
+}
+
+body button.mecho-fab:hover {
+	transform: translateY(-1px);
+	box-shadow: var(--shadow-l);
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+}
+
+body button.mecho-fab:active {
+	transform: translateY(0);
+}
+
+body button.mecho-fab:focus-visible {
+	box-shadow: 0 0 0 3px var(--background-modifier-border-focus);
+}
+
+/* Commit: a round, icon-only button. The accent dot marks uncommitted changes. */
+body button.mecho-commit-fab {
+	width: 40px;
+	padding: 0;
+}
+
+body button.mecho-commit-fab svg {
+	width: 18px;
+	height: 18px;
+}
+
+body button.mecho-commit-fab.is-dirty {
+	color: var(--interactive-accent);
+}
+
+body button.mecho-commit-fab.is-dirty::after {
+	content: "";
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background-color: var(--interactive-accent);
+	box-shadow: 0 0 0 2px var(--background-primary);
+}
+
+body button.mecho-commit-fab[aria-disabled="true"] {
+	cursor: default;
+	opacity: 0.6;
+	box-shadow: none;
+	transform: none;
+}
+
+.mecho-compile-fab-icon {
+	display: flex;
+}
+
+.mecho-compile-fab-icon svg {
+	width: 18px;
+	height: 18px;
+}
+
+.mecho-compile-fab-badge {
+	padding: 1px var(--size-4-2);
+	border-radius: 999px;
+	background-color: var(--background-modifier-hover);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-medium);
+}
+
+/* New revisions to compile: the one state that asks for a click. */
+body button.mecho-compile-fab.is-ready {
+	border-color: transparent;
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+body button.mecho-compile-fab.is-ready:hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+.mecho-compile-fab.is-ready .mecho-compile-fab-badge {
+	min-width: 22px;
+	background-color: rgba(255, 255, 255, 0.25);
+	text-align: center;
+	font-weight: var(--font-bold);
+}
+
+.mecho-compile-fab.is-running .mecho-compile-fab-icon {
+	color: var(--interactive-accent);
+}
+
+.mecho-compile-fab.is-running .mecho-compile-fab-icon svg {
+	animation: mecho-spin 1.2s linear infinite;
+}
+
+.mecho-compile-fab.is-idle .mecho-compile-fab-icon {
+	color: var(--text-success);
+}
+
+.mecho-compile-fab.is-failed .mecho-compile-fab-icon {
+	color: var(--text-error);
+}
+
+/* Realized box and compile state in the note header */
+
+.mecho-realized-button.is-realized {
+	color: var(--text-success);
+}
+
+.mecho-state-button.is-compiled {
+	color: var(--text-success);
+}
+
+.mecho-state-button.is-pending {
+	color: var(--interactive-accent);
+}
+
+.mecho-state-button.is-failed {
+	color: var(--text-error);
+}
+
+.mecho-state-button.is-running svg {
+	animation: mecho-spin 1.2s linear infinite;
+}
+
+/* The realized box in the header shows this property, so it's hidden from the note. */
+.metadata-property[data-property-key="realized"] {
+	display: none;
+}
+
+/* Hide the whole Properties block when realized is its only property. */
+.metadata-container:has(.metadata-property[data-property-key="realized"]):not(:has(.metadata-property:not([data-property-key="realized"]))) {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mecho-fab,
+	.mecho-state-button svg,
+	.mecho-compile-fab-icon svg {
+		transition: none;
+		animation: none !important;
+	}
+}
+
+/* Where a failed compile points in the model */
+
+.mecho-fail-line {
+	background-color: rgba(var(--color-red-rgb), 0.08);
+	box-shadow: inset 3px 0 0 var(--text-error);
+}
+
+.mecho-fail-mark {
+	text-decoration: underline wavy var(--text-error);
+	text-decoration-skip-ink: none;
+	text-underline-offset: 3px;
+}
+
+.mecho-fail-banner {
+	flex-shrink: 0;
+	padding: var(--size-4-2) var(--size-4-4);
+	border-bottom: 1px solid var(--background-modifier-border);
+	background-color: rgba(var(--color-red-rgb), 0.08);
+	font-size: var(--font-ui-small);
+}
+
+.mecho-fail-banner-head {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+}
+
+.mecho-fail-banner-icon {
+	display: flex;
+	color: var(--text-error);
+}
+
+.mecho-fail-banner-icon svg {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+.mecho-fail-banner-title {
+	font-weight: var(--font-semibold);
+}
+
+.mecho-fail-banner-actions {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-left: auto;
+}
+
+.mecho-fail-banner-list {
+	margin: var(--size-4-1) 0 0;
+	padding-left: var(--size-4-8);
+	max-height: 8em;
+	overflow: auto;
+}
+
+.mecho-fail-banner-moved {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Folders starting with _ are hidden folders: grey, and sorted last by explorer.ts. */
+
+/* Hovered and active items keep Obsidian's own colours. */
+.nav-folder-title:is([data-path^="_"], [data-path*="/_"]):not(:hover, .is-active),
+.nav-folder:has(> .nav-folder-title:is([data-path^="_"], [data-path*="/_"])) .tree-item-self:not(:hover, .is-active) {
+	color: var(--text-faint);
+}

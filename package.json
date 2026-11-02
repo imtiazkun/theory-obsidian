@@ -1,0 +1,20 @@
+{
+  "name": "mecho",
+  "version": "0.1.0",
+  "description": "Obsidian plugin that signs note revisions with author and datetime",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc && node esbuild.config.mjs production"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "obsidian": "^1.14.4",
+    "typescript": "^7.0.2"
+  },
+  "private": true
+}
