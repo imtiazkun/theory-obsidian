@@ -51,8 +51,8 @@ export interface PermissionRequest {
 	target: string;
 	/** Why Claude wants it, in Claude's words. */
 	reason: string;
-	/** The rule Always allow adds to Allowed commands, or null when there is none to add (a file tool with no file). */
-	rule: string | null;
+	/** The rules Always allow adds to Allowed commands, or none when there is nothing to add (a file tool with no file). */
+	rules: string[];
 	/** When the request is denied by itself, in milliseconds since the epoch. */
 	expiresAt: number;
 	/** Where the request sits in the report's activity log. Its card shows there, and its answer replaces that line. */
@@ -382,33 +382,39 @@ function ruleText(rule: unknown): string | null {
 	return typeof ruleContent === "string" && ruleContent ? `${toolName}(${ruleContent})` : toolName;
 }
 
-/** The first allow rule Claude Code suggests for this tool with a permission request, if any. */
-function suggestedRule(tool: string, suggestions: unknown): string | null {
-	if (!Array.isArray(suggestions)) return null;
+/** Every allow rule Claude Code suggests for this tool with a permission request, in order, without repeats. */
+function suggestedRules(tool: string, suggestions: unknown): string[] {
+	const rules: string[] = [];
+	if (!Array.isArray(suggestions)) return rules;
 	for (const update of suggestions) {
 		if (update?.type !== "addRules" || update.behavior !== "allow" || !Array.isArray(update.rules)) continue;
 		for (const rule of update.rules) {
-			if (rule?.toolName === tool) return ruleText(rule);
+			const text = rule?.toolName === tool ? ruleText(rule) : null;
+			if (text && !rules.includes(text)) rules.push(text);
 		}
 	}
-	return null;
+	return rules;
 }
 
 /**
- * The rule Always allow adds to Allowed commands, shown on the card before the engineer clicks.
- * A command gets Claude Code's suggestion, which may cover a family of commands, else the exact command.
+ * The rules Always allow adds to Allowed commands, all shown on the card before the engineer clicks.
+ * A command gets every rule Claude Code suggests (a compound command may get one per part, and each
+ * may cover a family of commands), else the exact command, so the same command never asks twice.
  * A file tool gets that tool on that exact file, never the bare tool name nor Claude Code's suggestion,
  * so one approval opens one file only. Any other tool gets Claude Code's suggestion, else its name.
  */
-function requestRule(tool: string, input: Record<string, unknown>, projectFolder: string, suggestions: unknown): string | null {
+function requestRules(tool: string, input: Record<string, unknown>, projectFolder: string, suggestions: unknown): string[] {
 	if (WRITE_TOOLS.includes(tool)) {
 		const file = writtenFile(tool, input, projectFolder);
-		return file ? `${tool}(//${file.replace(/^\//, "")})` : null;
+		return file ? [`${tool}(//${file.replace(/^\//, "")})`] : [];
 	}
-	const suggested = suggestedRule(tool, suggestions);
-	if (suggested) return suggested;
-	if (tool === "Bash" && typeof input.command === "string" && input.command) return `Bash(${input.command})`;
-	return tool;
+	const suggested = suggestedRules(tool, suggestions);
+	if (tool === "Bash") {
+		if (suggested.length > 0) return suggested;
+		if (typeof input.command === "string" && input.command) return [`Bash(${input.command})`];
+		return [tool];
+	}
+	return [suggested[0] ?? tool];
 }
 
 /** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
@@ -575,16 +581,19 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			deny(id, "The engineer denied this. Carry on without this step and name it in problems.");
 			return;
 		}
-		const [toolName, ruleContent] = request.rule?.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
+		const rules = request.rules.map((rule) => {
+			const [toolName, ruleContent] = rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
+			return ruleContent ? { toolName, ruleContent } : { toolName };
+		});
 		reply(id, {
 			behavior: "allow",
 			updatedInput: input,
-			...(choice === "always" && request.rule
+			...(choice === "always" && rules.length > 0
 				? {
 						updatedPermissions: [
 							{
 								type: "addRules",
-								rules: [ruleContent ? { toolName, ruleContent } : { toolName }],
+								rules,
 								behavior: "allow",
 								destination: "session",
 							},
@@ -616,7 +625,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			tool,
 			target: requestTarget(tool, input),
 			reason: reason || "Claude didn't give a reason.",
-			rule: requestRule(tool, input, projectFolder, request.permission_suggestions),
+			rules: requestRules(tool, input, projectFolder, request.permission_suggestions),
 			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
 			line: report.log.length,
 		};

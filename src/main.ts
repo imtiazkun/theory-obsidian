@@ -228,17 +228,18 @@ export default class TheoryPlugin extends Plugin {
 		return this.compileRun?.requests ?? [];
 	}
 
-	/** Answers one permission request. Always allow also adds its rule to Allowed commands. */
+	/** Answers one permission request. Always allow also adds its rules to Allowed commands. */
 	async answerPermission(id: string, answer: PermissionAnswer) {
 		const request = this.compileRun?.requests.find((r) => r.id === id);
 		if (!request) return;
 		this.compileRun?.answer(id, answer);
-		if (answer !== "always" || !request.rule) return;
-		const rules = this.settings.allowedTools.trim();
-		// One rule at the end of the list, never twice.
-		if (!` ${rules} `.includes(` ${request.rule} `)) {
-			this.settings.allowedTools = rules ? `${rules} ${request.rule}` : request.rule;
+		if (answer !== "always" || request.rules.length === 0) return;
+		// The request's rules at the end of the list, none of them twice.
+		let rules = this.settings.allowedTools.trim();
+		for (const rule of request.rules) {
+			if (!` ${rules} `.includes(` ${rule} `)) rules = rules ? `${rules} ${rule}` : rule;
 		}
+		this.settings.allowedTools = rules;
 		await this.saveSettings();
 	}
 

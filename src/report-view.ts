@@ -338,10 +338,13 @@ export class CompileReportView extends ItemView {
 		card.createEl("pre", { cls: "theory-permission-target", text: request.target });
 		card.createDiv({ cls: "theory-report-meta", text: request.reason });
 		// The engineer sees how much one click allows before clicking Always allow.
-		if (request.rule) {
+		if (request.rules.length > 0) {
 			const rule = card.createDiv({ cls: "theory-report-meta theory-permission-rule" });
 			rule.appendText("Always allow adds ");
-			rule.createEl("code", { text: request.rule });
+			request.rules.forEach((text, i) => {
+				if (i > 0) rule.appendText(i === request.rules.length - 1 ? " and " : ", ");
+				rule.createEl("code", { text });
+			});
 			rule.appendText(" to Allowed commands.");
 		}
 		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
@@ -351,7 +354,7 @@ export class CompileReportView extends ItemView {
 			["deny", "Deny"],
 		];
 		for (const [answer, text] of choices) {
-			if (answer === "always" && !request.rule) continue;
+			if (answer === "always" && request.rules.length === 0) continue;
 			const button = buttons.createEl("button", { text, cls: answer === "allow" ? "mod-cta" : "" });
 			if (answer === "deny") this.countdowns.push({ el: button, expiresAt: request.expiresAt });
 			button.addEventListener("click", () => this.plugin.answerPermission(request.id, answer));
