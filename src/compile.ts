@@ -188,7 +188,7 @@ async function workingTreeState(vaultPath: string): Promise<Map<string, string>>
 
 /** Checks out `commit` into a fresh read-only directory outside the vault. */
 async function createSnapshot(vaultPath: string, commit: string): Promise<string> {
-	const dir = await realpath(await mkdtemp(join(tmpdir(), "mecho-model-")));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "theory-model-")));
 	const archive = `${dir}.tar`;
 	await git(vaultPath, ["archive", "--format=tar", "-o", archive, commit]);
 	await runTool("tar", ["-xf", archive, "-C", dir]);

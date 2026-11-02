@@ -1,5 +1,5 @@
 import { App, MarkdownView, Modal, Setting, TFile, getIconIds, setIcon } from "obsidian";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 import { hasUncommittedChanges } from "./vault";
 
 export function commitIcon(): string {
@@ -12,7 +12,7 @@ export class CommitModal extends Modal {
 
 	constructor(
 		app: App,
-		private plugin: MechoPlugin,
+		private plugin: TheoryPlugin,
 		/** The note to commit, or null to commit every changed file. */
 		private file: TFile | null,
 		private otherChanges: string[],
@@ -23,17 +23,17 @@ export class CommitModal extends Modal {
 	onOpen() {
 		const { contentEl } = this;
 		this.setTitle("Commit changes");
-		contentEl.addClass("mecho-commit");
+		contentEl.addClass("theory-commit");
 
 		const { file } = this;
 		const count = this.otherChanges.length;
-		const chip = contentEl.createDiv({ cls: "mecho-commit-file" });
-		setIcon(chip.createSpan({ cls: "mecho-commit-file-icon" }), file ? "file-text" : "files");
+		const chip = contentEl.createDiv({ cls: "theory-commit-file" });
+		setIcon(chip.createSpan({ cls: "theory-commit-file-icon" }), file ? "file-text" : "files");
 		chip.createSpan({ text: file ? file.path : `${count} changed ${count === 1 ? "file" : "files"}` });
 		if (!file) chip.setAttr("title", this.otherChanges.join("\n"));
 
 		const message = contentEl.createEl("textarea", {
-			cls: "mecho-commit-message",
+			cls: "theory-commit-message",
 			attr: { rows: "3", placeholder: "Describe what changed", "aria-label": "Commit message" },
 		});
 		message.value = file ? `Update ${file.basename}` : "Update model";
@@ -47,10 +47,10 @@ export class CommitModal extends Modal {
 				);
 		}
 
-		const footer = contentEl.createDiv({ cls: "mecho-commit-footer" });
+		const footer = contentEl.createDiv({ cls: "theory-commit-footer" });
 		const { fullName, email } = this.plugin.settings;
 		footer.createDiv({
-			cls: "mecho-commit-author",
+			cls: "theory-commit-author",
 			text: fullName ? `Signed as ${fullName}${email ? ` <${email}>` : ""}` : "Signed with your git identity",
 		});
 
@@ -103,7 +103,7 @@ export class CommitButtons {
 	// Ignores results from an older sync that finishes after a newer one.
 	private syncId = 0;
 
-	constructor(private plugin: MechoPlugin) {}
+	constructor(private plugin: TheoryPlugin) {}
 
 	async sync() {
 		const id = ++this.syncId;
@@ -121,7 +121,7 @@ export class CommitButtons {
 			let button = this.buttons.get(view);
 			if (!button) {
 				button = view.addAction(commitIcon(), "Commit changes", () => this.plugin.openCommitModal(view.file));
-				button.addClass("mecho-commit-button");
+				button.addClass("theory-commit-button");
 				this.buttons.set(view, button);
 			}
 

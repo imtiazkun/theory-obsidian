@@ -3,7 +3,7 @@ import { CommitButtons, CommitModal } from "./commit";
 import { CompileButton } from "./compile-button";
 import { CompileReport, CompileRun, NothingToCompileError, startCompile } from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
-import { DEFAULT_SETTINGS, MechoSettingTab, MechoSettings } from "./settings";
+import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
@@ -18,8 +18,8 @@ function errorMessage(error: unknown): string {
 
 const MAX_REPORTS = 20;
 
-export default class MechoPlugin extends Plugin {
-	settings: MechoSettings = { ...DEFAULT_SETTINGS };
+export default class TheoryPlugin extends Plugin {
+	settings: TheorySettings = { ...DEFAULT_SETTINGS };
 	/** Compile reports, newest first. */
 	reports: CompileReport[] = [];
 	private commitButtons = new CommitButtons(this);
@@ -33,7 +33,7 @@ export default class MechoPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
-		this.addSettingTab(new MechoSettingTab(this.app, this));
+		this.addSettingTab(new TheorySettingTab(this.app, this));
 
 		this.addCommand({
 			id: "setup-vault",
@@ -60,7 +60,7 @@ export default class MechoPlugin extends Plugin {
 		});
 		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
 		this.statusBar = this.addStatusBarItem();
-		this.statusBar.addClass("mecho-status");
+		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
 
 		// The layout is already ready when the plugin is turned on mid-session; only act on launch.

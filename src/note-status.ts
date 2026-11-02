@@ -1,6 +1,6 @@
 import { MarkdownView, TFile, getIconIds, setIcon } from "obsidian";
 import { COMPILED_TAG } from "./compile";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 import { git } from "./vault";
 
 /**
@@ -46,7 +46,7 @@ export class NoteStatus {
 	// Ignores results from an older sync that finishes after a newer one.
 	private syncId = 0;
 
-	constructor(private plugin: MechoPlugin) {}
+	constructor(private plugin: TheoryPlugin) {}
 
 	isRealized(file: TFile): boolean {
 		return this.plugin.app.metadataCache.getFileCache(file)?.frontmatter?.[REALIZED_KEY] !== false;
@@ -78,9 +78,9 @@ export class NoteStatus {
 			if (!buttons) {
 				// Header actions are added right to left, so the realized box sits left of the compile state.
 				const compile = view.addAction("clock", "", () => this.plugin.showReportView());
-				compile.addClass("mecho-state-button");
+				compile.addClass("theory-state-button");
 				const realized = view.addAction("square", "", () => this.toggleRealized(view.file));
-				realized.addClass("mecho-realized-button");
+				realized.addClass("theory-realized-button");
 				buttons = { realized, compile };
 				this.buttons.set(view, buttons);
 			}

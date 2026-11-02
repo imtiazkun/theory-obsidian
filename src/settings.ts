@@ -2,14 +2,14 @@ import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import type { PermissionMode } from "./compile";
 import { findProjectRepos, pickFolder } from "./project";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 
 export interface AuthorSettings {
 	fullName: string;
 	email: string;
 }
 
-export interface MechoSettings extends AuthorSettings {
+export interface TheorySettings extends AuthorSettings {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
@@ -18,7 +18,7 @@ export interface MechoSettings extends AuthorSettings {
 	showCompileButton: boolean;
 }
 
-export const DEFAULT_SETTINGS: MechoSettings = {
+export const DEFAULT_SETTINGS: TheorySettings = {
 	fullName: "",
 	email: "",
 	projectFolder: "",
@@ -34,10 +34,10 @@ export function isValidEmail(email: string): boolean {
 	return EMAIL_PATTERN.test(email);
 }
 
-export class MechoSettingTab extends PluginSettingTab {
-	plugin: MechoPlugin;
+export class TheorySettingTab extends PluginSettingTab {
+	plugin: TheoryPlugin;
 
-	constructor(app: App, plugin: MechoPlugin) {
+	constructor(app: App, plugin: TheoryPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -75,7 +75,7 @@ export class MechoSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					const email = value.trim();
 					const valid = email === "" || isValidEmail(email);
-					text.inputEl.toggleClass("mecho-invalid", !valid);
+					text.inputEl.toggleClass("theory-invalid", !valid);
 					emailSetting.setDesc(
 						valid
 							? "Contact address shown next to your name."
@@ -108,7 +108,7 @@ export class MechoSettingTab extends PluginSettingTab {
 				});
 			});
 
-		this.displayProject(containerEl.createDiv({ cls: "mecho-project" }));
+		this.displayProject(containerEl.createDiv({ cls: "theory-project" }));
 
 		new Setting(containerEl)
 			.setName("Compile")
@@ -179,7 +179,7 @@ export class MechoSettingTab extends PluginSettingTab {
 
 		const setting = new Setting(containerEl).setName("Project folder");
 		if (folder) {
-			setting.descEl.createDiv({ cls: "mecho-project-path", text: folder });
+			setting.descEl.createDiv({ cls: "theory-project-path", text: folder });
 		} else {
 			setting.setDesc("The folder holding this project's code. Compile runs Claude Code here.");
 		}
@@ -210,8 +210,8 @@ export class MechoSettingTab extends PluginSettingTab {
 
 		const found = findProjectRepos(folder);
 		if (found.kind === "missing" || found.kind === "none") {
-			const warning = containerEl.createDiv({ cls: "mecho-project-warning" });
-			setIcon(warning.createSpan({ cls: "mecho-project-warning-icon" }), "alert-triangle");
+			const warning = containerEl.createDiv({ cls: "theory-project-warning" });
+			setIcon(warning.createSpan({ cls: "theory-project-warning-icon" }), "alert-triangle");
 			warning.createSpan({
 				text:
 					found.kind === "missing"
@@ -221,15 +221,15 @@ export class MechoSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		const list = containerEl.createDiv({ cls: "mecho-project-repos" });
+		const list = containerEl.createDiv({ cls: "theory-project-repos" });
 		list.createDiv({
-			cls: "mecho-project-repos-title",
+			cls: "theory-project-repos-title",
 			text: found.kind === "root" ? "Project repository" : `Project repositories (${found.repos.length})`,
 		});
 		for (const repo of found.repos) {
-			const row = list.createDiv({ cls: "mecho-project-repo" });
-			setIcon(row.createSpan({ cls: "mecho-project-repo-icon" }), "git-branch");
-			row.createSpan({ cls: "mecho-project-repo-name", text: basename(repo) });
+			const row = list.createDiv({ cls: "theory-project-repo" });
+			setIcon(row.createSpan({ cls: "theory-project-repo-icon" }), "git-branch");
+			row.createSpan({ cls: "theory-project-repo-name", text: basename(repo) });
 			row.setAttr("title", repo);
 		}
 	}

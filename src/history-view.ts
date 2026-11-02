@@ -1,8 +1,8 @@
 import { ItemView, TFile, WorkspaceLeaf, debounce } from "obsidian";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 import { fileHistory, hasUncommittedChanges } from "./vault";
 
-export const HISTORY_VIEW_TYPE = "mecho-commit-history";
+export const HISTORY_VIEW_TYPE = "theory-commit-history";
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
 	["year", 365 * 24 * 3600],
@@ -23,11 +23,11 @@ function timeAgo(date: Date): string {
 }
 
 export class CommitHistoryView extends ItemView {
-	plugin: MechoPlugin;
+	plugin: TheoryPlugin;
 	// Ignores results from an older refresh that finishes after a newer one.
 	private refreshId = 0;
 
-	constructor(leaf: WorkspaceLeaf, plugin: MechoPlugin) {
+	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
 		this.plugin = plugin;
 	}
@@ -90,44 +90,44 @@ export class CommitHistoryView extends ItemView {
 		if (id !== this.refreshId) return;
 
 		contentEl.empty();
-		contentEl.addClass("mecho-history");
+		contentEl.addClass("theory-history");
 		this.renderHeader(file, dirty);
 
 		if (commits.length === 0) {
-			contentEl.createDiv({ cls: "mecho-history-empty", text: "No commits yet for this note." });
+			contentEl.createDiv({ cls: "theory-history-empty", text: "No commits yet for this note." });
 			return;
 		}
 
-		const list = contentEl.createDiv({ cls: "mecho-history-list" });
+		const list = contentEl.createDiv({ cls: "theory-history-list" });
 		for (const commit of commits) {
-			const item = list.createDiv({ cls: "mecho-history-item" });
+			const item = list.createDiv({ cls: "theory-history-item" });
 			item.setAttr("title", `${commit.hash}\n${commit.author} <${commit.email}>\n${commit.date.toLocaleString()}`);
-			item.createDiv({ cls: "mecho-history-subject", text: commit.subject });
-			const meta = item.createDiv({ cls: "mecho-history-meta" });
+			item.createDiv({ cls: "theory-history-subject", text: commit.subject });
+			const meta = item.createDiv({ cls: "theory-history-meta" });
 			meta.createSpan({ text: commit.author });
 			meta.createSpan({ text: " · " });
 			meta.createSpan({ text: timeAgo(commit.date) });
 			meta.createSpan({ text: " · " });
-			meta.createSpan({ cls: "mecho-history-hash", text: commit.hash.slice(0, 7) });
+			meta.createSpan({ cls: "theory-history-hash", text: commit.hash.slice(0, 7) });
 		}
 	}
 
 	private renderHeader(file: TFile, dirty: boolean) {
-		const header = this.contentEl.createDiv({ cls: "mecho-history-header" });
-		header.createDiv({ cls: "mecho-history-title", text: file.basename });
+		const header = this.contentEl.createDiv({ cls: "theory-history-header" });
+		header.createDiv({ cls: "theory-history-title", text: file.basename });
 		if (dirty) {
-			const status = header.createDiv({ cls: "mecho-history-dirty" });
+			const status = header.createDiv({ cls: "theory-history-dirty" });
 			status.createSpan({ text: "Uncommitted changes" });
 			status
-				.createEl("button", { cls: "mod-cta mecho-history-commit", text: "Commit…" })
+				.createEl("button", { cls: "mod-cta theory-history-commit", text: "Commit…" })
 				.addEventListener("click", () => this.plugin.openCommitModal(file));
 		}
 	}
 
 	private renderMessage(text: string) {
 		this.contentEl.empty();
-		this.contentEl.addClass("mecho-history");
-		this.contentEl.createDiv({ cls: "mecho-history-empty", text });
+		this.contentEl.addClass("theory-history");
+		this.contentEl.createDiv({ cls: "theory-history-empty", text });
 	}
 
 	private renderVaultNotSetUp() {

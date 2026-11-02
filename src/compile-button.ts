@@ -1,7 +1,7 @@
 import { TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
 import { pendingRevisionCount } from "./compile";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 import { changedFiles } from "./vault";
 
 type CompileState =
@@ -43,17 +43,17 @@ export class CompileButton {
 	private resizeObserver = new ResizeObserver(() => this.position());
 	private onWindowResize = () => this.position();
 
-	constructor(private plugin: MechoPlugin) {
-		this.barEl = createDiv({ cls: "mecho-action-bar" });
+	constructor(private plugin: TheoryPlugin) {
+		this.barEl = createDiv({ cls: "theory-action-bar" });
 
-		this.commitEl = this.barEl.createEl("button", { cls: "mecho-fab mecho-commit-fab" });
+		this.commitEl = this.barEl.createEl("button", { cls: "theory-fab theory-commit-fab" });
 		setIcon(this.commitEl, commitIcon());
 		this.commitEl.addEventListener("click", () => this.onCommitClick());
 
-		this.compileEl = this.barEl.createEl("button", { cls: "mecho-fab mecho-compile-fab" });
-		this.iconEl = this.compileEl.createSpan({ cls: "mecho-compile-fab-icon" });
-		this.labelEl = this.compileEl.createSpan({ cls: "mecho-compile-fab-label" });
-		this.badgeEl = this.compileEl.createSpan({ cls: "mecho-compile-fab-badge" });
+		this.compileEl = this.barEl.createEl("button", { cls: "theory-fab theory-compile-fab" });
+		this.iconEl = this.compileEl.createSpan({ cls: "theory-compile-fab-icon" });
+		this.labelEl = this.compileEl.createSpan({ cls: "theory-compile-fab-label" });
+		this.badgeEl = this.compileEl.createSpan({ cls: "theory-compile-fab-badge" });
 		this.compileEl.addEventListener("click", () => this.onCompileClick());
 
 		this.render();

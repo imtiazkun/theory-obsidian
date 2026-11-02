@@ -19,11 +19,11 @@ npm run dev     # esbuild watch, inline sourcemaps (no type-check)
 
 There are no tests and no linter. `tsc` (via `npm run build`) is the only check.
 
-The build writes a complete plugin folder to `dist/` (`main.js`, plus `manifest.json` and `styles.css` copied in). To try it, copy those files into `<vault>/.obsidian/plugins/mecho/` and reload the plugin in Obsidian. `dist/data.json` is local plugin data (settings and reports) from a test install. Don't commit or rely on it.
+The build writes a complete plugin folder to `dist/` (`main.js`, plus `manifest.json` and `styles.css` copied in). To try it, copy those files into `<vault>/.obsidian/plugins/theory-md/` and reload the plugin in Obsidian. `dist/data.json` is local plugin data (settings and reports) from a test install. Don't commit or rely on it.
 
 ## Naming
 
-The product is **theory.md**, but the plugin id, folder, class (`MechoPlugin`), view types, CSS classes (`mecho-*`) and temp folders (`$TMPDIR/mecho-model-*`) still use the old name `mecho`. Keep using `mecho` for identifiers. Changing the id would break existing installs and plugin data.
+The product is **theory.md**. The plugin id and folder are `theory-md`, classes use `Theory…` (`TheoryPlugin`), and view types, CSS classes and temp folders use the `theory-` prefix (`theory-report`, `$TMPDIR/theory-model-*`). The plugin used to be called `mecho`. Older installs live in `plugins/mecho/`, and vaults set up back then have a `.gitignore` entry for `plugins/mecho/data.json`.
 
 ## Architecture
 

@@ -1,9 +1,9 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
 import type { CompileReport, CompileStatus } from "./compile";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 
-export const REPORT_VIEW_TYPE = "mecho-compile-report";
+export const REPORT_VIEW_TYPE = "theory-compile-report";
 
 const STATUS_TEXT: Record<CompileStatus, string> = {
 	running: "Compiling…",
@@ -25,11 +25,11 @@ function shortHash(hash: string | null): string {
 
 /** Shows compile reports. They live in plugin data, never in the model. */
 export class CompileReportView extends ItemView {
-	plugin: MechoPlugin;
+	plugin: TheoryPlugin;
 	// The report on screen; null follows the newest one.
 	private selectedId: string | null = null;
 
-	constructor(leaf: WorkspaceLeaf, plugin: MechoPlugin) {
+	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
 		this.plugin = plugin;
 	}
@@ -61,9 +61,9 @@ export class CompileReportView extends ItemView {
 		const report = reports.find((r) => r.id === this.selectedId) ?? reports[0];
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass("mecho-report");
+		contentEl.addClass("theory-report");
 
-		const toolbar = contentEl.createDiv({ cls: "mecho-report-toolbar" });
+		const toolbar = contentEl.createDiv({ cls: "theory-report-toolbar" });
 		if (reports.length > 0) {
 			const select = toolbar.createEl("select", { cls: "dropdown", attr: { "aria-label": "Past compiles" } });
 			for (const r of reports) {
@@ -82,7 +82,7 @@ export class CompileReportView extends ItemView {
 
 		if (!report) {
 			contentEl.createDiv({
-				cls: "mecho-report-empty",
+				cls: "theory-report-empty",
 				text: "No compiles yet. Commit your changes to the model, then click Compile.",
 			});
 			return;
@@ -93,28 +93,28 @@ export class CompileReportView extends ItemView {
 	private renderReport(report: CompileReport) {
 		const { contentEl } = this;
 
-		const header = contentEl.createDiv({ cls: `mecho-report-status is-${report.status}` });
-		setIcon(header.createSpan({ cls: "mecho-report-status-icon" }), STATUS_ICON[report.status]);
+		const header = contentEl.createDiv({ cls: `theory-report-status is-${report.status}` });
+		setIcon(header.createSpan({ cls: "theory-report-status-icon" }), STATUS_ICON[report.status]);
 		header.createSpan({ text: STATUS_TEXT[report.status] });
 		header.createSpan({
-			cls: "mecho-report-range",
+			cls: "theory-report-range",
 			text: `${shortHash(report.fromCommit)} → ${shortHash(report.toCommit)}`,
 		});
 		if (report.status === "running") {
 			header
-				.createEl("button", { cls: "mecho-report-cancel", text: "Cancel" })
+				.createEl("button", { cls: "theory-report-cancel", text: "Cancel" })
 				.addEventListener("click", () => this.plugin.cancelCompile());
 		} else if (this.plugin.overlay.report() === report) {
 			header
-				.createEl("button", { cls: "mecho-report-cancel", text: "Clear highlights" })
+				.createEl("button", { cls: "theory-report-cancel", text: "Clear highlights" })
 				.addEventListener("click", () => this.plugin.overlay.dismiss());
 		}
 
-		if (report.summary) contentEl.createEl("p", { cls: "mecho-report-summary", text: report.summary });
+		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
 
 		if (report.problems.length > 0) {
 			const section = this.section("Problems", report.problems.length);
-			const list = section.createEl("ul", { cls: "mecho-report-problems" });
+			const list = section.createEl("ul", { cls: "theory-report-problems" });
 			for (const problem of report.problems) {
 				const item = list.createEl("li");
 				item.createDiv({ text: problem.text });
@@ -126,7 +126,7 @@ export class CompileReportView extends ItemView {
 		if (report.status === "failed" && !anchored && report.suspectNotes?.length) {
 			const section = this.section("Notes changed in this compile", report.suspectNotes.length);
 			section.createDiv({
-				cls: "mecho-report-meta",
+				cls: "theory-report-meta",
 				text: "Claude didn't say where in the model the compile failed. One of these notes may be the cause.",
 			});
 			this.anchorLinks(section, report.suspectNotes.map((path) => ({ path })));
@@ -135,10 +135,10 @@ export class CompileReportView extends ItemView {
 		if (report.questions.length > 0) {
 			const section = this.section("Questions about the model", report.questions.length);
 			for (const q of report.questions) {
-				const item = section.createDiv({ cls: "mecho-report-question" });
+				const item = section.createDiv({ cls: "theory-report-question" });
 				item.createDiv({ text: q.question });
 				if (q.notes.length === 0) continue;
-				const notes = item.createDiv({ cls: "mecho-report-notes" });
+				const notes = item.createDiv({ cls: "theory-report-notes" });
 				for (const note of q.notes) {
 					const link = notes.createEl("a", { cls: "internal-link", text: note, href: note });
 					link.addEventListener("click", (event) => {
@@ -157,15 +157,15 @@ export class CompileReportView extends ItemView {
 
 		const revisions = this.section("Revisions compiled", report.revisions.length);
 		for (const r of report.revisions) {
-			const item = revisions.createDiv({ cls: "mecho-report-revision" });
+			const item = revisions.createDiv({ cls: "theory-report-revision" });
 			item.createDiv({ text: r.subject });
 			item.createDiv({
-				cls: "mecho-report-meta",
+				cls: "theory-report-meta",
 				text: `${r.author} · ${new Date(r.date).toLocaleString()} · ${r.hash.slice(0, 7)}`,
 			});
 		}
 
-		const details = contentEl.createEl("details", { cls: "mecho-report-log" });
+		const details = contentEl.createEl("details", { cls: "theory-report-log" });
 		if (report.status === "running") details.open = true;
 		details.createEl("summary", { text: `Activity (${report.log.length})` });
 		const log = details.createEl("pre");
@@ -174,7 +174,7 @@ export class CompileReportView extends ItemView {
 
 	/** Links that open each anchor's note at the spot it names. */
 	private anchorLinks(container: HTMLElement, anchors: Anchor[]) {
-		const links = container.createDiv({ cls: "mecho-report-notes" });
+		const links = container.createDiv({ cls: "theory-report-notes" });
 		for (const anchor of anchors) {
 			const text = anchor.heading ? `${anchor.path} › ${anchor.heading}` : anchor.path;
 			const link = links.createEl("a", { cls: "internal-link", text, href: anchor.path });
@@ -187,7 +187,7 @@ export class CompileReportView extends ItemView {
 	}
 
 	private section(title: string, count: number): HTMLElement {
-		const section = this.contentEl.createDiv({ cls: "mecho-report-section" });
+		const section = this.contentEl.createDiv({ cls: "theory-report-section" });
 		section.createEl("h4", { text: `${title} (${count})` });
 		return section;
 	}

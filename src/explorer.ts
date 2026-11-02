@@ -1,5 +1,5 @@
 import { TAbstractFile, TFolder, View } from "obsidian";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 
 /** Folders whose name starts with this are hidden folders, like `_templates`. */
 const HIDDEN_PREFIX = "_";
@@ -24,7 +24,7 @@ interface FileExplorerView extends View {
 export class HiddenFolders {
 	private patched = new Set<FileExplorerView>();
 
-	constructor(private plugin: MechoPlugin) {}
+	constructor(private plugin: TheoryPlugin) {}
 
 	/** Wraps any file explorer that isn't wrapped yet, e.g. after the layout changes. */
 	attach() {

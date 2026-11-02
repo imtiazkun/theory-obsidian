@@ -3,7 +3,7 @@ import { Decoration, DecorationSet, EditorView, PluginValue, ViewPlugin, ViewUpd
 import { MarkdownView, Notice, TFile, editorInfoField, setIcon } from "obsidian";
 import { Anchor, findAnchor } from "./anchor";
 import type { CompileReport } from "./compile";
-import type MechoPlugin from "./main";
+import type TheoryPlugin from "./main";
 
 const refreshMarks = StateEffect.define<null>();
 
@@ -20,7 +20,7 @@ interface NoteMark {
 export class FailureOverlay {
 	private banners = new Map<MarkdownView, HTMLElement>();
 
-	constructor(private plugin: MechoPlugin) {}
+	constructor(private plugin: TheoryPlugin) {}
 
 	/** The failed compile shown in the notes: the newest finished one, unless it was dismissed. */
 	report(): CompileReport | null {
@@ -76,13 +76,13 @@ export class FailureOverlay {
 			const found = findAnchor(text, anchor);
 			if (!found) continue;
 			// A plain attribute, so Claude's text can't add markup.
-			const mark = Decoration.mark({ class: "mecho-fail-mark", attributes: { title: problem } });
+			const mark = Decoration.mark({ class: "theory-fail-mark", attributes: { title: problem } });
 			if (found.to > found.from) ranges.push(mark.range(found.from, found.to));
 			for (let n = doc.lineAt(found.from).number; n <= doc.lineAt(found.to).number; n++) {
 				lineStarts.add(doc.line(n).from);
 			}
 		}
-		for (const from of lineStarts) ranges.push(Decoration.line({ class: "mecho-fail-line" }).range(from));
+		for (const from of lineStarts) ranges.push(Decoration.line({ class: "theory-fail-line" }).range(from));
 		return Decoration.set(ranges, true);
 	}
 
@@ -111,28 +111,28 @@ export class FailureOverlay {
 	private renderBanner(view: MarkdownView, marks: NoteMark[]) {
 		let banner = this.banners.get(view);
 		if (!banner?.isConnected) {
-			banner = createDiv({ cls: "mecho-fail-banner" });
+			banner = createDiv({ cls: "theory-fail-banner" });
 			view.containerEl.insertBefore(banner, view.contentEl);
 			this.banners.set(view, banner);
 		}
 		banner.empty();
 
-		const head = banner.createDiv({ cls: "mecho-fail-banner-head" });
-		setIcon(head.createSpan({ cls: "mecho-fail-banner-icon" }), "alert-triangle");
+		const head = banner.createDiv({ cls: "theory-fail-banner-head" });
+		setIcon(head.createSpan({ cls: "theory-fail-banner-icon" }), "alert-triangle");
 		head.createSpan({
-			cls: "mecho-fail-banner-title",
+			cls: "theory-fail-banner-title",
 			text:
 				marks.length > 0
 					? `The last compile failed here (${marks.length})`
 					: "The last compile failed. This note changed in it, so it may be the cause.",
 		});
-		const actions = head.createDiv({ cls: "mecho-fail-banner-actions" });
+		const actions = head.createDiv({ cls: "theory-fail-banner-actions" });
 		actions.createEl("button", { text: "Report" }).addEventListener("click", () => this.plugin.showReportView());
 		actions.createEl("button", { text: "Dismiss" }).addEventListener("click", () => this.dismiss());
 		if (marks.length === 0) return;
 
 		const text = view.getViewData();
-		const list = banner.createEl("ul", { cls: "mecho-fail-banner-list" });
+		const list = banner.createEl("ul", { cls: "theory-fail-banner-list" });
 		for (const { problem, anchor } of marks) {
 			const item = list.createEl("li");
 			if (!anchor.quote && !anchor.heading) {
@@ -145,7 +145,7 @@ export class FailureOverlay {
 				this.jump(anchor);
 			});
 			if (!findAnchor(text, anchor)) {
-				item.createDiv({ cls: "mecho-fail-banner-moved", text: "This spot has changed since the compile." });
+				item.createDiv({ cls: "theory-fail-banner-moved", text: "This spot has changed since the compile." });
 			}
 		}
 	}

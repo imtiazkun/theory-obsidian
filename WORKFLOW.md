@@ -4,7 +4,7 @@ This file describes how the theory.md Obsidian plugin works. It is written so an
 
 ## 1. One-paragraph summary
 
-theory.md is a desktop-only Obsidian plugin (plugin id `mecho`). Humans write a **theoretical model** of a software system as notes in an Obsidian vault. The vault is a git repository. Humans **commit** changes to the model as signed git commits. **Compile** sends every commit made since the last compile to the Claude Code CLI. Claude Code then changes the code in a separate **project folder** to match the model. Claude returns a structured **compile report** (summary, changes, questions, problems), which the plugin shows in Obsidian. The AI never writes to the model.
+theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans write a **theoretical model** of a software system as notes in an Obsidian vault. The vault is a git repository. Humans **commit** changes to the model as signed git commits. **Compile** sends every commit made since the last compile to the Claude Code CLI. Claude Code then changes the code in a separate **project folder** to match the model. Claude returns a structured **compile report** (summary, changes, questions, problems), which the plugin shows in Obsidian. The AI never writes to the model.
 
 ## 2. Glossary
 
@@ -18,9 +18,9 @@ theory.md is a desktop-only Obsidian plugin (plugin id `mecho`). Humans write a 
 | Revision | A git commit in the vault repo. |
 | Last compile marker | Git tag `theory/compiled` in the vault repo. It points at the last compiled commit. |
 | Pending revisions | Commits in `theory/compiled..HEAD`. On the first compile (no tag yet), all commits up to `HEAD`. |
-| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/mecho-model-*`). Claude reads the model from here. |
+| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. |
 | Compile report | JSON record of one compile run. Kept in plugin data, never in the vault. |
-| Plugin data | `.obsidian/plugins/mecho/data.json`. Holds the settings and the last 20 reports. Git ignores it. |
+| Plugin data | `.obsidian/plugins/theory-md/data.json`. Holds the settings and the last 20 reports. Git ignores it. |
 | Anchor | Where a problem sits in the model: `{path, heading?, quote?}`. Claude proposes it, and the plugin checks it against the snapshot before keeping it. |
 | Realized | Front matter `realized: false` marks a note as written ahead of the code. If the key is missing, the note counts as realized. Engineers set it with a box in the note header. |
 | Failure overlay | Highlights and a banner the plugin draws on notes that a failed compile points to. Display only: it never edits a note. |
@@ -28,7 +28,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `mecho`). Humans write a 
 ## 3. Actors and components
 
 - **Engineer** (human): edits notes, commits, clicks Compile, reads reports, answers questions by editing the model.
-- **Plugin** (`src/main.ts`, class `MechoPlugin`): wires commands, views, buttons and events, and holds the compile lock.
+- **Plugin** (`src/main.ts`, class `TheoryPlugin`): wires commands, views, buttons and events, and holds the compile lock.
 - **Git** (run as a subprocess through `git()` in `src/vault.ts`): stores the model's history, the marker tag, diffs and snapshots.
 - **Claude Code CLI** (run as a subprocess in `src/compile.ts`): reads the snapshot, edits the project folder, runs the allowed commands and returns structured output.
 
@@ -93,7 +93,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 
 ### W2. Setup vault (command "Setup vault")
 - **Check first:** the vault isn't already a git repo (no `.git`). An author name and email exist in the settings or the git config. Otherwise it fails with a notice.
-- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/workspace*.json`, `.obsidian/plugins/mecho/data.json`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
+- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/workspace*.json`, `.obsidian/plugins/theory-md/data.json`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
 - **Output:** the vault is a git repo whose initial commit includes the starter files. The UI refreshes and `Index.md` opens.
 
 ### W3. Edit and commit
@@ -152,7 +152,7 @@ The report tab lists reports newest first: status, the commit range `from..to`, 
 
 ### W7. Failure overlay (`src/overlay.ts`)
 - **Which report:** the newest finished report, only if it `failed` and isn't `dismissed`. The next successful compile clears the overlay by itself.
-- **Editor highlight:** a CodeMirror `ViewPlugin` (`registerEditorExtension`) finds each anchor in the note's *current* text, quote first and then heading. It adds `mecho-fail-line` to those lines and a `mecho-fail-mark` wavy underline to the text, with the problem as a plain `title` tooltip. It updates on every edit and whenever `sync()` sends a refresh.
+- **Editor highlight:** a CodeMirror `ViewPlugin` (`registerEditorExtension`) finds each anchor in the note's *current* text, quote first and then heading. It adds `theory-fail-line` to those lines and a `theory-fail-mark` wavy underline to the text, with the problem as a plain `title` tooltip. It updates on every edit and whenever `sync()` sends a refresh.
 - **Banner:** a div above the note's content in every open note the report points to: "The last compile failed here (n)", with Report and Dismiss buttons and the list of problems. Clicking one jumps to its spot. If the quote or heading is no longer in the note, it says the spot has changed.
 - **Fallback:** if *no* problem in the report has anchors, every note in `suspectNotes` gets a banner saying it changed in the failed compile and may be the cause. The report view lists these notes too.
 - **Jump:** opens the note (reusing its tab), finds the anchor and selects it in editing modes, or scrolls to it in reading mode. Report-view links use the same jump.

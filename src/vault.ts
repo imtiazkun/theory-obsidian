@@ -23,7 +23,7 @@ const GITIGNORE_LINES = [
 	".trash/",
 	".obsidian/workspace*.json",
 	// Holds each person's own author details.
-	".obsidian/plugins/mecho/data.json",
+	".obsidian/plugins/theory-md/data.json",
 ];
 
 export interface Author {
