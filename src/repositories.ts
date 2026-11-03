@@ -7,11 +7,8 @@ import { COMPILED_TAG, type CompileReport } from "./compile";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
 import { REALIZED_KEY } from "./note-status";
+import { type TemplateFields, modelFolderTexts } from "./templates";
 import { commit, git, identityArgs } from "./vault";
-
-/** The first line of every model folder's instructions.md. */
-export const MODEL_INSTRUCTIONS =
-	"The writing rules in [the root Instructions](../Instructions.md) apply here. Rules for Claude that apply only to this repository go below.\n";
 
 /** The repository's model folder: the folder at the vault root with exactly its name. */
 export function modelFolder(plugin: TheoryPlugin, name: string): TFolder | null {
@@ -136,14 +133,18 @@ async function writeVaultFile(plugin: TheoryPlugin, path: string, content: strin
 	await vault.create(path, content);
 }
 
-/** Creates a model folder with index.md and instructions.md, and commits only those two files. */
-export async function addModelFolder(plugin: TheoryPlugin, name: string, index: string, message: string): Promise<string> {
+/**
+ * Creates a model folder with index.md and instructions.md, each from its template as it is now, and commits
+ * only those two files. The templates themselves are never part of that commit.
+ */
+export async function addModelFolder(plugin: TheoryPlugin, fields: TemplateFields, message: string): Promise<string> {
 	const vaultPath = plugin.getVaultPath();
 	// Checked before anything is written, so a missing author never leaves files behind.
 	await identityArgs(vaultPath, plugin.settings);
-	const paths = [`${name}/index.md`, `${name}/instructions.md`];
+	const { index, instructions } = await modelFolderTexts(vaultPath, fields);
+	const paths = [`${fields.name}/index.md`, `${fields.name}/instructions.md`];
 	await writeVaultFile(plugin, paths[0], index);
-	await writeVaultFile(plugin, paths[1], MODEL_INSTRUCTIONS);
+	await writeVaultFile(plugin, paths[1], instructions);
 	return commit(vaultPath, plugin.settings, message, paths);
 }
 
@@ -213,10 +214,6 @@ export function agentsText(r: NewRepository, vaultName: string): string {
 	);
 }
 
-export function modelIndexText(r: NewRepository): string {
-	return lines("## What this repository is", r.description, given(r.purpose) && r.purpose);
-}
-
 /**
  * Creates a repository in the project folder and its model folder in the vault, step by step.
  * When a step fails it stops there and throws, with the steps already done. It never deletes what it created.
@@ -242,7 +239,7 @@ export async function createRepository(plugin: TheoryPlugin, r: NewRepository, d
 	await git(repoPath, [...identity, "commit", "-m", "Initial commit"]);
 	done(`Created ${r.name} in the project folder with an initial commit.`);
 
-	await addModelFolder(plugin, r.name, modelIndexText(r), `Add repository ${r.name}`);
+	await addModelFolder(plugin, { name: r.name, description: r.description, purpose: r.purpose }, `Add repository ${r.name}`);
 	done(`Added the model folder ${r.name}/ to the vault and committed it.`);
 
 	if (r.github) {

@@ -78,6 +78,19 @@ function iconMask(name: string): string {
 }
 
 /**
+ * The explorer rows of one entry file (`index.md` or `instructions.md`) at the vault root and directly inside each
+ * model folder. The file name matches ignoring case; the model folder's name must match exactly, so a second,
+ * prefix test pins it: data-* values compare with case by default.
+ */
+export function entryFileSelector(name: string, modelFolders: string[]): string {
+	const root = `.nav-file-title[data-path=${cssString(name)} i]`;
+	const inFolders = modelFolders.map(
+		(folder) => `.nav-file-title[data-path=${cssString(`${folder}/${name}`)} i][data-path^=${cssString(`${folder}/`)}]`,
+	);
+	return [root, ...inFolders].join(", ");
+}
+
+/**
  * Shows `index.md` and `instructions.md` in bold with an icon, at the vault root and directly inside a
  * model folder (a root folder named exactly like a repository in the project folder).
  *
@@ -91,9 +104,9 @@ export class EntryFiles {
 
 	/** Rewrites the stylesheet for the current model folders. */
 	sync() {
-		const folders = ["", ...projectRepos(this.plugin.settings.projectFolder).map((repo) => `${repo.name}/`)];
+		const repos = projectRepos(this.plugin.settings.projectFolder).map((repo) => repo.name);
 		const rules = Object.keys(ENTRY_ICONS).map((name) => {
-			const rows = folders.map((folder) => `.nav-file-title[data-path=${cssString(folder + name)} i]`).join(", ");
+			const rows = entryFileSelector(name, repos);
 			return `:is(${rows}) .nav-file-title-content { font-weight: var(--font-bold); }
 :is(${rows})::before {
 	content: "";

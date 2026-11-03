@@ -860,3 +860,62 @@ body button.theory-compile-fab.is-ready:hover {
 	font-weight: var(--font-semibold);
 	text-transform: uppercase;
 }
+
+/* Expand: beside the commit button on a model folder's index.md, and its view of suggested notes */
+
+body button.theory-expand-fab:disabled {
+	cursor: default;
+	transform: none;
+}
+
+.theory-expand-fab.is-running .theory-compile-fab-icon {
+	color: var(--interactive-accent);
+	animation: theory-sparkle-fade 1.6s ease-in-out infinite;
+}
+
+@keyframes theory-sparkle-fade {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+
+.theory-expand-card {
+	margin: var(--size-4-3) 0;
+	padding: var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.theory-expand-name {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	font-weight: var(--font-semibold);
+}
+
+.theory-expand-created {
+	margin-left: auto;
+	color: var(--text-success);
+	font-size: var(--font-ui-smaller);
+}
+
+.theory-expand-question {
+	margin: var(--size-4-2) 0;
+}
+
+.theory-expand-headings {
+	margin: var(--size-4-1) 0;
+	color: var(--text-muted);
+}
+
+/* Missing starter files, listed under Create missing files */
+
+.theory-missing-files {
+	margin-top: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

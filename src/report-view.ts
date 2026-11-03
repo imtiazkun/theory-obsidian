@@ -63,8 +63,6 @@ export class CompileReportView extends ItemView {
 	private suggestions = new Map<string, SuggestionState>();
 	// How many repositories of each finished report still need a pull request, worked out from git and gh.
 	private candidates = new Map<string, number>();
-	// Reports whose pull request states were refreshed since the report opened.
-	private refreshedStates = new Set<string>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -86,6 +84,7 @@ export class CompileReportView extends ItemView {
 	async onOpen() {
 		this.registerInterval(window.setInterval(() => this.tick(), 1000));
 		this.refresh();
+		this.plugin.prStates.refresh("open");
 	}
 
 	/** Forgets which reports need a pull request, e.g. after one was created, so the next draw looks again. */
@@ -95,7 +94,6 @@ export class CompileReportView extends ItemView {
 	}
 
 	async onClose() {
-		this.refreshedStates.clear();
 		this.candidates.clear();
 		for (const s of this.suggestions.values()) if (s.state === "running") s.run.cancel();
 		this.suggestions.clear();
@@ -103,14 +101,20 @@ export class CompileReportView extends ItemView {
 
 	/** Shows the newest report, e.g. when a compile starts. */
 	showLatest() {
-		this.selectedId = null;
-		this.refresh();
+		this.select(null);
 	}
 
 	/** Shows one report, e.g. when it's picked in the compile history. */
 	show(id: string) {
-		this.selectedId = this.plugin.reports[0]?.id === id ? null : id;
+		this.select(this.plugin.reports[0]?.id === id ? null : id);
+	}
+
+	/** Switches to another report. Switching refreshes the pull request states. */
+	private select(id: string | null) {
+		const switched = id !== this.selectedId;
+		this.selectedId = id;
 		this.refresh();
+		if (switched) this.plugin.prStates.refresh("open");
 	}
 
 	refresh() {
@@ -135,10 +139,7 @@ export class CompileReportView extends ItemView {
 				select.createEl("option", { value: r.id, text: label });
 			}
 			select.value = report.id;
-			select.addEventListener("change", () => {
-				this.selectedId = select.value === reports[0].id ? null : select.value;
-				this.refresh();
-			});
+			select.addEventListener("change", () => this.select(select.value === reports[0].id ? null : select.value));
 		}
 		const compile = toolbar.createEl("button", { cls: "mod-cta", text: "Compile" });
 		compile.disabled = this.plugin.isCompiling();
@@ -299,16 +300,9 @@ export class CompileReportView extends ItemView {
 		if (card) window.requestAnimationFrame(() => card.scrollIntoView({ block: "nearest" }));
 	}
 
-	/**
-	 * Works out, once per report on screen, whether Create PR shows, and refreshes the state of its pull
-	 * requests once after the report opens. Both need git and gh, so they redraw when done.
-	 */
+	/** Works out, once per report on screen, whether Create PR shows. It needs git and gh, so it redraws when done. */
 	private async checkPullRequests(report: CompileReport) {
 		if (report.status === "running") return;
-		if (!this.refreshedStates.has(report.id)) {
-			this.refreshedStates.add(report.id);
-			if (report.pullRequests?.length) this.plugin.refreshPullRequestStates(report);
-		}
 		if (this.candidates.has(report.id)) return;
 		this.candidates.set(report.id, 0);
 		const found = await pullRequestCandidates(report, this.plugin.reports).catch(() => []);

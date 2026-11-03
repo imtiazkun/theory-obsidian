@@ -59,6 +59,11 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/pr-body.ts` | The Create PR body's sparkle: asks Claude Code, with no tools, for a body from the report |
 | `src/repositories.ts` | Repository KPIs, fetch, Add model folder and New repository steps and file texts |
 | `src/repositories-view.ts` | The Repositories page and the New repository form |
+| `src/templates.ts` | The `_templates/` starter texts, filling `{{name}}`, `{{description}}` and `{{purpose}}`, and the built-in texts when a template is missing or blank |
+| `src/starter.ts` | The starter files Setup writes and Create missing files catches up on, and the `.gitignore` lines |
+| `src/pr-states.ts` | Refreshing the saved pull request states: when, which, one at a time |
+| `src/expand.ts` | Expand: the context, Claude Code's arguments, parsing suggestions, Create note |
+| `src/expand-view.ts` | The Expand view: suggestion cards with Create note, Copy and Dismiss |
 
 ## 4. Settings
 
@@ -107,7 +112,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 
 ### W2. Setup vault (command "Setup vault")
 - **Check first:** the vault isn't already a git repo (no `.git`). An author name and email exist in the settings or the git config. Otherwise it fails with a notice.
-- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
+- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists), `_templates/index.md` (the model folder index headings with `{{description}}` and `{{purpose}}`) and `_templates/instructions.md` (the line pointing at the root Instructions). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
 - **Output:** the vault is a git repo whose initial commit includes the starter files. The UI refreshes and `Index.md` opens.
 
 ### W3. Edit and commit
@@ -189,6 +194,11 @@ Engineers answer questions by **editing the model, committing and compiling agai
 - **Compile state** (worked out from git and the reports, nothing stored): `new` if git doesn't track the note; `pending` if it changed between `theory/compiled` and `HEAD`, or there's no tag yet (`running` while a compile is under way); otherwise `failed` or `compiled`, according to the newest finished report whose `suspectNotes` or anchors include the note (`compiled` if none does). A click opens the compile report.
 - **Syncs on:** layout ready, `layout-change`, `file-open`, `metadataCache` `changed`, window focus, commit, and compile start and end.
 
+### W2a. Create missing files (Settings → Vault)
+- **When:** the vault is a git repository but a starter file (`src/starter.ts`: `Index.md`, `Instructions.md`, `_templates/index.md`, `_templates/instructions.md`) or a `.gitignore` line is missing. Presence is checked under the same names Setup accepts, ignoring case, each time the settings tab opens. The button says "Create missing files" and the settings list what is missing; otherwise "Already set up".
+- **Actions:** check the author first, write only the missing files with Setup's starter text, add only the missing `.gitignore` lines, then commit only those paths as "Add missing starter files". Other uncommitted changes stay uncommitted. Existing files are never changed.
+- **Output:** "Added {n} missing files.", or "Couldn't add the missing files: {reason}" with nothing committed.
+
 ### W9. Commit history view
 The right sidebar shows `git log --follow` for the active note (author, relative time, subject) and marks uncommitted changes.
 
@@ -197,13 +207,26 @@ The right sidebar shows `git log --follow` for the active note (author, relative
 - **Page:** opens in a new tab. A shared Title (the latest compiled revision's subject) and Body (empty), and one section per such repository: name, `branch → base`, its commits, Base (the `origin/*` branches git knows), Draft (off), Reviewers (comma-separated, empty) and "Use the shared title and body" (on; off shows its own Title and Body, filled from the shared ones). A repository without a GitHub `origin`, or no logged-in `gh`, shows why and is left out.
 - **Sparkle:** each Body box runs `claude -p --output-format json --tools "" --strict-mcp-config` in the temp folder with the model and effort from the settings. Claude gets the summary, the revisions, the open problems and questions, and the changes for that repository (all of them for the shared Body). The answer replaces the box.
 - **Create:** for each ready section, `git push -u origin <branch>`, then `gh pr create --head --base --title --body [--draft] [--reviewer]`. The pull request goes into `report.pullRequests` (repository, branch, base, url, state). A failure shows "Couldn't create the pull request: {reason}" and keeps the fields. Once every ready section has one, each body gets a footer (after `<!-- theory.md compile -->`, replaced on a second run) listing the vault revisions (linked when the vault has a GitHub `origin`) and the other repositories' pull requests.
-- **State:** the report lists its pull requests with their state (draft, open, merged, closed), refreshed with `gh pr view` when the report opens. Pull requests never move the marker. The page's text goes only to GitHub, never into the vault, and closing the page discards it.
+- **State:** the report lists its pull requests with their state (draft, open, merged, closed), refreshed as W13 says. Pull requests never move the marker. The page's text goes only to GitHub, never into the vault, and closing the page discards it.
 
 ### W12. Repositories page (`src/repositories-view.ts`)
 - **Opens** from the ribbon or "Show repositories", in a tab. One card per repository in the project folder, sorted by name; clicking the name opens the model folder's `index.md`. No project folder: a message and an Open settings button. A single-repository project folder: a message, and New repository is disabled. None: "No repositories yet. Create one to start."
 - **KPIs** (worked out each time, never stored): Code (branch, last commit when and who, uncommitted files), Compile (the newest report that added commits to it, or "Never compiled", and its open compile branch with the recorded pull request state), Model (notes in its model folder, how many are `realized: false`, how many are waiting for a compile), Remote (the GitHub `origin` link and ahead/behind `origin/<branch>`, or "No remote"). Opening never fetches or asks GitHub; the Refresh action runs `git fetch` in every repository first.
-- **Add model folder:** for a repository without one, writes `index.md` ("Manifesting {name}") and `instructions.md` (the line pointing at the root Instructions) and commits only those two as "Add model folder for {name}".
-- **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
+- **Add model folder:** for a repository without one, writes `index.md` and `instructions.md` from `_templates/index.md` and `_templates/instructions.md` as they are now (`{{name}}` filled; `{{description}}` and `{{purpose}}` are empty, so their lines are left out with the blank line after; a missing or blank template gives the built-in text) and commits only those two as "Add model folder for {name}".
+- **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder, from the templates filled with the name, description and purpose, committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
+
+### W13. Pull request states (`src/pr-states.ts`)
+- **When:** a report opens or the report view switches to another report, the compile history opens, its Refresh action is clicked, or the Obsidian window gets focus. Never on a timer.
+- **Which:** only pull requests saved as draft or open, across every report. Merged and closed are never checked again. Each is checked with `gh pr view`, side by side.
+- **Limits:** one refresh at a time; a refresh asked for while one runs joins it, except Refresh, which runs again after it. A focus refresh within 30 seconds of the last finished one is skipped.
+- **Output:** a changed state is saved in its report and redrawn in the report, the compile history and the Repositories page. A failed check keeps the saved state and is shown nowhere.
+
+### W14. Expand (`src/expand.ts`, `src/expand-view.ts`)
+- **Button:** on a model folder's `index.md` only (not the root `Index.md`), the floating bar shows Expand beside the commit button. It says "Expanding…" and is disabled while Claude works for that repository.
+- **Context:** the folder's `index.md` and `instructions.md`, the current text (uncommitted edits included) of every other note in the folder, the root `Index.md` and the paths of all notes in the folder. Hidden folders and the root Instructions are never sent.
+- **Claude Code:** `claude -p --output-format json --strict-mcp-config --no-session-persistence` with the model and effort from the settings. When the repository exists: `cwd` is the repository, `--tools Read,Glob,Grep`, `--allowedTools Read(//<repo>/**)`, `--disallowedTools Read(//<vault>/**)`. Otherwise `--tools ""` in the temp folder. It can never write, edit or run anything.
+- **Answer:** at most 10 suggestions (name, question, reason with its line or file, two or three headings); notes that already exist are dropped. "No missing notes found." or "Couldn't expand: {reason}".
+- **View:** a card per suggestion with Create note (asks for the name, filled with the suggestion; creates an empty note in the folder and opens it; "{name} already exists." when it does; never commits), Copy ("Copied. Write the note in your own words.") and Dismiss. Suggestions live only on screen.
 
 ### W10. Compile history view
 A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do.
@@ -217,7 +240,7 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 5. **The marker moves once Claude has run, whether it succeeded or failed. It never moves on cancel, when compile can't start, or when the CLI can't be launched.** Failed revisions are not retried by themselves. Re-applying them is a human decision.
 6. **Reports live only in plugin data**, which git ignores. The last 20 are kept.
 7. **Failure overlays are display only.** They are built from checked anchors, set with `setText` or as attributes (never as HTML or Markdown), and only stored in plugin data.
-8. **Claude's text never goes into a note.** Not from a compile, not from a suggestion. Accept on a suggestion only copies it to the clipboard; the engineer writes the note.
+8. **Claude's text never goes into a note.** Not from a compile, not from a suggestion, not from Expand (Create note writes an empty note). Accept on a suggestion only copies it to the clipboard; the engineer writes the note.
 9. **Code commits link back to the model** through the `Model-Revision: <vault commit>` trailer. Claude adds it because the prompt tells it to.
 10. **Every compile lands on a compile branch,** checked out by the plugin, never by Claude. Compile never pushes; only Create PR does. A compile never starts on a repository with uncommitted changes.
 

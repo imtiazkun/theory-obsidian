@@ -10,6 +10,7 @@ import {
 	PermissionAnswer,
 	PermissionRequest,
 	startCompile,
+	withAllowedRules,
 } from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
@@ -20,9 +21,20 @@ import { NoteStatus } from "./note-status";
 import { EntryFiles, HiddenFolders } from "./explorer";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
+import { EXPAND_VIEW_TYPE, ExpandView } from "./expand-view";
+import { PullRequestStates } from "./pr-states";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
-import { authorName, changedFiles, commit, isVaultSetUp, setUpVault } from "./vault";
+import {
+	MissingStarterFiles,
+	addMissingStarterFiles,
+	authorName,
+	changedFiles,
+	commit,
+	isVaultSetUp,
+	missingStarterFiles,
+	setUpVault,
+} from "./vault";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -43,6 +55,15 @@ export default class TheoryPlugin extends Plugin {
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	private statusBar: HTMLElement | null = null;
+	/** Refreshes the saved pull request states, only when a view opens, Refresh is clicked or the window gets focus. */
+	prStates = new PullRequestStates(
+		() => this.reports,
+		(pr) => pullRequestState(pr.repoPath, pr.url),
+		async () => {
+			await this.saveSettings();
+			this.pullRequestsChanged();
+		},
+	);
 
 	async onload() {
 		await this.loadSettings();
@@ -75,6 +96,7 @@ export default class TheoryPlugin extends Plugin {
 		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
 		this.registerView(CREATE_PR_VIEW_TYPE, (leaf) => new CreatePullRequestView(leaf, this));
 		this.registerView(REPOSITORIES_VIEW_TYPE, (leaf) => new RepositoriesView(leaf, this));
+		this.registerView(EXPAND_VIEW_TYPE, (leaf) => new ExpandView(leaf, this));
 		this.addCommand({
 			id: "show-repositories",
 			name: "Show repositories",
@@ -141,6 +163,8 @@ export default class TheoryPlugin extends Plugin {
 		}
 		// Commits made outside Obsidian show up when you come back to it.
 		this.registerDomEvent(window, "focus", refreshCompileSoon);
+		// So does a pull request merged in the browser. Never on a timer.
+		this.registerDomEvent(window, "focus", () => this.prStates.refresh("focus"));
 	}
 
 	onunload() {
@@ -254,12 +278,7 @@ export default class TheoryPlugin extends Plugin {
 		if (!request) return;
 		this.compileRun?.answer(id, answer);
 		if (answer !== "always" || request.rules.length === 0) return;
-		// The request's rules at the end of the list, none of them twice.
-		let rules = this.settings.allowedTools.trim();
-		for (const rule of request.rules) {
-			if (!` ${rules} `.includes(` ${rule} `)) rules = rules ? `${rules} ${rule}` : rule;
-		}
-		this.settings.allowedTools = rules;
+		this.settings.allowedTools = withAllowedRules(this.settings.allowedTools, request.rules);
 		await this.saveSettings();
 	}
 
@@ -305,21 +324,9 @@ export default class TheoryPlugin extends Plugin {
 	pullRequestsChanged() {
 		for (const view of this.reportViews()) view.forgetPullRequests();
 		this.refreshReportViews();
-	}
-
-	/** Asks GitHub for the state of each of the report's pull requests and saves what changed. */
-	async refreshPullRequestStates(report: CompileReport) {
-		let changed = false;
-		for (const pr of report.pullRequests ?? []) {
-			const state = await pullRequestState(pr.repoPath, pr.url).catch(() => null);
-			if (state && state !== pr.state) {
-				pr.state = state;
-				changed = true;
-			}
+		for (const leaf of this.app.workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)) {
+			if (leaf.view instanceof RepositoriesView) leaf.view.refresh(false);
 		}
-		if (!changed) return;
-		await this.saveSettings();
-		this.pullRequestsChanged();
 	}
 
 	/** Opens the Repositories page in a main tab, reusing it if it's already open. */
@@ -331,6 +338,38 @@ export default class TheoryPlugin extends Plugin {
 			await leaf.setViewState({ type: REPOSITORIES_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+	}
+
+	private expandViews(): ExpandView[] {
+		return this.app.workspace
+			.getLeavesOfType(EXPAND_VIEW_TYPE)
+			.map((leaf) => leaf.view)
+			.filter((view): view is ExpandView => view instanceof ExpandView);
+	}
+
+	/** True while Claude works on Expand for this model folder. It runs at most once per repository at a time. */
+	isExpanding(folder: string): boolean {
+		return this.expandViews().some((view) => view.folder === folder && view.isExpanding());
+	}
+
+	/** Opens the Expand view for the model folder, reusing its tab if it's open, and asks Claude at once. */
+	async expand(folder: string) {
+		if (this.isExpanding(folder)) return;
+		const { workspace } = this.app;
+		let view = this.expandViews().find((v) => v.folder === folder);
+		if (!view) {
+			const leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({ type: EXPAND_VIEW_TYPE, active: true, state: { folder } });
+			view = leaf.view instanceof ExpandView ? leaf.view : undefined;
+		}
+		if (!view) return;
+		await workspace.revealLeaf(view.leaf);
+		await view.expand();
+	}
+
+	/** Redraws the Expand button after an Expand starts or ends. */
+	expandChanged() {
+		this.compileButton.render();
 	}
 
 	private reportViews(): CompileReportView[] {
@@ -521,6 +560,22 @@ export default class TheoryPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Setup vault failed: ${errorMessage(error)}`, 10000);
 			return false;
+		}
+	}
+
+	/** The starter files and .gitignore lines a set-up vault is missing. */
+	missingStarterFiles(): Promise<MissingStarterFiles> {
+		return missingStarterFiles(this.getVaultPath(), starterFiles(this.app.vault.getName()));
+	}
+
+	/** Create missing files: writes only what is missing and commits only that. */
+	async addMissingStarterFiles() {
+		try {
+			const added = await addMissingStarterFiles(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			this.refreshGitState();
+			new Notice(`Added ${added} missing ${added === 1 ? "file" : "files"}.`);
+		} catch (error) {
+			new Notice(`Couldn't add the missing files: ${errorMessage(error)}`, 10000);
 		}
 	}
 }

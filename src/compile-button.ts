@@ -1,6 +1,8 @@
 import { Notice, TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
+import { projectRepos } from "./branches";
 import { pendingRevisionCount, timeLeft } from "./compile";
+import { modelFolderOfIndex } from "./expand";
 import type TheoryPlugin from "./main";
 import { changedFiles } from "./vault";
 
@@ -30,6 +32,8 @@ function plural(count: number, one: string, many: string): string {
  */
 export class CompileButton {
 	private barEl: HTMLElement;
+	private expandEl: HTMLButtonElement;
+	private expandLabelEl: HTMLElement;
 	private commitEl: HTMLButtonElement;
 	private compileEl: HTMLButtonElement;
 	private iconEl: HTMLElement;
@@ -47,6 +51,12 @@ export class CompileButton {
 
 	constructor(private plugin: TheoryPlugin) {
 		this.barEl = createDiv({ cls: "theory-action-bar" });
+
+		// Shown beside the commit button only on a model folder's index.md.
+		this.expandEl = this.barEl.createEl("button", { cls: "theory-fab theory-expand-fab" });
+		setIcon(this.expandEl.createSpan({ cls: "theory-compile-fab-icon" }), "sparkles");
+		this.expandLabelEl = this.expandEl.createSpan({ cls: "theory-compile-fab-label" });
+		this.expandEl.addEventListener("click", () => this.onExpandClick());
 
 		this.commitEl = this.barEl.createEl("button", { cls: "theory-fab theory-commit-fab" });
 		setIcon(this.commitEl, commitIcon());
@@ -167,8 +177,37 @@ export class CompileButton {
 		const { compile } = this.state;
 		this.barEl.toggle(compile.kind !== "hidden");
 		if (compile.kind === "hidden") return;
+		this.renderExpand();
 		this.renderCommit();
 		this.renderCompile(compile);
+	}
+
+	/** The model folder whose index.md is the active note, or null. The root Index.md has no Expand. */
+	private expandFolder(): string | null {
+		const file = this.plugin.app.workspace.getActiveFile();
+		if (!file) return null;
+		const repos = projectRepos(this.plugin.settings.projectFolder).map((repo) => repo.name);
+		return modelFolderOfIndex(file.path, repos);
+	}
+
+	private renderExpand() {
+		const folder = this.expandFolder();
+		this.expandEl.toggle(folder !== null);
+		if (!folder) return;
+		const running = this.plugin.isExpanding(folder);
+		this.expandEl.disabled = running;
+		this.expandEl.toggleClass("is-running", running);
+		this.expandLabelEl.setText(running ? "Expanding…" : "Expand");
+		setTooltip(
+			this.expandEl,
+			running ? "Claude is looking for missing notes." : `Ask Claude which notes ${folder}/ is missing. Claude only suggests.`,
+			{ placement: "top" },
+		);
+	}
+
+	private onExpandClick() {
+		const folder = this.expandFolder();
+		if (folder) this.plugin.expand(folder);
 	}
 
 	private renderCommit() {

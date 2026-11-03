@@ -1,10 +1,20 @@
+import { INDEX_TEMPLATE, MODEL_INSTRUCTIONS, TEMPLATES_FOLDER } from "./templates";
+
 export interface StarterFile {
 	/** Path relative to the vault root. */
 	path: string;
-	/** Other names that count as this file, compared without case. */
+	/** Paths that count as this file, relative to the vault root and compared without case. */
 	sameAs: string[];
 	content: string;
 }
+
+/** The lines every vault's .gitignore must have (SET-8). */
+export const GITIGNORE_LINES = [
+	".DS_Store",
+	".trash/",
+	// Obsidian's settings, the plugin's build and its data with the compile reports. None of it is model.
+	".obsidian/",
+];
 
 const INSTRUCTIONS = `Theoretical model is the textual representation of a software: what it does, why and in some cases how. It should be detailed enough that an AI can replicate a whole software following this and easy enough so that a new recruit can understand.
 
@@ -26,10 +36,15 @@ const INSTRUCTIONS = `Theoretical model is the textual representation of a softw
 - **One intent per commit**, and the commit message says why.
 `;
 
-/** Notes every new vault starts with. Setup vault skips any that already exist. */
+/**
+ * The starter files besides the .gitignore lines: everything Setup vault writes (SET-15). Setup and Create
+ * missing files use this one list, and each skips a file that exists under any of its names.
+ */
 export function starterFiles(vaultName: string): StarterFile[] {
 	return [
 		{ path: "Index.md", sameAs: ["index.md"], content: `Manifesting ${vaultName}\n` },
 		{ path: "Instructions.md", sameAs: ["instruction.md", "instructions.md"], content: INSTRUCTIONS },
+		{ path: `${TEMPLATES_FOLDER}/index.md`, sameAs: [`${TEMPLATES_FOLDER}/index.md`], content: INDEX_TEMPLATE },
+		{ path: `${TEMPLATES_FOLDER}/instructions.md`, sameAs: [`${TEMPLATES_FOLDER}/instructions.md`], content: MODEL_INSTRUCTIONS },
 	];
 }

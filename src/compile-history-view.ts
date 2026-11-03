@@ -31,7 +31,9 @@ export class CompileHistoryView extends ItemView {
 	}
 
 	async onOpen() {
+		this.addAction("refresh-cw", "Refresh pull request states", () => this.plugin.prStates.refresh("action"));
 		this.refresh();
+		this.plugin.prStates.refresh("open");
 	}
 
 	refresh() {

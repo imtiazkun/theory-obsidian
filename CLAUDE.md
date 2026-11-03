@@ -15,9 +15,20 @@ theory.md is a desktop-only Obsidian plugin. Humans write a "theoretical model" 
 npm install
 npm run build   # tsc type-check (noEmit), then esbuild production bundle
 npm run dev     # esbuild watch, inline sourcemaps (no type-check)
+npm test        # the Vitest suite, once
+npx vitest run test/branches.test.ts          # one test file
+npx vitest run -t "reuses the open compile"   # one test, by name
 ```
 
-There are no tests and no linter. `tsc` (via `npm run build`) is the only check.
+Before every commit, run `npm run build` and `npm test`; both must pass. Never commit past a failing test. Every change to branch, commit, compile or anchor logic comes with a test that would have failed before it. There is no linter.
+
+## Tests
+
+Tests live in `test/*.test.ts` and run with Vitest (`vitest.config.ts`).
+
+- `obsidian` is replaced by `test/obsidian-stub.ts`. Views, modals and the file explorer aren't tested automatically; a person checks them in Obsidian. Keep testable logic out of the view files.
+- Tests that need git make real repositories in a new temporary folder with `tempDir()`/`repo()` from `test/helpers.ts`, which deletes them afterwards. `test/setup.ts` points git at an empty config, so the engineer's own git config never applies. Tests never touch the vault, the project folder or real repositories.
+- Tests never call Claude Code, GitHub or the network. Mock `src/github.ts` with `vi.mock`, or pass a fake `claude` script as the command.
 
 The build writes a complete plugin folder to `dist/` (`main.js`, plus `manifest.json` and `styles.css` copied in). To try it, copy those files into `<vault>/.obsidian/plugins/theory-md/` and reload the plugin in Obsidian. `dist/data.json` is local plugin data (settings and reports) from a test install. Don't commit or rely on it.
 
@@ -35,6 +46,8 @@ Things that need several files to understand:
 - **The compile pipeline** (`src/compile.ts`) runs in this order: `theory/compiled` tag → `git log`/`git diff` of `from..HEAD` → `git archive HEAD` into a read-only temp snapshot → spawn `claude -p --output-format stream-json --json-schema …` with `cwd = projectFolder` and the prompt on stdin → parse the stream → run the guards → move the tag. `REPORT_SCHEMA` and `buildPrompt` define the contract with Claude. The report view, overlay and note status all read the fields they produce.
 - **State lives in only three places:** git (history, plus the `theory/compiled` tag as the last-compile marker), front matter (`realized: false`), and plugin data (settings plus the last 20 reports). Note compile state, pending counts and button states are worked out each time from these, never stored.
 - **Problem anchors** (`src/anchor.ts`): Claude proposes `{path, heading?, quote?}`. `checkProblems` checks them against the snapshot before they're kept. `overlay.ts` (CodeMirror decorations plus banners) and `note-status.ts` use the checked anchors and the report's `suspectNotes`.
+- **Pull request states** (`src/pr-states.ts`): asked for only when a report or the compile history opens, the report switches, the compile history's Refresh is clicked, or the window gets focus. Never on a timer. Only draft and open pull requests are checked, side by side, one refresh at a time; a focus refresh within 30 seconds of the last is skipped; a failed check keeps the saved state silently.
+- **Expand** (`src/expand.ts`, `src/expand-view.ts`): on a model folder's `index.md`, asks Claude which notes are missing. Claude gets only that folder's notes (no hidden folders), the root `Index.md`, and Read/Glob/Grep inside that repository. Suggestions live only on screen. Create note writes an empty note and never commits.
 - **`src/explorer.ts`** patches the file explorer's internal `getSortedFolderItems`. That's private Obsidian API, so it must be undone on unload.
 
 ## Invariants not to break

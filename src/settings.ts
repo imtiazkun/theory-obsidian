@@ -96,23 +96,7 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName("Vault").setHeading();
 
-		const setUp = this.plugin.isVaultSetUp();
-		new Setting(containerEl)
-			.setName("Setup vault")
-			.setDesc(
-				setUp
-					? "This vault is already a git repository."
-					: "Turn this vault into a git repository and make the initial commit.",
-			)
-			.addButton((button) => {
-				button.setButtonText(setUp ? "Already set up" : "Setup vault").setDisabled(setUp);
-				if (setUp) return;
-				button.setCta().onClick(async () => {
-					button.setDisabled(true).setButtonText("Setting up…");
-					await this.plugin.setUpVault();
-					this.display();
-				});
-			});
+		this.displayVault(containerEl.createDiv());
 
 		this.displayProject(containerEl.createDiv({ cls: "theory-project" }));
 
@@ -211,6 +195,57 @@ export class TheorySettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+	}
+
+	/**
+	 * The Setup vault button. A vault that is a git repository but misses starter files gets Create missing files
+	 * instead, with each missing file and .gitignore line listed. Checked each time this tab opens, never stored.
+	 */
+	private async displayVault(containerEl: HTMLElement) {
+		containerEl.empty();
+		const setUp = this.plugin.isVaultSetUp();
+		const missing = setUp ? await this.plugin.missingStarterFiles().catch(() => null) : null;
+		const count = missing ? missing.files.length + missing.gitignoreLines.length : 0;
+		containerEl.empty();
+		const setting = new Setting(containerEl).setName("Setup vault");
+		if (!setUp) {
+			setting.setDesc("Turn this vault into a git repository and make the initial commit.").addButton((button) =>
+				button
+					.setButtonText("Setup vault")
+					.setCta()
+					.onClick(async () => {
+						button.setDisabled(true).setButtonText("Setting up…");
+						await this.plugin.setUpVault();
+						this.display();
+					}),
+			);
+			return;
+		}
+		if (!missing || count === 0) {
+			setting
+				.setDesc("This vault is already a git repository.")
+				.addButton((button) => button.setButtonText("Already set up").setDisabled(true));
+			return;
+		}
+		setting.setDesc("This vault is a git repository, but some starter files are missing.").addButton((button) =>
+			button
+				.setButtonText("Create missing files")
+				.setCta()
+				.onClick(async () => {
+					button.setDisabled(true).setButtonText("Creating…");
+					await this.plugin.addMissingStarterFiles();
+					await this.displayVault(containerEl);
+				}),
+		);
+		const list = containerEl.createEl("ul", { cls: "theory-missing-files" });
+		for (const path of missing.files) list.createEl("li").createEl("code", { text: path });
+		for (const line of missing.gitignoreLines) {
+			const item = list.createEl("li");
+			item.appendText("The line ");
+			item.createEl("code", { text: line });
+			item.appendText(" in ");
+			item.createEl("code", { text: ".gitignore" });
+		}
 	}
 
 	/** The project folder, with the git repositories found in it. */

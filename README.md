@@ -54,7 +54,8 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 
 | Feature | Status |
 | --- | --- |
-| Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, and an initial commit | Done |
+| Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the `_templates/` for model folders, and an initial commit | Done |
+| Create missing files: a vault set up by an older version catches up on missing starter files and `.gitignore` lines, committing only those | Done |
 | Author settings: full name and email used to sign commits | Done |
 | Commit button in each note's header, marked when the note has changes | Done |
 | Commit modal: message, with an option to include all changed files | Done |
@@ -76,6 +77,10 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Create PR: push the compile branches and open pull requests with `gh`, with a sparkle to write the body; the report and compile history show their state | Done |
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
+| Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
+| Pull request states refresh when a report or the compile history opens, on the compile history's Refresh, and when Obsidian gets focus back. Never on a timer | Done |
+| Expand: on a model folder's `index.md`, Claude suggests which notes are missing. You create each note yourself; it starts empty and isn't committed | Done |
+| Automated tests: `npm test` (Vitest) | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
 ## Install for development
@@ -93,6 +98,8 @@ npm run build
 Copy `manifest.json`, `styles.css` and `dist/main.js` into `<vault>/.obsidian/plugins/theory-md/`, then turn on theory.md under Settings → Community plugins. The plugin's ID, and so its folder, is `theory-md`.
 
 Use `npm run dev` to rebuild on every change.
+
+Run the tests with `npm test`, one file with `npx vitest run test/branches.test.ts`, or one test by name with `npx vitest run -t "<name>"`.
 
 ## First use
 
