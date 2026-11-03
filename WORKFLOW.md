@@ -38,7 +38,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | File | Responsibility |
 | --- | --- |
 | `src/main.ts` | Plugin lifecycle, commands, compile lock, commit entry points, saving settings and reports |
-| `src/vault.ts` | Git helpers: setup, changed files, commit with identity, file history, `TOOL_PATH` |
+| `src/vault.ts` | Git helpers: setup, changed files, commit with identity, file history |
+| `src/tool-path.ts` | `toolPath()`, the PATH every subprocess gets: the login shell's PATH (read once on load, at most 5 seconds) or Obsidian's own when the shell fails, then the usual tool folders |
 | `src/commit.ts` | Commit modal and the per-note commit button in each note's header |
 | `src/compile.ts` | The compile pipeline: marker, diff, snapshot, prompt, Claude subprocess, report, checks |
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |

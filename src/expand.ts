@@ -4,7 +4,7 @@ import { readFile, readdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { CompileEffort, CompileModel } from "./compile";
-import { TOOL_PATH } from "./vault";
+import { toolPath } from "./tool-path";
 
 /** Claude returns at most this many suggestions (EXP-8). */
 export const MAX_EXPAND_SUGGESTIONS = 10;
@@ -213,7 +213,7 @@ export function startExpand(options: ExpandOptions): ExpandRun {
 		if (cancelled) throw new Error("cancelled");
 		return new Promise<ExpandSuggestion[]>((resolve, reject) => {
 			try {
-				child = spawn(options.claudeCommand || "claude", args, { cwd, env: { ...process.env, PATH: TOOL_PATH } });
+				child = spawn(options.claudeCommand || "claude", args, { cwd, env: { ...process.env, PATH: toolPath() } });
 			} catch (error) {
 				reject(error);
 				return;

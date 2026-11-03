@@ -8,7 +8,8 @@ import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./an
 import { CompileBranch, PreparedBranch, dirtyRepos, finishBranches, prepareBranches, undoBranches } from "./branches";
 import type { PullRequest } from "./github";
 import { findProjectRepos } from "./project";
-import { TOOL_PATH, git } from "./vault";
+import { toolPath } from "./tool-path";
+import { git } from "./vault";
 
 /** Tag in the vault repository that marks the last compiled commit. */
 export const COMPILED_TAG = "theory/compiled";
@@ -290,7 +291,7 @@ async function hashTree(dir: string): Promise<string> {
 
 function runTool(command: string, args: string[]): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, { env: { ...process.env, PATH: TOOL_PATH } });
+		const child = spawn(command, args, { env: { ...process.env, PATH: toolPath() } });
 		let stderr = "";
 		child.stderr.on("data", (chunk) => (stderr += chunk));
 		child.on("error", reject);
@@ -585,7 +586,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	try {
 		child = spawn(options.claudeCommand || "claude", args, {
 			cwd: projectFolder,
-			env: { ...process.env, PATH: TOOL_PATH },
+			env: { ...process.env, PATH: toolPath() },
 		});
 	} catch (error) {
 		await undoBranches(branches);

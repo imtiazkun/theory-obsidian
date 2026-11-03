@@ -4,19 +4,9 @@ import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { promisify } from "util";
 import type { StarterFile } from "./starter";
+import { toolPath } from "./tool-path";
 
 const run = promisify(execFile);
-
-// Apps launched from the Dock get a minimal PATH, so add the usual tool locations.
-export const TOOL_PATH = [
-	process.env.PATH,
-	"/usr/bin",
-	"/usr/local/bin",
-	"/opt/homebrew/bin",
-	process.env.HOME && `${process.env.HOME}/.local/bin`,
-]
-	.filter(Boolean)
-	.join(":");
 
 const GITIGNORE_LINES = [
 	".DS_Store",
@@ -40,7 +30,7 @@ export function isVaultSetUp(basePath: string): boolean {
 export async function git(basePath: string, args: string[]) {
 	return run("git", args, {
 		cwd: basePath,
-		env: { ...process.env, PATH: TOOL_PATH },
+		env: { ...process.env, PATH: toolPath() },
 		// Diffs of a large model can exceed the 1 MB default.
 		maxBuffer: 64 * 1024 * 1024,
 	});

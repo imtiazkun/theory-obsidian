@@ -27,6 +27,7 @@ import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
+import { loadToolPath } from "./tool-path";
 import {
 	MissingStarters,
 	addMissingStarterFiles,
@@ -69,6 +70,8 @@ export default class TheoryPlugin extends Plugin {
 	});
 
 	async onload() {
+		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
+		await loadToolPath();
 		await this.loadSettings();
 		this.addSettingTab(new TheorySettingTab(this.app, this));
 

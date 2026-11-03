@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { TOOL_PATH, git } from "./vault";
+import { toolPath } from "./tool-path";
+import { git } from "./vault";
 
 const run = promisify(execFile);
 
@@ -22,7 +23,7 @@ export interface PullRequest {
 /** Runs the GitHub CLI in `cwd`, with the same PATH as every other subprocess. */
 export async function gh(cwd: string, args: string[]) {
 	try {
-		return await run("gh", args, { cwd, env: { ...process.env, PATH: TOOL_PATH }, maxBuffer: 16 * 1024 * 1024 });
+		return await run("gh", args, { cwd, env: { ...process.env, PATH: toolPath() }, maxBuffer: 16 * 1024 * 1024 });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			throw new Error("The GitHub CLI (gh) isn't installed.");

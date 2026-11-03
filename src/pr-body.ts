@@ -1,7 +1,7 @@
 import { ChildProcess, spawn } from "child_process";
 import { tmpdir } from "os";
 import type { CompileEffort, CompileModel, CompileReport } from "./compile";
-import { TOOL_PATH } from "./vault";
+import { toolPath } from "./tool-path";
 
 export interface PullRequestBodyOptions {
 	claudeCommand: string;
@@ -77,7 +77,7 @@ export function generatePullRequestBody(options: PullRequestBodyOptions): PullRe
 	let cancelled = false;
 	const done = new Promise<string>((resolve, reject) => {
 		try {
-			child = spawn(options.claudeCommand || "claude", args, { cwd: tmpdir(), env: { ...process.env, PATH: TOOL_PATH } });
+			child = spawn(options.claudeCommand || "claude", args, { cwd: tmpdir(), env: { ...process.env, PATH: toolPath() } });
 		} catch (error) {
 			reject(error);
 			return;
