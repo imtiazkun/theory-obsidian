@@ -141,6 +141,8 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 | Setting | What it does |
 | --- | --- |
 | Project folder (under Vault) | Folder Claude works in. Compile always runs Claude Code here. Settings lists the git repositories in it: the folder itself, or its immediate subfolders. The list is for your information only. |
+| Agent | *Claude Code* (default) or *ACP agent*: any agent that speaks the Agent Client Protocol over stdio, like Gemini CLI, Codex or Claude Code through its ACP adapter. Only Compile uses it; Expand, Suggest and the sparkle buttons always use Claude Code. theory.md never installs an agent. |
+| Agent command | Shown for *ACP agent*. The command that starts it, with its arguments, like `gemini --experimental-acp`. Compile won't start while it's empty. An ACP agent decides by itself what to ask about: Permission mode and Allowed commands don't apply, Always allow on its cards lasts for that compile only, and writes to the model or outside the project folder are refused. |
 | Claude Code command | `claude` by default, or an absolute path to the CLI. |
 | Model | *Claude Code default*, *Fable*, *Opus*, *Sonnet* or *Haiku*, passed to Claude Code as `--model`. The default passes nothing. Applies from the next compile. |
 | Effort | *Claude Code default*, *Low*, *Medium*, *High*, *Extra high* or *Max*, passed to Claude Code as `--effort`. The default passes nothing. Applies from the next compile. |

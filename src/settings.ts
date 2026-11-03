@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
-import type { CompileEffort, CompileModel, PermissionMode } from "./compile";
+import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { findProjectRepos, pickFolder } from "./project";
 import type TheoryPlugin from "./main";
 
@@ -13,6 +13,10 @@ export interface TheorySettings extends AuthorSettings {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
+	/** Which agent compiles. Expand, commit messages and pull request bodies always use Claude Code. */
+	agent: CompileAgent;
+	/** The command that starts the ACP agent, with its arguments. Empty by default. */
+	agentCommand: string;
 	permissionMode: PermissionMode;
 	allowedTools: string;
 	/** Passed to Claude Code as `--model`, unless it's "" (Claude Code default). */
@@ -27,6 +31,8 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	email: "",
 	projectFolder: "",
 	claudeCommand: "claude",
+	agent: "claude",
+	agentCommand: "",
 	permissionMode: "acceptEdits",
 	allowedTools: "Bash(git *)",
 	model: "",
@@ -117,6 +123,40 @@ export class TheorySettingTab extends PluginSettingTab {
 
 
 		new Setting(containerEl)
+			.setName("Agent")
+			.setDesc(
+				"The agent that compiles. Claude Code, or any agent that speaks the Agent Client Protocol (ACP). Expand, commit messages and pull request bodies always use Claude Code.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("claude", "Claude Code")
+					.addOption("acp", "ACP agent")
+					.setValue(this.plugin.settings.agent)
+					.onChange(async (value) => {
+						this.plugin.settings.agent = value as CompileAgent;
+						await this.plugin.saveSettings();
+						this.display();
+					}),
+			);
+
+		if (this.plugin.settings.agent === "acp") {
+			new Setting(containerEl)
+				.setName("Agent command")
+				.setDesc(
+					"The command that starts the agent, with its arguments. theory.md never installs an agent: install it yourself first.",
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("gemini --experimental-acp")
+						.setValue(this.plugin.settings.agentCommand)
+						.onChange(async (value) => {
+							this.plugin.settings.agentCommand = value.trim();
+							await this.plugin.saveSettings();
+						}),
+				);
+		}
+
+		new Setting(containerEl)
 			.setName("Claude Code command")
 			.setDesc("The Claude Code CLI, as a command name or an absolute path.")
 			.addText((text) =>
@@ -131,7 +171,9 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Model")
-			.setDesc("The Claude model that compiles. A change applies from the next compile.")
+			.setDesc(
+				"The Claude model that compiles. An ACP agent gets it only when it offers a matching model. A change applies from the next compile.",
+			)
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("", "Claude Code default")
@@ -148,7 +190,9 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Effort")
-			.setDesc("How much Claude thinks while it compiles. A change applies from the next compile.")
+			.setDesc(
+				"How much Claude thinks while it compiles. An ACP agent gets it only when it offers a matching thinking level. A change applies from the next compile.",
+			)
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("", "Claude Code default")
@@ -167,7 +211,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Permission mode")
 			.setDesc(
-				"How much Claude may do without asking. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
+				"How much Claude may do without asking. Claude Code only: an ACP agent decides by itself what to ask about. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
 			)
 			.addDropdown((dropdown) =>
 				dropdown
@@ -184,7 +228,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Allowed commands")
 			.setDesc(
-				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the request's rules here: every rule Claude Code suggests for a command (else the exact command), the exact file for a file tool. Writes to the model are always denied.",
+				"Claude Code only. Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the request's rules here: every rule Claude Code suggests for a command (else the exact command), the exact file for a file tool. Writes to the model are always denied.",
 			)
 			.addText((text) =>
 				text
