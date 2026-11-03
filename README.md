@@ -54,7 +54,9 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 
 | Feature | Status |
 | --- | --- |
-| Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, and an initial commit | Done |
+| Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the templates in `_templates/`, and an initial commit | Done |
+| Create missing files: a vault set up by an older version, or missing a starter file, gets only the missing files and `.gitignore` lines from the settings, committed on their own | Done |
+| Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
 | Author settings: full name and email used to sign commits | Done |
 | Commit button in each note's header, marked when the note has changes | Done |
 | Commit modal: message, with an option to include all changed files | Done |
@@ -101,7 +103,7 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 1. Open Settings → theory.md and enter your full name and email.
 2. Run **theory.md: Setup vault** from the command palette.
 3. In Settings → theory.md → Vault, click **Browse…** next to **Project folder** and pick the folder holding the code. It can be one repository, or a folder with several repositories side by side (a whole ecosystem). theory.md lists the git repositories it finds, or warns when there are none. Then, under Compile, add the commands Claude may run to **Allowed commands**, for example `Bash(npm run *)`.
-4. Setup vault creates `Index.md` ("Manifesting <vault name>") and `Instructions.md` (the human-only rules and the doctrine) unless the vault already has them. `Instructions.md` is for humans; Compile doesn't send it to Claude.
+4. Setup vault creates `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine), and the templates `_templates/index.md` and `_templates/instructions.md`, each unless the vault already has it. `Instructions.md` is for humans; Compile doesn't send it to Claude. Edit the templates to change how new model folders start. When a vault is missing any of these, the settings offer Create missing files.
 5. Edit a note and click the commit button in its header.
 6. Click **Compile** at the bottom right of the editor. The button shows how many revisions are waiting, and turns accent-coloured when there's something to compile. You can also use the hammer in the ribbon or **theory.md: Compile** in the command palette. The compile report opens in a new tab.
 

@@ -1,7 +1,7 @@
 export interface StarterFile {
 	/** Path relative to the vault root. */
 	path: string;
-	/** Other names that count as this file, compared without case. */
+	/** Paths relative to the vault root that count as this file, compared without case. */
 	sameAs: string[];
 	content: string;
 }
@@ -26,10 +26,46 @@ const INSTRUCTIONS = `Theoretical model is the textual representation of a softw
 - **One intent per commit**, and the commit message says why.
 `;
 
-/** Notes every new vault starts with. Setup vault skips any that already exist. */
+/** The first line of every model folder's instructions.md, and the starter text of its template. */
+export const MODEL_INSTRUCTIONS =
+	"The writing rules in [the root Instructions](../Instructions.md) apply here. Rules for Claude that apply only to this repository go below.\n";
+
+/** The starter text of `_templates/index.md`. */
+const INDEX_TEMPLATE = `## What this repository is
+
+{{description}}
+
+{{purpose}}
+
+## Its place in the system
+
+%% What it depends on, and what depends on it. Link the other repositories' index notes. %%
+
+## What it does not do
+
+%% What people might expect here but lives elsewhere, or nowhere. %%
+
+## Notes
+
+%% One line per note: the question it answers and its rule prefix. Concepts first, then the main flows, then UI and settings. %%
+
+## Not built yet
+
+%% The notes marked realized: false. %%
+`;
+
+export const INDEX_TEMPLATE_PATH = "_templates/index.md";
+export const INSTRUCTIONS_TEMPLATE_PATH = "_templates/instructions.md";
+
+/**
+ * Everything Setup vault writes, besides the `.gitignore` lines. Setup and Create missing files
+ * both use this one list, and skip any file that already exists under one of its names.
+ */
 export function starterFiles(vaultName: string): StarterFile[] {
 	return [
-		{ path: "Index.md", sameAs: ["index.md"], content: `Manifesting ${vaultName}\n` },
-		{ path: "Instructions.md", sameAs: ["instruction.md", "instructions.md"], content: INSTRUCTIONS },
+		{ path: "Index.md", sameAs: ["Index.md"], content: `Manifesting ${vaultName}\n` },
+		{ path: "Instructions.md", sameAs: ["Instructions.md", "instruction.md"], content: INSTRUCTIONS },
+		{ path: INDEX_TEMPLATE_PATH, sameAs: [INDEX_TEMPLATE_PATH], content: INDEX_TEMPLATE },
+		{ path: INSTRUCTIONS_TEMPLATE_PATH, sameAs: [INSTRUCTIONS_TEMPLATE_PATH], content: MODEL_INSTRUCTIONS },
 	];
 }

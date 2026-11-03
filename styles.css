@@ -860,3 +860,10 @@ body button.theory-compile-fab.is-ready:hover {
 	font-weight: var(--font-semibold);
 	text-transform: uppercase;
 }
+
+/* The starter files a set-up vault is missing, below Create missing files. */
+.theory-missing-starters {
+	margin: 0 0 0.75em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

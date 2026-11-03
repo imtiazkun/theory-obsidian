@@ -158,7 +158,8 @@ export class RepositoriesView extends ItemView {
 			add.addEventListener("click", async () => {
 				add.disabled = true;
 				try {
-					await addModelFolder(this.plugin, kpi.name, `Manifesting ${kpi.name}\n`, `Add model folder for ${kpi.name}`);
+					// There is no form here, so the description and purpose are empty.
+					await addModelFolder(this.plugin, { name: kpi.name, description: "", purpose: "" }, `Add model folder for ${kpi.name}`);
 					this.plugin.refreshGitState();
 					new Notice(`Added the model folder ${kpi.name}/.`);
 				} catch (error) {

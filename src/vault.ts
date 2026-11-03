@@ -1,7 +1,7 @@
 import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { readFile, readdir, writeFile } from "fs/promises";
-import { join } from "path";
+import { mkdir, readFile, readdir, writeFile } from "fs/promises";
+import { dirname, join } from "path";
 import { promisify } from "util";
 import type { StarterFile } from "./starter";
 
@@ -55,14 +55,24 @@ async function hasGitConfig(basePath: string, key: string): Promise<boolean> {
 	}
 }
 
-async function ensureGitignore(basePath: string) {
+async function readGitignore(basePath: string): Promise<string> {
 	const path = join(basePath, ".gitignore");
-	const existing = existsSync(path) ? await readFile(path, "utf8") : "";
-	const present = new Set(existing.split("\n").map((line) => line.trim()));
-	const missing = GITIGNORE_LINES.filter((line) => !present.has(line));
-	if (missing.length === 0) return;
+	return existsSync(path) ? readFile(path, "utf8") : "";
+}
+
+function missingLines(gitignore: string): string[] {
+	const present = new Set(gitignore.split("\n").map((line) => line.trim()));
+	return GITIGNORE_LINES.filter((line) => !present.has(line));
+}
+
+/** Adds the missing lines to `.gitignore` and keeps every other line. Returns true when it changed the file. */
+async function ensureGitignore(basePath: string): Promise<boolean> {
+	const existing = await readGitignore(basePath);
+	const missing = missingLines(existing);
+	if (missing.length === 0) return false;
 	const prefix = existing === "" || existing.endsWith("\n") ? existing : existing + "\n";
-	await writeFile(path, prefix + missing.join("\n") + "\n");
+	await writeFile(join(basePath, ".gitignore"), prefix + missing.join("\n") + "\n");
+	return true;
 }
 
 /**
@@ -93,13 +103,52 @@ export async function authorName(basePath: string, author: Author): Promise<stri
 	}
 }
 
-/** Writes each starter file unless the vault root already has it, under any of its names. */
-async function addStarterFiles(basePath: string, files: StarterFile[]) {
-	const existing = new Set((await readdir(basePath)).map((name) => name.toLowerCase()));
-	for (const file of files) {
-		if (file.sameAs.some((name) => existing.has(name.toLowerCase()))) continue;
-		await writeFile(join(basePath, file.path), file.content);
+/** The path (relative to `basePath`) of the file or folder at `path`, matched ignoring case, or null. */
+export async function findIgnoringCase(basePath: string, path: string): Promise<string | null> {
+	let found = "";
+	for (const part of path.split("/")) {
+		const entries = await readdir(join(basePath, found)).catch(() => [] as string[]);
+		const match = entries.find((entry) => entry === part) ?? entries.find((entry) => entry.toLowerCase() === part.toLowerCase());
+		if (match === undefined) return null;
+		found = found ? `${found}/${match}` : match;
 	}
+	return found;
+}
+
+/** Where a missing starter file goes: its own path, inside a folder that already exists under another case. */
+async function starterPath(basePath: string, path: string): Promise<string> {
+	const slash = path.lastIndexOf("/");
+	if (slash === -1) return path;
+	const folder = (await findIgnoringCase(basePath, path.slice(0, slash))) ?? path.slice(0, slash);
+	return `${folder}/${path.slice(slash + 1)}`;
+}
+
+export interface MissingStarters {
+	files: StarterFile[];
+	gitignoreLines: string[];
+}
+
+/** The starter files the vault doesn't have under any of their names, and the missing `.gitignore` lines. */
+export async function missingStarters(basePath: string, files: StarterFile[]): Promise<MissingStarters> {
+	const missing: StarterFile[] = [];
+	for (const file of files) {
+		const found = await Promise.all(file.sameAs.map((name) => findIgnoringCase(basePath, name)));
+		if (found.every((path) => path === null)) missing.push(file);
+	}
+	return { files: missing, gitignoreLines: missingLines(await readGitignore(basePath)) };
+}
+
+/** Writes each starter file the vault doesn't have yet. Never changes a file that exists. Returns the paths written. */
+async function addStarterFiles(basePath: string, files: StarterFile[]): Promise<string[]> {
+	const written: string[] = [];
+	for (const file of (await missingStarters(basePath, files)).files) {
+		const path = await starterPath(basePath, file.path);
+		await mkdir(dirname(join(basePath, path)), { recursive: true });
+		// "wx" fails rather than overwrite a file that appeared in the meantime.
+		await writeFile(join(basePath, path), file.content, { flag: "wx" });
+		written.push(path);
+	}
+	return written;
 }
 
 /** Turns the vault into a git repository whose initial commit includes the starter files. */
@@ -114,6 +163,20 @@ export async function setUpVault(basePath: string, author: Author, starterFiles:
 	await ensureGitignore(basePath);
 	await git(basePath, ["add", "-A"]);
 	await git(basePath, [...identity, "commit", "--allow-empty", "-m", "Initial commit"]);
+}
+
+/**
+ * Writes the starter files and `.gitignore` lines a set-up vault is missing, and commits only those
+ * files as "Add missing starter files". Returns the number of files written or changed.
+ */
+export async function addMissingStarterFiles(basePath: string, author: Author, starterFiles: StarterFile[]): Promise<number> {
+	// Checked before anything is written, so a missing author never leaves files behind.
+	await identityArgs(basePath, author);
+	const paths = await addStarterFiles(basePath, starterFiles);
+	if (await ensureGitignore(basePath)) paths.push(".gitignore");
+	if (paths.length === 0) return 0;
+	await commit(basePath, author, "Add missing starter files", paths);
+	return paths.length;
 }
 
 interface Change {
