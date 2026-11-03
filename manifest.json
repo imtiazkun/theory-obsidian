@@ -1,7 +1,7 @@
 {
 	"id": "theory-md",
 	"name": "theory.md",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"minAppVersion": "1.5.0",
 	"description": "Keeps a human-written theoretical model of your software and compiles it into code with Claude Code.",
 	"author": "Imtiaz",
