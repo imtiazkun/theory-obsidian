@@ -1,6 +1,6 @@
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { CompileBranch, currentBranch, finishBranches, prepareBranches } from "../src/branches";
+import { CompileBranch, currentBranch, finishBranches, isOpenCompileBranch, prepareBranches, recordedPullRequest } from "../src/branches";
 import type { CompileReport } from "../src/compile";
 import type { PullRequest } from "../src/github";
 import { commitFiles, initRepo, out, tempFolder } from "./helpers";
@@ -141,5 +141,48 @@ describe("compile branches", () => {
 		const [prepared] = await prepareBranches(folder, SECOND, [reportWith(records)]);
 
 		expect([prepared.branch, prepared.base, prepared.created]).toEqual(["theory/compile-2222222", "main", true]);
+	});
+
+	it("a closed pull request from an older branch of the same name doesn't count for a recompiled branch", async () => {
+		const { folder, api } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		const firstRecords = await finishBranches(first);
+		const closed: PullRequest = {
+			repoPath: api,
+			repo: "api",
+			branch: "theory/compile-1111111",
+			base: "main",
+			url: "https://github.com/example/api/pull/1",
+			state: "closed",
+		};
+		const closedReport = reportWith(firstRecords, [closed]);
+		// The engineer deletes the closed branch and compiles the same revision again.
+		await out(api, ["checkout", "main"]);
+		await out(api, ["branch", "-D", "theory/compile-1111111"]);
+		const again = await prepareBranches(folder, FIRST, [closedReport]);
+		await commitFiles(api, { "b.ts": "b\n" }, "Add b");
+		const reports = [reportWith(await finishBranches(again)), closedReport];
+
+		expect(await recordedPullRequest(reports, api, "theory/compile-1111111")).toBeNull();
+		expect(await isOpenCompileBranch(api, "theory/compile-1111111", "main", reports)).toBe(true);
+	});
+
+	it("a pull request recorded for the branch it was opened from still counts", async () => {
+		const { folder, api } = await project();
+		const first = await prepareBranches(folder, FIRST, []);
+		await commitFiles(api, { "a.ts": "a\n" }, "Add a");
+		const open: PullRequest = {
+			repoPath: api,
+			repo: "api",
+			branch: "theory/compile-1111111",
+			base: "main",
+			url: "https://github.com/example/api/pull/1",
+			state: "open",
+		};
+		const reports = [reportWith(await finishBranches(first), [open])];
+
+		expect(await recordedPullRequest(reports, api, "theory/compile-1111111")).toEqual(open);
+		expect(await isOpenCompileBranch(api, "theory/compile-1111111", "main", reports)).toBe(true);
 	});
 });

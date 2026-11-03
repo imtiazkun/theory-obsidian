@@ -82,7 +82,7 @@ export async function repoKpis(plugin: TheoryPlugin, repos: CodeRepo[]): Promise
 		const last = reports.find((r) => r.branches?.some((b) => b.repoPath === repo.path && b.commits.length > 0)) ?? null;
 		const open = await openCompileBranch(repo.path, reports, false).catch(() => null);
 		const openBranch = open
-			? { branch: open.branch, pr: recordedPullRequest(reports, repo.path, open.branch)?.state ?? null }
+			? { branch: open.branch, pr: (await recordedPullRequest(reports, repo.path, open.branch))?.state ?? null }
 			: null;
 
 		const folder = modelFolder(plugin, repo.name);

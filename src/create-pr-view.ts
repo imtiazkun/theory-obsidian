@@ -36,7 +36,7 @@ export interface PullRequestCandidate {
 export async function pullRequestCandidates(report: CompileReport, reports: CompileReport[]): Promise<PullRequestCandidate[]> {
 	const candidates: PullRequestCandidate[] = [];
 	for (const branch of report.branches ?? []) {
-		if (!branch.kept || recordedPullRequest(reports, branch.repoPath, branch.branch)) continue;
+		if (!branch.kept || (await recordedPullRequest(reports, branch.repoPath, branch.branch))) continue;
 		if (!(await isOpenCompileBranch(branch.repoPath, branch.branch, branch.base, reports))) continue;
 		const commits = await branchCommits(branch.repoPath, branch.branch, branch.base);
 		if (commits.length > 0) candidates.push({ branch, commits });

@@ -1,6 +1,8 @@
 import { Notice, TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
+import { projectRepos } from "./branches";
 import { pendingRevisionCount, timeLeft } from "./compile";
+import { expandRepoFor } from "./expand";
 import type TheoryPlugin from "./main";
 import { changedFiles } from "./vault";
 
@@ -31,6 +33,8 @@ function plural(count: number, one: string, many: string): string {
 export class CompileButton {
 	private barEl: HTMLElement;
 	private commitEl: HTMLButtonElement;
+	private expandEl: HTMLButtonElement;
+	private expandLabelEl: HTMLElement;
 	private compileEl: HTMLButtonElement;
 	private iconEl: HTMLElement;
 	private labelEl: HTMLElement;
@@ -51,6 +55,12 @@ export class CompileButton {
 		this.commitEl = this.barEl.createEl("button", { cls: "theory-fab theory-commit-fab" });
 		setIcon(this.commitEl, commitIcon());
 		this.commitEl.addEventListener("click", () => this.onCommitClick());
+
+		// Shows only on a model folder's index.md (EXP-1).
+		this.expandEl = this.barEl.createEl("button", { cls: "theory-fab theory-expand-fab" });
+		setIcon(this.expandEl.createSpan({ cls: "theory-compile-fab-icon" }), "sparkles");
+		this.expandLabelEl = this.expandEl.createSpan({ cls: "theory-compile-fab-label" });
+		this.expandEl.addEventListener("click", () => this.onExpandClick());
 
 		this.compileEl = this.barEl.createEl("button", { cls: "theory-fab theory-compile-fab" });
 		this.iconEl = this.compileEl.createSpan({ cls: "theory-compile-fab-icon" });
@@ -168,7 +178,33 @@ export class CompileButton {
 		this.barEl.toggle(compile.kind !== "hidden");
 		if (compile.kind === "hidden") return;
 		this.renderCommit();
+		this.renderExpand();
 		this.renderCompile(compile);
+	}
+
+	/** The repository the active note is the model index of, or null. */
+	private expandRepo(): string | null {
+		const repos = projectRepos(this.plugin.settings.projectFolder).map((repo) => repo.name);
+		return expandRepoFor(this.plugin.app.workspace.getActiveFile()?.path, repos);
+	}
+
+	private renderExpand() {
+		const repo = this.expandRepo();
+		this.expandEl.toggle(repo !== null);
+		if (!repo) return;
+		const running = this.plugin.isExpanding(repo);
+		this.expandLabelEl.setText(running ? "Expanding…" : "Expand");
+		this.expandEl.setAttr("aria-disabled", String(running));
+		setTooltip(
+			this.expandEl,
+			running ? `Claude is looking for notes ${repo} is missing.` : `Ask Claude which notes the ${repo} model is missing.`,
+			{ placement: "top" },
+		);
+	}
+
+	private onExpandClick() {
+		const repo = this.expandRepo();
+		if (repo && !this.plugin.isExpanding(repo)) this.plugin.expand(repo);
 	}
 
 	private renderCommit() {
