@@ -81,9 +81,28 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
-## Install for development
+## Install
 
-theory.md is desktop only. It needs `git` on your machine, and Compile will also need the [Claude Code CLI](https://claude.com/claude-code).
+theory.md is desktop only and needs Obsidian 1.5.0 or later. It needs `git` on your machine, and Compile will also need the [Claude Code CLI](https://claude.com/claude-code). It isn't in Obsidian's Community plugins list yet, so install it one of these two ways.
+
+### With BRAT
+
+[BRAT](https://github.com/TfTHacker/obsidian42-brat) installs plugins from GitHub releases and keeps them updated.
+
+1. In Settings → Community plugins, turn off Restricted mode, then **Browse**, find **BRAT**, install it and enable it.
+2. Run **BRAT: Add a beta plugin for testing** from the command palette.
+3. Enter `imtiazkun/theory.md` and click **Add Plugin**.
+4. Turn on theory.md under Settings → Community plugins.
+
+### By hand
+
+1. Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/imtiazkun/theory.md/releases/latest).
+2. Put them in `<vault>/.obsidian/plugins/theory-md/`, making the folder if it isn't there. `.obsidian` is hidden; in the macOS Finder, Cmd+Shift+. shows it.
+3. Restart Obsidian, then turn on theory.md under Settings → Community plugins.
+
+To update, replace the three files with the ones from a newer release.
+
+## Install for development
 
 ```bash
 npm install
