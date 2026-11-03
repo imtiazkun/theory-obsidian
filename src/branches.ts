@@ -1,6 +1,6 @@
 import { basename } from "path";
 import type { CompileReport } from "./compile";
-import { PullRequest, branchPullRequest } from "./github";
+import { PullRequest, branchPullRequest, isFromBranch } from "./github";
 import { findProjectRepos } from "./project";
 import { git } from "./vault";
 
@@ -87,11 +87,16 @@ export function recordedBase(reports: CompileReport[], repoPath: string, branch:
 	return null;
 }
 
-/** The pull request opened for this branch from any report, newest first. */
-export function recordedPullRequest(reports: CompileReport[], repoPath: string, branch: string): PullRequest | null {
+/**
+ * The pull request opened for this branch from any report, newest first. A pull request recorded for an older
+ * branch of the same name doesn't count: the last commit its report added must be on this branch.
+ */
+export async function recordedPullRequest(reports: CompileReport[], repoPath: string, branch: string): Promise<PullRequest | null> {
 	for (const report of reports) {
 		const pr = report.pullRequests?.find((p) => p.repoPath === repoPath && p.branch === branch);
-		if (pr) return pr;
+		if (!pr) continue;
+		const record = report.branches?.find((b) => b.repoPath === repoPath && b.branch === branch);
+		if (await isFromBranch(repoPath, branch, record?.commits.at(-1)?.hash, pr.state)) return pr;
 	}
 	return null;
 }
@@ -119,7 +124,7 @@ export async function isOpenCompileBranch(
 ): Promise<boolean> {
 	if (!(await branchExists(repoPath, branch))) return false;
 	if (await isMerged(repoPath, branch, base)) return false;
-	const pr = (online ? await branchPullRequest(repoPath, branch) : null) ?? recordedPullRequest(reports, repoPath, branch);
+	const pr = (online ? await branchPullRequest(repoPath, branch) : null) ?? (await recordedPullRequest(reports, repoPath, branch));
 	return pr?.state !== "closed" && pr?.state !== "merged";
 }
 

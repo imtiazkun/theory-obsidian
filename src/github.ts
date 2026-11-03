@@ -77,18 +77,52 @@ export async function pullRequestState(repoPath: string, url: string): Promise<P
 	return stateOf(JSON.parse(stdout));
 }
 
-/** The newest pull request on GitHub for `branch`, in any state, or null when there is none or gh can't tell. */
+/**
+ * True when a pull request whose head is `head` was opened from this `branch`, not from an older branch that
+ * had the same name. Recompiling a revision reuses its branch name. The head must be on the branch. When this
+ * repository doesn't have the head commit, only an open or draft pull request counts, because GitHub allows
+ * one of those per branch name. Without a known head, the name alone decides.
+ */
+export async function isFromBranch(
+	repoPath: string,
+	branch: string,
+	head: string | undefined,
+	state: PullRequestState,
+): Promise<boolean> {
+	if (!head) return true;
+	try {
+		await git(repoPath, ["cat-file", "-e", `${head}^{commit}`]);
+	} catch {
+		return state === "open" || state === "draft";
+	}
+	try {
+		await git(repoPath, ["merge-base", "--is-ancestor", head, `refs/heads/${branch}`]);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The newest pull request on GitHub opened from this `branch`, in any state, or null when there is none or
+ * gh can't tell. Pull requests from an older branch of the same name are skipped (see `isFromBranch`).
+ */
 export async function branchPullRequest(
 	repoPath: string,
 	branch: string,
 ): Promise<{ url: string; state: PullRequestState } | null> {
+	let prs: { url: string; state: string; isDraft: boolean; headRefOid: string }[];
 	try {
-		const { stdout } = await gh(repoPath, ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,isDraft", "--limit", "1"]);
-		const [pr] = JSON.parse(stdout) as { url: string; state: string; isDraft: boolean }[];
-		return pr ? { url: pr.url, state: stateOf(pr) } : null;
+		const { stdout } = await gh(repoPath, ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,isDraft,headRefOid", "--limit", "20"]);
+		prs = JSON.parse(stdout);
 	} catch {
 		return null;
 	}
+	for (const pr of prs) {
+		const state = stateOf(pr);
+		if (await isFromBranch(repoPath, branch, pr.headRefOid, state)) return { url: pr.url, state };
+	}
+	return null;
 }
 
 /** Branch names on `origin`, as git last saw them. Never fetches. */
