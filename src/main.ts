@@ -23,7 +23,16 @@ import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
-import { authorName, changedFiles, commit, isVaultSetUp, setUpVault } from "./vault";
+import {
+	MissingStarters,
+	addMissingStarterFiles,
+	authorName,
+	changedFiles,
+	commit,
+	isVaultSetUp,
+	missingStarters,
+	setUpVault,
+} from "./vault";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -517,6 +526,22 @@ export default class TheoryPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Setup vault failed: ${errorMessage(error)}`, 10000);
 			return false;
+		}
+	}
+
+	/** The starter files and `.gitignore` lines this vault is missing. Worked out each time, never stored. */
+	missingStarters(): Promise<MissingStarters> {
+		return missingStarters(this.getVaultPath(), starterFiles(this.app.vault.getName()));
+	}
+
+	/** Writes the missing starter files and commits only them. */
+	async addMissingStarterFiles(): Promise<void> {
+		try {
+			const added = await addMissingStarterFiles(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			this.refreshGitState();
+			new Notice(`Added ${added} missing files.`);
+		} catch (error) {
+			new Notice(`Couldn't add the missing files: ${errorMessage(error)}`, 10000);
 		}
 	}
 }
