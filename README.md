@@ -102,6 +102,15 @@ theory.md is desktop only and needs Obsidian 1.5.0 or later. It needs `git` on y
 
 To update, replace the three files with the ones from a newer release.
 
+## Disclosures
+
+- **Network use.** theory.md makes no network requests itself and has no telemetry. It runs two command-line tools that do:
+  - The [Claude Code CLI](https://claude.com/claude-code), for Compile, Suggest, Expand and the sparkle buttons that write commit messages and pull request bodies. These send Anthropic the model's text and diffs, and Compile also sends whatever Claude reads in the project folder.
+  - The [GitHub CLI](https://cli.github.com) (`gh`) and `git push`, for Create PR, pull request states and New repository.
+- **Accounts.** The Claude features need Claude Code signed in to an Anthropic account, which is a paid service. The GitHub features need `gh` signed in to GitHub. Commits, history and the rest of the plugin work without either.
+- **Files outside the vault.** theory.md reads and writes the project folder you pick in the settings: Claude edits the code there, Compile creates and deletes `theory/compile-*` branches, and New repository creates a folder with a `README.md` and an `AGENTS.md`. Compile also copies the model into a temp folder (`$TMPDIR/theory-model-*`) and deletes it afterwards.
+- **License.** theory.md is open source under the [GPL-3.0](LICENSE).
+
 ## Install for development
 
 ```bash
