@@ -15,7 +15,7 @@ export interface PullRequest {
 	branch: string;
 	base: string;
 	url: string;
-	/** As last seen on GitHub. Refreshed when the report opens. */
+	/** As last seen on GitHub. Refreshed as `src/pr-states.ts` says. */
 	state: PullRequestState;
 }
 

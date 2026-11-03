@@ -75,7 +75,8 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Realized box and compile state in each note's header | Done |
 | Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
 | Compile branches: every compile commits on `theory/compile-{revision}`, at most one open per repository; empty ones are deleted | Done |
-| Create PR: push the compile branches and open pull requests with `gh`, with a sparkle to write the body; the report and compile history show their state | Done |
+| Create PR: push the compile branches and open pull requests with `gh`, with a sparkle to write the body; the report, compile history and Repositories page show their state, refreshed when they open, on the compile history's Refresh and when Obsidian gets focus back | Done |
+| Expand: on a model folder's `index.md`, Claude suggests which notes the model is missing. Create note makes an empty note you write yourself; never committed | Done |
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Server: shared remote, team-wide marker and lock | Planned |

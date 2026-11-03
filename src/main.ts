@@ -21,6 +21,10 @@ import { NoteStatus } from "./note-status";
 import { EntryFiles, HiddenFolders } from "./explorer";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
+import { ExpandRun, startExpand } from "./expand";
+import { EXPAND_VIEW_TYPE, ExpandView } from "./expand-view";
+import { projectRepos } from "./branches";
+import { PullRequestStates, RefreshReason } from "./pr-states";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
 import {
@@ -52,7 +56,17 @@ export default class TheoryPlugin extends Plugin {
 	private entryFiles = new EntryFiles(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
+	// At most one Expand per repository at a time, keyed by its name.
+	private expandRuns = new Map<string, ExpandRun>();
 	private statusBar: HTMLElement | null = null;
+	private pullRequestStates = new PullRequestStates({
+		reports: () => this.reports,
+		check: (pr) => pullRequestState(pr.repoPath, pr.url),
+		changed: async () => {
+			await this.saveSettings();
+			this.pullRequestsChanged();
+		},
+	});
 
 	async onload() {
 		await this.loadSettings();
@@ -84,6 +98,7 @@ export default class TheoryPlugin extends Plugin {
 		});
 		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
 		this.registerView(CREATE_PR_VIEW_TYPE, (leaf) => new CreatePullRequestView(leaf, this));
+		this.registerView(EXPAND_VIEW_TYPE, (leaf) => new ExpandView(leaf, this));
 		this.registerView(REPOSITORIES_VIEW_TYPE, (leaf) => new RepositoriesView(leaf, this));
 		this.addCommand({
 			id: "show-repositories",
@@ -146,11 +161,15 @@ export default class TheoryPlugin extends Plugin {
 		const refreshCompileSoon = debounce(() => this.compileButton.refresh(), 800, true);
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.compileButton.attach()));
 		this.registerEvent(this.app.workspace.on("file-open", refreshCompileSoon));
+		// The Expand button follows the active note at once.
+		this.registerEvent(this.app.workspace.on("file-open", () => this.compileButton.render()));
 		for (const event of ["modify", "create", "delete", "rename"] as const) {
 			this.registerEvent(this.app.vault.on(event as "modify", refreshCompileSoon));
 		}
 		// Commits made outside Obsidian show up when you come back to it.
 		this.registerDomEvent(window, "focus", refreshCompileSoon);
+		// A pull request merged in the browser shows as merged on coming back. Never on a timer.
+		this.registerDomEvent(window, "focus", () => this.refreshPullRequestStates("focus"));
 	}
 
 	onunload() {
@@ -161,6 +180,62 @@ export default class TheoryPlugin extends Plugin {
 		this.hiddenFolders.detach();
 		this.entryFiles.detach();
 		this.compileRun?.cancel();
+		for (const run of this.expandRuns.values()) run.cancel();
+	}
+
+	isExpanding(repo: string): boolean {
+		return this.expandRuns.has(repo);
+	}
+
+	private expandViews(repo: string): ExpandView[] {
+		return this.app.workspace
+			.getLeavesOfType(EXPAND_VIEW_TYPE)
+			.map((leaf) => leaf.view)
+			.filter((view): view is ExpandView => view instanceof ExpandView && view.repo === repo);
+	}
+
+	/** Opens the Expand view for the repository and asks Claude which notes its model folder is missing. */
+	async expand(repo: string) {
+		if (!repo) return;
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(EXPAND_VIEW_TYPE).find((l) => l.view instanceof ExpandView && l.view.repo === repo);
+		if (!leaf) {
+			leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({ type: EXPAND_VIEW_TYPE, active: true, state: { repo } });
+		}
+		await workspace.revealLeaf(leaf);
+		if (this.expandRuns.has(repo)) return;
+
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+		} catch (error) {
+			for (const view of this.expandViews(repo)) view.showFailure(errorMessage(error));
+			return;
+		}
+		const { claudeCommand, model, effort, projectFolder } = this.settings;
+		const repoPath = projectRepos(projectFolder).find((r) => r.name === repo)?.path ?? null;
+		const run = startExpand({ claudeCommand, model, effort, vaultPath, repo, repoPath });
+		this.expandRuns.set(repo, run);
+		for (const view of this.expandViews(repo)) view.running();
+		this.compileButton.render();
+		try {
+			const suggestions = await run.done;
+			for (const view of this.expandViews(repo)) view.showSuggestions(suggestions);
+		} catch (error) {
+			const reason = errorMessage(error);
+			if (reason !== "cancelled") for (const view of this.expandViews(repo)) view.showFailure(reason);
+		} finally {
+			this.expandRuns.delete(repo);
+			this.compileButton.render();
+		}
+	}
+
+	/** Closing the last Expand view of a repository stops its run; its suggestions are discarded. */
+	expandViewClosed(repo: string) {
+		window.setTimeout(() => {
+			if (this.expandViews(repo).length === 0) this.expandRuns.get(repo)?.cancel();
+		}, 0);
 	}
 
 	isCompiling(): boolean {
@@ -310,21 +385,14 @@ export default class TheoryPlugin extends Plugin {
 	pullRequestsChanged() {
 		for (const view of this.reportViews()) view.forgetPullRequests();
 		this.refreshReportViews();
+		for (const leaf of this.app.workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)) {
+			if (leaf.view instanceof RepositoriesView) leaf.view.refresh(false);
+		}
 	}
 
-	/** Asks GitHub for the state of each of the report's pull requests and saves what changed. */
-	async refreshPullRequestStates(report: CompileReport) {
-		let changed = false;
-		for (const pr of report.pullRequests ?? []) {
-			const state = await pullRequestState(pr.repoPath, pr.url).catch(() => null);
-			if (state && state !== pr.state) {
-				pr.state = state;
-				changed = true;
-			}
-		}
-		if (!changed) return;
-		await this.saveSettings();
-		this.pullRequestsChanged();
+	/** Asks GitHub for the state of every draft and open pull request, and saves and redraws what changed. */
+	refreshPullRequestStates(reason: RefreshReason): Promise<boolean> {
+		return this.pullRequestStates.refresh(reason);
 	}
 
 	/** Opens the Repositories page in a main tab, reusing it if it's already open. */

@@ -63,8 +63,8 @@ export class CompileReportView extends ItemView {
 	private suggestions = new Map<string, SuggestionState>();
 	// How many repositories of each finished report still need a pull request, worked out from git and gh.
 	private candidates = new Map<string, number>();
-	// Reports whose pull request states were refreshed since the report opened.
-	private refreshedStates = new Set<string>();
+	// The report last drawn. Switching to another report refreshes the pull request states.
+	private drawnId: string | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -95,7 +95,7 @@ export class CompileReportView extends ItemView {
 	}
 
 	async onClose() {
-		this.refreshedStates.clear();
+		this.drawnId = null;
 		this.candidates.clear();
 		for (const s of this.suggestions.values()) if (s.state === "running") s.run.cancel();
 		this.suggestions.clear();
@@ -300,15 +300,15 @@ export class CompileReportView extends ItemView {
 	}
 
 	/**
-	 * Works out, once per report on screen, whether Create PR shows, and refreshes the state of its pull
-	 * requests once after the report opens. Both need git and gh, so they redraw when done.
+	 * Refreshes the pull request states when the report opens or another report is shown, and works out,
+	 * once per report on screen, whether Create PR shows. Both need git or gh, so they redraw when done.
 	 */
 	private async checkPullRequests(report: CompileReport) {
-		if (report.status === "running") return;
-		if (!this.refreshedStates.has(report.id)) {
-			this.refreshedStates.add(report.id);
-			if (report.pullRequests?.length) this.plugin.refreshPullRequestStates(report);
+		if (this.drawnId !== report.id) {
+			this.drawnId = report.id;
+			this.plugin.refreshPullRequestStates("report");
 		}
+		if (report.status === "running") return;
 		if (this.candidates.has(report.id)) return;
 		this.candidates.set(report.id, 0);
 		const found = await pullRequestCandidates(report, this.plugin.reports).catch(() => []);

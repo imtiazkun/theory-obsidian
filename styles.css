@@ -867,3 +867,37 @@ body button.theory-compile-fab.is-ready:hover {
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 }
+
+/* Expand: beside the commit button, only on a model folder's index.md. */
+body button.theory-expand-fab[aria-disabled="true"] {
+	cursor: default;
+	opacity: 0.6;
+}
+
+.theory-expand-card {
+	margin: var(--size-4-3) 0;
+	padding: var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.theory-expand-name {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
+	font-weight: var(--font-semibold);
+}
+
+.theory-expand-created {
+	color: var(--text-success);
+	font-size: var(--font-ui-smaller);
+}
+
+.theory-expand-question {
+	margin: var(--size-4-1) 0;
+}
+
+.theory-expand-headings {
+	margin: var(--size-4-1) 0;
+	color: var(--text-muted);
+}
