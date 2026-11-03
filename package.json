@@ -4,7 +4,8 @@
   "description": "Obsidian plugin that keeps a human-written theoretical model of your software and compiles it into code with Claude Code",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc && node esbuild.config.mjs production"
+    "build": "tsc && node esbuild.config.mjs production",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
@@ -13,8 +14,10 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
+    "jsdom": "^30.1.3",
     "obsidian": "^1.14.4",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "private": true
 }

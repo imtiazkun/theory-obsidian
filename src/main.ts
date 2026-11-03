@@ -10,6 +10,7 @@ import {
 	PermissionAnswer,
 	PermissionRequest,
 	startCompile,
+	withAllowedRules,
 } from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
@@ -254,12 +255,7 @@ export default class TheoryPlugin extends Plugin {
 		if (!request) return;
 		this.compileRun?.answer(id, answer);
 		if (answer !== "always" || request.rules.length === 0) return;
-		// The request's rules at the end of the list, none of them twice.
-		let rules = this.settings.allowedTools.trim();
-		for (const rule of request.rules) {
-			if (!` ${rules} `.includes(` ${rule} `)) rules = rules ? `${rules} ${rule}` : rule;
-		}
-		this.settings.allowedTools = rules;
+		this.settings.allowedTools = withAllowedRules(this.settings.allowedTools, request.rules);
 		await this.saveSettings();
 	}
 

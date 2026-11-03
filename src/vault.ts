@@ -116,18 +116,29 @@ export async function setUpVault(basePath: string, author: Author, starterFiles:
 	await git(basePath, [...identity, "commit", "--allow-empty", "-m", "Initial commit"]);
 }
 
-/** Paths (relative to the vault) with changes not yet committed, including new files. */
-export async function changedFiles(basePath: string): Promise<string[]> {
+interface Change {
+	path: string;
+	/** Git's two-letter porcelain status, e.g. " M", "??" or "D ". */
+	status: string;
+}
+
+/** Uncommitted changes outside Obsidian's config folder, including new files. */
+async function changes(basePath: string): Promise<Change[]> {
 	const { stdout } = await git(basePath, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 	const entries = stdout.split("\0").filter((entry) => entry !== "");
-	const paths: string[] = [];
+	const found: Change[] = [];
 	for (let i = 0; i < entries.length; i++) {
 		const status = entries[i].slice(0, 2);
-		paths.push(entries[i].slice(3));
+		found.push({ path: entries[i].slice(3), status });
 		// Renames are followed by their original path, which isn't a separate change.
 		if (status.includes("R") || status.includes("C")) i++;
 	}
-	return paths.filter((path) => !path.startsWith(OBSIDIAN_CONFIG));
+	return found.filter((change) => !change.path.startsWith(OBSIDIAN_CONFIG));
+}
+
+/** Paths (relative to the vault) with changes not yet committed, including new files. */
+export async function changedFiles(basePath: string): Promise<string[]> {
+	return (await changes(basePath)).map((change) => change.path);
 }
 
 /**
@@ -144,7 +155,9 @@ export async function commit(
 	if (paths === "all") {
 		// Stage the changed files by name. Excluding `.obsidian/` with a pathspec fails once
 		// .gitignore lists it, because git then refuses the ignored path outright.
-		await git(basePath, ["add", "-A", "--", ...(await changedFiles(basePath))]);
+		// A deletion that is already staged has nothing left to add, and git refuses its path.
+		const paths = (await changes(basePath)).filter((change) => change.status !== "D ").map((change) => change.path);
+		if (paths.length > 0) await git(basePath, ["add", "-A", "--", ...paths]);
 		await git(basePath, [...identity, "commit", "-m", message]);
 	} else {
 		await git(basePath, ["add", "-A", "--", ...paths]);
