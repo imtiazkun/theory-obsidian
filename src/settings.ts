@@ -1,9 +1,9 @@
-import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { hasOrigin } from "./github";
 import { findProjectRepos, pickFolder } from "./project";
-import { PULL_INTERVALS } from "./pull";
+import { PULL_INTERVALS, originUrl, remoteUrlProblem, saveOrigin } from "./pull";
 import type TheoryPlugin from "./main";
 
 export interface AuthorSettings {
@@ -207,24 +207,22 @@ export class TheorySettingTab extends PluginSettingTab {
 		else this.displayClaudeCode(containerEl);
 	}
 
-	/** Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-28). */
+	/** Remote, Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-33). */
 	private displayPull(containerEl: HTMLElement) {
 		new Setting(containerEl)
 			.setName("Pull")
 			.setDesc("Keeps the vault and the code up to date with their remotes. Pulls only ever fast-forward.")
 			.setHeading();
 		const noRemote = containerEl.createDiv({ cls: "setting-item-description theory-pull-no-remote" });
+		noRemote.setText("This vault has no remote, so its notes are never pulled. Add one below.");
 		noRemote.hide();
-		if (this.plugin.isVaultSetUp()) {
-			hasOrigin(this.plugin.getVaultPath()).then((origin) => {
-				if (origin) return;
-				noRemote.setText("This vault has no remote, so its notes are never pulled.");
-				noRemote.show();
-			});
+		const setUp = this.plugin.isVaultSetUp();
+		if (setUp) {
+			hasOrigin(this.plugin.getVaultPath()).then((origin) => noRemote.toggle(!origin));
 		} else {
-			noRemote.setText("This vault has no remote, so its notes are never pulled.");
 			noRemote.show();
 		}
+		this.displayRemote(containerEl, setUp, noRemote);
 
 		new Setting(containerEl)
 			.setName("Pull automatically")
@@ -258,6 +256,60 @@ export class TheorySettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 			);
+	}
+
+	/** The vault's `origin`, which lives in its git config rather than the plugin's data (CFG-29 to CFG-33). */
+	private displayRemote(containerEl: HTMLElement, setUp: boolean, noRemote: HTMLElement) {
+		let value = "";
+		const setting = new Setting(containerEl)
+			.setName("Remote")
+			.setDesc(setUp ? "The git URL the vault pulls from, its origin." : "Set up the vault first.")
+			.addText((text) => {
+				text.setPlaceholder("git@github.com:team/model.git").setDisabled(!setUp);
+				text.inputEl.addClass("theory-remote-url");
+				text.onChange((next) => (value = next.trim()));
+				text.inputEl.addEventListener("keydown", (event) => {
+					if (event.key === "Enter") save();
+				});
+				if (setUp) {
+					originUrl(this.plugin.getVaultPath()).then((url) => {
+						value = url ?? "";
+						text.setValue(value);
+					});
+				}
+			})
+			.addButton((button) => button.setButtonText("Save").setDisabled(!setUp).onClick(() => save()));
+		setting.settingEl.addClass("theory-remote-setting");
+
+		const save = async () => {
+			if (!setUp) return;
+			const problem = remoteUrlProblem(value);
+			if (problem) {
+				new Notice(problem);
+				return;
+			}
+			const vaultPath = this.plugin.getVaultPath();
+			const current = await originUrl(vaultPath);
+			if (current === value) return;
+			if (current !== null && !(await confirmReplace(this.app, current, value))) return;
+			try {
+				await saveOrigin(vaultPath, value);
+			} catch (error) {
+				new Notice(`Couldn't save the remote: ${error instanceof Error ? error.message : String(error)}`, 10000);
+				return;
+			}
+			noRemote.hide();
+			new Notice("Remote saved. Pulling…");
+			await this.plugin.puller.checkOrigin();
+			await this.plugin.pullNow();
+		};
+	}
+
+	/** Scrolls to the Remote setting, for "Add a remote…" in the sync menu (PULL-20). */
+	revealRemote() {
+		const field = this.containerEl.querySelector<HTMLElement>(".theory-remote-setting");
+		field?.scrollIntoView({ block: "center" });
+		field?.querySelector<HTMLInputElement>("input")?.focus();
 	}
 
 	/** Model and thinking level as text, matched against the agent's choices at compile (AGT-6, AGT-23). */
@@ -471,4 +523,27 @@ export class TheorySettingTab extends PluginSettingTab {
 			row.setAttr("title", repo);
 		}
 	}
+}
+
+/** Asks before pointing the vault at a different remote (CFG-30). Resolves to true on a yes. */
+function confirmReplace(app: App, from: string, to: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		let answered = false;
+		const modal = new Modal(app);
+		modal.titleEl.setText("Replace the remote?");
+		modal.contentEl.createEl("p", { text: `Replace the remote ${from} with ${to}? Pulls will come from the new remote.` });
+		new Setting(modal.contentEl)
+			.addButton((button) => button.setButtonText("Cancel").onClick(() => modal.close()))
+			.addButton((button) =>
+				button
+					.setButtonText("Replace")
+					.setWarning()
+					.onClick(() => {
+						answered = true;
+						modal.close();
+					}),
+			);
+		modal.onClose = () => resolve(answered);
+		modal.open();
+	});
 }

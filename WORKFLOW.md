@@ -66,7 +66,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/repositories.ts` | Repository KPIs, fetch, Add model folder and New repository steps and file texts |
 | `src/templates.ts` | Fills `_templates/index.md` and `_templates/instructions.md` for a new model folder, with the built-in text when a template is missing or empty |
 | `src/repositories-view.ts` | The Repositories page and the New repository form |
-| `src/pull.ts` | Pulls the vault and the code repositories, fast-forward only: the vault pull, the code pulls, the gate before a compile, the sync status text and the `Puller` that decides when a pull runs |
+| `src/pull.ts` | Pulls the vault and the code repositories, fast-forward only: the vault pull, the code pulls, the gate before a compile, the sync status and sync menu text, saving the vault's `origin`, and the `Puller` that decides when a pull runs |
 
 ## 4. Settings
 
@@ -88,6 +88,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `pullAutomatically` | `true` | Pull on launch, on focus and on the timer. Pull now and the pull before a compile run either way. |
 | `pullInterval` | `5` | Minutes between timer pulls: 1, 5, 15 or 30. |
 | `pullCodeRepos` | `true` | Each pull also fetches the project folder's repositories with an upstream and fast-forwards the safe ones. |
+
+Remote is a setting too, but it isn't in plugin data: it is the vault's `origin` in its git config. Save runs `git remote add origin <url>`, or `git remote set-url origin <url>` after a "Replace the remote?" yes, then a pull. It refuses an empty URL, spaces, a leading `-` and a password or token in an https URL, and never removes the remote.
 
 ## 5. Lifecycle state machine (per vault)
 
@@ -227,10 +229,11 @@ The right sidebar shows `git log --follow` for the active note (author, relative
 - **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder from the templates committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
 
 ### W14. Pull (`src/pull.ts`)
-- **When:** the vault pulls `main` from `origin` on launch, on window focus (skipped within 30 seconds of the last pull) and on the timer, when Pull automatically is on; on Pull now (command or a click on the sync status) and before every compile, always. A vault without `origin` never pulls. No pull runs during a compile; one that falls due waits for it to end. One pull at a time.
+- **When:** the vault pulls `main` from `origin` on launch, on window focus (skipped within 30 seconds of the last pull) and on the timer, when Pull automatically is on; on Pull now (the command or the sync menu) and before every compile, always. A vault without `origin` never pulls. No pull runs during a compile; one that falls due waits for it to end. One pull at a time.
 - **Git:** `git fetch --no-tags origin` with prompts off (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`), so credentials fail with git's message instead of hanging. Then exactly one of: nothing new; fast-forward (`git merge --ff-only origin/main`) when only the remote moved and none of its commits touch a file with uncommitted changes, with the notice "Pulled N revisions by {authors}. Changed: {notes}." (the engineer's own revisions left out of the names); waiting, when they do touch one; sync needed, when both sides moved; offline, when the fetch failed. Never merges, rebases, commits, pushes, stashes, switches branches or moves the marker.
 - **Code:** with Also pull code repositories on, each pull also fetches every repository with an upstream, and fast-forwards it only when it isn't on a compile branch, has no uncommitted changes, and is behind with nothing of its own. Silent.
-- **Sync status:** left of the commit button, only with an `origin`: "Pulling…", "Synced {time} ago" (plus " · {n} not pushed"), "{n} waiting", "Sync needed", "Offline, {time} ago". Never "Up to date". Nothing is stored; it is lost on reload.
+- **Sync status:** left of the commit button: "No remote", "Not pulled yet", "Pulling…", "Synced {time} ago" (plus " · {n} not pushed"), "{n} waiting", "Sync needed", "Offline, {time} ago". Never "Up to date". Whether the vault has an `origin` is checked on load and after Remote is saved, without fetching.
+- **Sync menu:** a click on the sync status. "Checked the remote {time} ago" (or "Not checked yet"), "Last pulled {n} revisions {time} ago" (or "Nothing pulled since Obsidian opened"), Pull now ("Pulling…" and disabled while one runs) and Pull settings…. Without an `origin`: "This vault has no remote." and Add a remote…, which opens the settings at Remote. Nothing is stored; it is lost on reload.
 
 ### W10. Compile history view
 A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do. Each compile shows its pull request states, which refresh when the view opens and on its Refresh action (see W11).

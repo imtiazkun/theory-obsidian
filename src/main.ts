@@ -91,6 +91,7 @@ export default class TheoryPlugin extends Plugin {
 		pulled: (outcome, reason) => this.pulled(outcome, reason),
 	});
 	private pullTimer: number | null = null;
+	private settingTab: TheorySettingTab | null = null;
 	// Set by scripts/install.sh on a first install: run Setup vault once, on the first load.
 	private setupOnLoad = false;
 
@@ -98,7 +99,8 @@ export default class TheoryPlugin extends Plugin {
 		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
 		await loadToolPath();
 		await this.loadSettings();
-		this.addSettingTab(new TheorySettingTab(this.app, this));
+		this.settingTab = new TheorySettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.addCommand({
 			id: "setup-vault",
@@ -157,6 +159,8 @@ export default class TheoryPlugin extends Plugin {
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
+			// The sync status shows "No remote" or "Not pulled yet" even when no pull runs (PULL-9).
+			await this.puller.checkOrigin();
 			if (launching) this.puller.pull("launch");
 			this.restartPullTimer();
 		});
@@ -452,11 +456,13 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/** Opens theory.md's tab in Obsidian settings. */
-	openSettings() {
+	/** Opens the plugin's settings, at Remote for "Add a remote…" (PULL-20). */
+	openSettings(at?: "remote") {
 		// `setting` isn't in Obsidian's public types, but it's the only way to open a plugin's tab.
 		const setting = (this.app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
 		setting.open();
 		setting.openTabById(this.manifest.id);
+		if (at === "remote") window.setTimeout(() => this.settingTab?.revealRemote(), 50);
 	}
 
 	/** Opens the compile report in a main tab, reusing it if it's already open. */

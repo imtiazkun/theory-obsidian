@@ -1,10 +1,10 @@
-import { Notice, TFile, setIcon, setTooltip } from "obsidian";
+import { Menu, Notice, TFile, setIcon, setTooltip } from "obsidian";
 import { commitIcon } from "./commit";
 import { projectRepos } from "./branches";
 import { pendingRevisionCount, timeLeft } from "./compile";
 import { expandRepoFor } from "./expand";
 import type TheoryPlugin from "./main";
-import { syncStatus } from "./pull";
+import { syncMenu, syncStatus } from "./pull";
 import { changedFiles } from "./vault";
 
 type CompileState =
@@ -22,6 +22,7 @@ interface BarState {
 }
 
 const COMPILE_KINDS = ["running", "setup", "ready", "failed", "idle"] as const;
+const SYNC_KINDS = ["no-remote", "not-pulled", "pulling", "synced", "waiting", "diverged", "offline"] as const;
 
 function plural(count: number, one: string, many: string): string {
 	return `${count} ${count === 1 ? one : many}`;
@@ -56,13 +57,11 @@ export class CompileButton {
 	constructor(private plugin: TheoryPlugin) {
 		this.barEl = createDiv({ cls: "theory-action-bar" });
 
-		// The sync status, left of the commit button, only when the vault has an origin (PULL-9).
+		// The sync status, left of the commit button (PULL-9). Clicking it opens the sync menu (PULL-19).
 		this.syncEl = this.barEl.createEl("button", { cls: "theory-fab theory-sync-fab" });
 		this.syncIconEl = this.syncEl.createSpan({ cls: "theory-compile-fab-icon" });
 		this.syncLabelEl = this.syncEl.createSpan({ cls: "theory-compile-fab-label" });
-		this.syncEl.addEventListener("click", () => {
-			if (!this.plugin.puller.state.running) this.plugin.pullNow();
-		});
+		this.syncEl.addEventListener("click", () => this.openSyncMenu());
 
 		this.commitEl = this.barEl.createEl("button", { cls: "theory-fab theory-commit-fab" });
 		setIcon(this.commitEl, commitIcon());
@@ -225,8 +224,10 @@ export class CompileButton {
 		const status = syncStatus(this.plugin.puller.state, Date.now());
 		this.syncEl.toggle(status !== null);
 		if (!status) return;
-		for (const kind of ["pulling", "synced", "waiting", "diverged", "offline"]) this.syncEl.toggleClass(`is-${kind}`, status.kind === kind);
+		for (const kind of SYNC_KINDS) this.syncEl.toggleClass(`is-${kind}`, status.kind === kind);
 		const icons: Record<string, string> = {
+			"no-remote": "unlink",
+			"not-pulled": "cloud",
 			pulling: "loader",
 			synced: "cloud",
 			waiting: "clock",
@@ -235,8 +236,34 @@ export class CompileButton {
 		};
 		setIcon(this.syncIconEl, icons[status.kind] ?? "cloud");
 		this.syncLabelEl.setText(status.label);
-		this.syncEl.setAttr("aria-disabled", String(status.kind === "pulling"));
 		setTooltip(this.syncEl, status.tooltip, { placement: "top" });
+	}
+
+	/** When the remote was checked and last pulled, then Pull now and the settings (PULL-19 to PULL-21). */
+	private openSyncMenu() {
+		const contents = syncMenu(this.plugin.puller.state, Date.now());
+		const menu = new Menu();
+		for (const line of contents.lines) menu.addItem((item) => item.setTitle(line).setIsLabel(true));
+		menu.addSeparator();
+		const pull = contents.pull;
+		if (pull) {
+			menu.addItem((item) =>
+				item
+					.setTitle(pull.label)
+					.setIcon("refresh-cw")
+					.setDisabled(!pull.enabled)
+					.onClick(() => this.plugin.pullNow()),
+			);
+		}
+		const addRemote = contents.settings === "Add a remote…";
+		menu.addItem((item) =>
+			item
+				.setTitle(contents.settings)
+				.setIcon(addRemote ? "link" : "settings")
+				.onClick(() => this.plugin.openSettings(addRemote ? "remote" : undefined)),
+		);
+		const rect = this.syncEl.getBoundingClientRect();
+		menu.showAtPosition({ x: rect.left, y: rect.top, left: false, overlap: true, width: rect.width });
 	}
 
 	private renderCommit() {

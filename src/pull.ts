@@ -145,6 +145,44 @@ function joinNames(names: string[]): string {
 	return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
+/** The vault's `origin` URL, or null when it has none. */
+export async function originUrl(vaultPath: string): Promise<string | null> {
+	try {
+		return (await git(vaultPath, ["remote", "get-url", "origin"])).stdout.trim() || null;
+	} catch {
+		return null;
+	}
+}
+
+// Tokens people paste as the user name of an https URL: GitHub's and GitLab's.
+const TOKEN_PREFIXES = /^(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-)/;
+
+/** Why a remote URL can't be saved (CFG-32), or null when it can. */
+export function remoteUrlProblem(url: string): string | null {
+	// A leading dash would reach git as an option.
+	if (!url || /\s/.test(url) || url.startsWith("-")) return "Enter the remote's URL.";
+	const userinfo = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)@/i.exec(url)?.[1];
+	if (userinfo !== undefined && (userinfo.includes(":") || TOKEN_PREFIXES.test(userinfo))) {
+		return "Don't put a password or token in the remote. Git asks your credential helper instead.";
+	}
+	return null;
+}
+
+/**
+ * Adds the vault's `origin`, or points it at `url` (CFG-30). Never fetches or pushes.
+ * Throws git's message when git refuses; the caller checks `remoteUrlProblem` first.
+ */
+export async function saveOrigin(vaultPath: string, url: string): Promise<"added" | "replaced" | "unchanged"> {
+	const current = await originUrl(vaultPath);
+	if (current === url) return "unchanged";
+	try {
+		await git(vaultPath, current === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
+	} catch (error) {
+		throw new Error(gitError(error));
+	}
+	return current === null ? "added" : "replaced";
+}
+
 /** Whether a code repository may fast-forward to its upstream (PULL-13). Null when it has no upstream. */
 export interface RepoPullState {
 	branch: string;
@@ -241,13 +279,17 @@ export function compileGate(vault: VaultPull | null, repos: RepoPull[]): { error
 	return { error: null, offline };
 }
 
-/** What the sync status shows, worked out from the last pulls. */
+/** What the sync status shows, worked out from the last pulls. Kept only while Obsidian runs (PULL-22). */
 export interface SyncState {
 	running: boolean;
+	/** Whether the vault has an `origin`. Null until it has been looked at, or when the vault isn't set up. */
+	origin: boolean | null;
 	/** Null until the vault has pulled once. */
 	vault: VaultPull | null;
 	/** When a vault fetch last worked. */
 	lastSynced: number | null;
+	/** The last pull that brought revisions. */
+	lastPulled: { at: number; count: number } | null;
 }
 
 function duration(ms: number): string {
@@ -259,18 +301,23 @@ function duration(ms: number): string {
 	return `${Math.floor(hours / 24)} d`;
 }
 
-/** The sync status's label and tooltip (PULL-9), or null when it is hidden. Never "Up to date" (PULL-10). */
+/** The sync status's label and tooltip (PULL-9), or null before the vault has been looked at. Never "Up to date" (PULL-10). */
 export function syncStatus(state: SyncState, now: number): { kind: string; label: string; tooltip: string } | null {
-	if (state.vault?.kind === "no-origin") return null;
+	if (state.origin === false || state.vault?.kind === "no-origin") {
+		return { kind: "no-remote", label: "No remote", tooltip: "This vault has no remote, so its notes are never pulled. Click to add one." };
+	}
 	if (state.running) return { kind: "pulling", label: "Pulling…", tooltip: "Pulling new revisions from the remote." };
 	const vault = state.vault;
-	if (!vault) return null;
+	if (!vault) {
+		if (state.origin !== true) return null;
+		return { kind: "not-pulled", label: "Not pulled yet", tooltip: "The vault hasn't pulled since Obsidian opened. Click to pull." };
+	}
 	const ago = state.lastSynced === null ? "never" : `${duration(now - state.lastSynced)} ago`;
 	switch (vault.kind) {
 		case "synced":
 		case "pulled": {
 			const notPushed = vault.ahead > 0 ? ` · ${vault.ahead} not pushed` : "";
-			return { kind: "synced", label: `Synced ${ago}${notPushed}`, tooltip: "The vault has every revision on the remote. Click to pull now." };
+			return { kind: "synced", label: `Synced ${ago}${notPushed}`, tooltip: "The vault has every revision on the remote. Click to pull." };
 		}
 		case "waiting":
 			return {
@@ -287,6 +334,33 @@ export function syncStatus(state: SyncState, now: number): { kind: string; label
 		case "offline":
 			return { kind: "offline", label: state.lastSynced === null ? "Offline" : `Offline, ${ago}`, tooltip: vault.message };
 	}
+}
+
+/** What the sync menu shows (PULL-19 to PULL-21). */
+export interface SyncMenu {
+	/** Information lines, which can't be clicked. */
+	lines: string[];
+	/** Pull now's label, and whether it can be clicked. Null without a remote. */
+	pull: { label: string; enabled: boolean } | null;
+	/** The item that opens the settings. */
+	settings: "Pull settings…" | "Add a remote…";
+}
+
+export function syncMenu(state: SyncState, now: number): SyncMenu {
+	if (state.origin === false || state.vault?.kind === "no-origin") {
+		return { lines: ["This vault has no remote."], pull: null, settings: "Add a remote…" };
+	}
+	const checked = state.lastSynced === null ? "Not checked yet" : `Checked the remote ${duration(now - state.lastSynced)} ago`;
+	const last = state.lastPulled;
+	const pulled =
+		last === null
+			? "Nothing pulled since Obsidian opened"
+			: `Last pulled ${last.count} ${last.count === 1 ? "revision" : "revisions"} ${duration(now - last.at)} ago`;
+	return {
+		lines: [checked, pulled],
+		pull: state.running ? { label: "Pulling…", enabled: false } : { label: "Pull now", enabled: true },
+		settings: "Pull settings…",
+	};
 }
 
 export type PullReason = "launch" | "focus" | "timer" | "now" | "compile";
@@ -321,7 +395,7 @@ const AUTOMATIC: PullReason[] = ["launch", "focus", "timer"];
  * a focus pull at most every 30 seconds, and automatic pulls only when they are on.
  */
 export class Puller {
-	state: SyncState = { running: false, vault: null, lastSynced: null };
+	state: SyncState = { running: false, origin: null, vault: null, lastSynced: null, lastPulled: null };
 	private running: Promise<PullOutcome> | null = null;
 	private lastPull: number | null = null;
 	private deferred: PullReason | null = null;
@@ -361,9 +435,21 @@ export class Puller {
 		return reason ? this.pull(reason === "focus" ? "timer" : reason) : Promise.resolve(null);
 	}
 
+	/** Looks again whether the vault has an `origin`, e.g. on launch or after the remote is saved. Never fetches. */
+	async checkOrigin() {
+		const vaultPath = this.options.vaultPath();
+		const origin = vaultPath ? await hasOrigin(vaultPath) : null;
+		if (origin === this.state.origin) return;
+		this.state.origin = origin;
+		// A vault that just got a remote hasn't pulled from it yet.
+		if (origin && this.state.vault?.kind === "no-origin") this.state.vault = null;
+		this.options.changed();
+	}
+
 	private async run(reason: PullReason): Promise<PullOutcome> {
 		const vaultPath = this.options.vaultPath();
-		if (vaultPath && (await hasOrigin(vaultPath))) {
+		this.state.origin = vaultPath ? await hasOrigin(vaultPath) : null;
+		if (this.state.origin) {
 			this.state.running = true;
 			this.options.changed();
 		}
@@ -382,6 +468,7 @@ export class Puller {
 		if (vault) {
 			this.state.vault = vault;
 			if (vault.kind !== "offline" && vault.kind !== "no-origin") this.state.lastSynced = this.now();
+			if (vault.kind === "pulled") this.state.lastPulled = { at: this.now(), count: vault.count };
 		}
 		this.options.changed();
 		const outcome = { vault, repos };

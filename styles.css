@@ -555,12 +555,16 @@ body button.theory-sync-fab.is-diverged {
 	color: var(--text-warning);
 }
 
-body button.theory-sync-fab.is-offline {
+body button.theory-sync-fab.is-offline,
+body button.theory-sync-fab.is-no-remote,
+body button.theory-sync-fab.is-not-pulled {
 	color: var(--text-faint);
 }
 
-body button.theory-sync-fab[aria-disabled="true"] {
-	cursor: default;
+/* The remote's URL needs room to be read. */
+.theory-remote-url {
+	width: 22em;
+	max-width: 100%;
 }
 
 /* Commit: a round, icon-only button. The accent dot marks uncommitted changes. */
