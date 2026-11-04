@@ -20,8 +20,9 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | Revision | A git commit in the vault repo. |
 | Last compile marker | Git tag `theory/compiled` in the vault repo. It points at the last compiled commit. |
 | Pending revisions | Commits in `theory/compiled..HEAD`. On the first compile (no tag yet), all commits up to `HEAD`. |
-| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. It leaves out the files never sent to Claude (`NOT_SENT` in `src/compile.ts`): hidden folders, hidden notes (name starts with `_`, like `_welcome.md`), `.obsidian/` and `Instructions.md`. |
+| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. It leaves out the files never sent to Claude (`NOT_SENT` in `src/compile.ts`): dot folders, hidden folders, hidden notes (name starts with `_`, like `_welcome.md`) and `Instructions.md`. |
 | Hidden folder | A folder whose name starts with `_`, at any depth, like `_templates`. Committed, but never sent to Claude. |
+| Dot folder | A folder whose name starts with `.`, at any depth, like `.obsidian/` or `.comments/` (`DOT_FOLDERS`, `isInDotFolder`). Never sent to any agent, never counted as a change (`changedFiles`), left out of the vault check, and a revision that changes only dot folders is never pending (`pendingRevisionCount`, `revisionsBetween`). theory.md commits `.comments/` itself; git ignores `.obsidian/`. |
 | Compile report | JSON record of one compile run. Kept in plugin data, never in the vault. |
 | Plugin data | `.obsidian/plugins/theory-md/data.json`. Holds the settings and the last 20 reports. Git ignores it. |
 | Anchor | Where a problem sits in the model: `{path, heading?, quote?}`. Claude proposes it, and the plugin checks it against the snapshot before keeping it. |
@@ -132,7 +133,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 - **Trigger:** the commit button in a note's header (marked `is-dirty` when the note has changes), the commit button in the floating bar, or the command "Commit current note".
 - **Check first:** the note is in the list of changed files (`git status --porcelain -z --untracked-files=all`). If not, the notice "No changes to commit in this note." The floating commit button commits the active note when it has changes, else every changed file, else shows "No changes to commit".
 - **Modal:** a message box (default `Update <basename>`, or `Update model` for all files) with a sparkle button that asks Claude to write the message, an "Include all changed files" toggle when other files changed, and the line "Signed as Name <email>". Cmd/Ctrl+Enter submits.
-- **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus hidden folders, hidden notes, `.obsidian/` and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. While Claude writes, the sparkle blinks (fades out and back in about once a second); it never spins and no bar shows. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
+- **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus dot folders, hidden folders, hidden notes and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. While Claude writes, the sparkle blinks (fades out and back in about once a second); it never spins and no bar shows. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
 - **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A -- <each changed path outside .obsidian/>` (a deletion that is already staged is skipped, since git refuses its path) then `git commit -m <msg>`. Both use `-c user.name/-c user.email` with the identity `gitIdentity` reads, so what the settings and the modal show is what signs. With no name or email the notice is "Set your name and email in git first. theory.md settings show how." and nothing is committed.
 - **Output:** a notice "Committed <shortHash>". The buttons, the pending count and the history view refresh.
 
@@ -149,10 +150,10 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 4. The project folder must be set and must exist.
 5. `head` = `git rev-parse HEAD`. If there are no commits, it errors.
 6. `from` = the commit the `theory/compiled` tag points to, or `null` if there is no tag.
-7. If `from === head`, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
+7. If `from === head`, or every revision in `from..head` changes only dot folders, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
 7a. Every repository in the project folder must have a clean working tree (`git status --porcelain`), else "These repositories have uncommitted changes: {repos}. Commit or stash them first."
-8. `revisions` = `git log --reverse from..head` (hash, author, ISO date, subject).
-9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes hidden folders, hidden notes, `.obsidian/` and `Instructions.md`.
+8. `revisions` = `git log --reverse from..head -- <DOT_FOLDERS>` (hash, author, ISO date, subject), so revisions that change only dot folders aren't listed.
+9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes dot folders, hidden folders, hidden notes and `Instructions.md`.
 10. Snapshot: `git archive head -- <NOT_SENT>` into a new temp folder, extract it, then `chmod -R a-w`.
 11. Record the guards: a SHA-256 hash of the snapshot tree, and the vault's working-tree state (path → mtime, or "deleted").
 11a. Read each repository's model-folder `instructions.md` from the snapshot (matched ignoring case) for the prompt.

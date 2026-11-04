@@ -15,8 +15,13 @@ const GITIGNORE_LINES = [
 	".obsidian/",
 ];
 
-/** Obsidian's config folder isn't part of the model, even in vaults that track it from before. */
-const OBSIDIAN_CONFIG = ".obsidian/";
+/**
+ * True for a file inside a dot folder, like `.obsidian/` or `.comments/`, at any depth. Dot folders are
+ * never theory: their changes never count as changes to the model, and they are never sent to an agent.
+ */
+export function isInDotFolder(path: string): boolean {
+	return path.split("/").slice(0, -1).some((part) => part.startsWith("."));
+}
 
 /** Who signs the vault's commits: the name and email git uses (CFG-34). */
 export interface Identity {
@@ -254,7 +259,7 @@ interface Change {
 	status: string;
 }
 
-/** Uncommitted changes outside Obsidian's config folder, including new files. */
+/** Uncommitted changes outside dot folders, including new files. */
 async function changes(basePath: string): Promise<Change[]> {
 	const { stdout } = await git(basePath, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 	const entries = stdout.split("\0").filter((entry) => entry !== "");
@@ -265,7 +270,8 @@ async function changes(basePath: string): Promise<Change[]> {
 		// Renames are followed by their original path, which isn't a separate change.
 		if (status.includes("R") || status.includes("C")) i++;
 	}
-	return found.filter((change) => !change.path.startsWith(OBSIDIAN_CONFIG));
+	// Obsidian's config stays out even in vaults that track it from before; comments commit by themselves.
+	return found.filter((change) => !isInDotFolder(change.path));
 }
 
 /** Paths (relative to the vault) with changes not yet committed, including new files. */
