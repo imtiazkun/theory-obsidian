@@ -257,15 +257,15 @@ describe("remote", () => {
 		}
 	});
 
-	it("adds an origin, replaces it, and does nothing when it is the same", async () => {
+	it("adds an origin and never replaces one", async () => {
 		const vault = join(tempFolder(), "vault");
 		await initRepo(vault);
 		expect(await originUrl(vault)).toBeNull();
 		expect(await saveOrigin(vault, "git@github.com:team/model.git")).toBe("added");
 		expect(await originUrl(vault)).toBe("git@github.com:team/model.git");
-		expect(await saveOrigin(vault, "git@github.com:team/model.git")).toBe("unchanged");
-		expect(await saveOrigin(vault, "https://github.com/team/other.git")).toBe("replaced");
-		expect(await originUrl(vault)).toBe("https://github.com/team/other.git");
+		expect(await saveOrigin(vault, "https://github.com/team/other.git")).toBe("exists");
+		expect(await originUrl(vault)).toBe("git@github.com:team/model.git");
+		expect(await saveOrigin(vault, "git@github.com:team/model.git")).toBe("exists");
 	});
 
 	it("throws git's message and changes nothing when git refuses", async () => {
@@ -274,14 +274,16 @@ describe("remote", () => {
 	});
 
 	it("never fetches or pushes when the remote is saved", async () => {
-		const { vault, ana } = await vaultWithOrigin();
+		const { origin, ana } = await vaultWithOrigin();
 		await anaPushes(ana, { "Compile.md": "ana\n" });
-		const { origin } = await vaultWithOrigin();
+		const vault = join(tempFolder(), "vault");
+		await initRepo(vault, { "Mine.md": "mine\n" });
 		const head = await out(vault, ["rev-parse", "HEAD"]);
-		const remoteHead = await out(vault, ["rev-parse", "origin/main"]);
-		await saveOrigin(vault, origin);
+		const remoteHead = await out(origin, ["rev-parse", "main"]);
+		expect(await saveOrigin(vault, origin)).toBe("added");
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
-		expect(await out(vault, ["rev-parse", "origin/main"])).toBe(remoteHead);
+		expect(await out(vault, ["for-each-ref", "refs/remotes"])).toBe("");
+		expect(await out(origin, ["rev-parse", "main"])).toBe(remoteHead);
 	});
 });
 

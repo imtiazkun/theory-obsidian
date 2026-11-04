@@ -93,7 +93,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `pullInterval` | `5` | Minutes between timer pulls: 1, 5, 15 or 30. |
 | `pullCodeRepos` | `true` | Each pull also fetches the project folder's repositories with an upstream and fast-forwards the safe ones. |
 
-Remote is a setting too, but it isn't in plugin data: it is the vault's `origin` in its git config. Save runs `git remote add origin <url>`, or `git remote set-url origin <url>` after a "Replace the remote?" yes, then a pull. It refuses an empty URL, spaces, a leading `-` and a password or token in an https URL, and never removes the remote.
+Remote is a setting too, but it isn't in plugin data: it is the vault's `origin` in its git config. When the vault has an `origin`, the setting shows its URL as plain text with no field, and says to run `git remote set-url origin <url>` in the vault to change it. Without one, Save runs `git remote add origin <url>`, then a pull. Save never replaces or removes a remote. It refuses an empty URL, spaces, a leading `-` and a password or token in an https URL.
 
 ## 5. Lifecycle state machine (per vault)
 

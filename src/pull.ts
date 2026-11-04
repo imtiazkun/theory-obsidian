@@ -169,18 +169,18 @@ export function remoteUrlProblem(url: string): string | null {
 }
 
 /**
- * Adds the vault's `origin`, or points it at `url` (CFG-30). Never fetches or pushes.
+ * Adds the vault's `origin` (CFG-30). Never replaces or removes one: a vault that already has an
+ * `origin` is left as it is. Never fetches or pushes.
  * Throws git's message when git refuses; the caller checks `remoteUrlProblem` first.
  */
-export async function saveOrigin(vaultPath: string, url: string): Promise<"added" | "replaced" | "unchanged"> {
-	const current = await originUrl(vaultPath);
-	if (current === url) return "unchanged";
+export async function saveOrigin(vaultPath: string, url: string): Promise<"added" | "exists"> {
+	if ((await originUrl(vaultPath)) !== null) return "exists";
 	try {
-		await git(vaultPath, current === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
+		await git(vaultPath, ["remote", "add", "origin", url]);
 	} catch (error) {
 		throw new Error(gitError(error));
 	}
-	return current === null ? "added" : "replaced";
+	return "added";
 }
 
 /** Whether a code repository may fast-forward to its upstream (PULL-13). Null when it has no upstream. */

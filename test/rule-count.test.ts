@@ -72,6 +72,16 @@ describe("the rule count (HDR-9 to HDR-13)", () => {
 		expect(ruleCountTooltip(countRules(text))).toBe("PULL: 22 rules, PULL-1 to PULL-22");
 	});
 
+	it("shows the only ID of a prefix with one rule", () => {
+		expect(ruleCountTooltip(countRules("**CMT-8** Only one.\n\n**PULL-1.** a\n\n**PULL-2.** b\n"))).toBe(
+			"CMT: 1 rule, CMT-8\nPULL: 2 rules, PULL-1 to PULL-2",
+		);
+	});
+
+	it("counts each declaration of an ID declared twice", () => {
+		expect(ruleCountLabel(countRules("**PULL-6.** One.\n\n**PULL-6.** Two.\n"))).toBe("2 rules");
+	});
+
 	it("finds an ID declared more than once", () => {
 		const count = countRules("**PULL-6.** One.\n\n**PULL-6.** Two.\n\n**PULL-7.** Three.\n\n- **PULL-7.** a\n- **PULL-7.** b\n");
 		expect(count.duplicates).toEqual([

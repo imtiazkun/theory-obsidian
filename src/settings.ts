@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { hasOrigin } from "./github";
@@ -179,19 +179,17 @@ export class TheorySettingTab extends PluginSettingTab {
 			containerEl.createDiv({ cls: "setting-item-description theory-author-problem", text: GIT_MISSING });
 			return;
 		}
+		// What git has is shown as plain text, never as a field (CFG-34, CFG-36).
+		if (identity.name) new Setting(containerEl).setName("Name").setDesc(identity.name);
+		if (identity.email) new Setting(containerEl).setName("Email").setDesc(identity.email);
 		const missing = missingIdentity(identity);
-		if (missing.length === 0) {
-			new Setting(containerEl).setName("Name").setDesc(identity.name);
-			new Setting(containerEl).setName("Email").setDesc(identity.email);
-			return;
-		}
+		if (missing.length === 0) return;
 
-		const what = missing.length === 2 ? "a name or an email" : `a ${missing[0]}`;
-		containerEl.createDiv({
-			cls: "setting-item-description theory-author-problem",
-			text: `Git has no ${what} to sign your commits with. Set ${missing.length === 2 ? "them" : "it"} in a terminal:`,
-		});
 		for (const key of missing) {
+			containerEl.createDiv({
+				cls: "setting-item-description theory-author-problem",
+				text: `Git has no ${key} to sign your commits with. Set it in a terminal:`,
+			});
 			const command = IDENTITY_COMMANDS[key];
 			const row = containerEl.createDiv({ cls: "theory-author-command" });
 			row.createEl("code", { text: command });
@@ -274,11 +272,62 @@ export class TheorySettingTab extends PluginSettingTab {
 			);
 	}
 
-	/** The vault's `origin`, which lives in its git config rather than the plugin's data (CFG-29 to CFG-33). */
+	/**
+	 * The vault's `origin`, which lives in its git config rather than the plugin's data (CFG-29 to CFG-33).
+	 * An existing `origin` is shown as plain text and only changed in git; Save only ever adds one.
+	 */
 	private displayRemote(containerEl: HTMLElement, setUp: boolean, noRemote: HTMLElement) {
+		const setting = new Setting(containerEl).setName("Remote");
+		setting.settingEl.addClass("theory-remote-setting");
+		if (!setUp) {
+			this.displayRemoteField(setting, false, noRemote);
+			return;
+		}
+		originUrl(this.plugin.getVaultPath()).then((url) => {
+			if (url === null) {
+				this.displayRemoteField(setting, true, noRemote);
+				return;
+			}
+			const desc = createFragment((fragment) => {
+				fragment.createDiv({ cls: "theory-remote-current", text: url });
+				const hint = fragment.createDiv();
+				hint.appendText("To change it, run ");
+				hint.createEl("code", { text: "git remote set-url origin <url>" });
+				hint.appendText(" in the vault.");
+			});
+			setting.setDesc(desc);
+		});
+	}
+
+	/** The empty field and Save button for a vault without an `origin` (CFG-29, CFG-30). */
+	private displayRemoteField(setting: Setting, setUp: boolean, noRemote: HTMLElement) {
 		let value = "";
-		const setting = new Setting(containerEl)
-			.setName("Remote")
+		const save = async () => {
+			if (!setUp) return;
+			const problem = remoteUrlProblem(value);
+			if (problem) {
+				new Notice(problem);
+				return;
+			}
+			let saved: "added" | "exists";
+			try {
+				saved = await saveOrigin(this.plugin.getVaultPath(), value);
+			} catch (error) {
+				new Notice(`Couldn't save the remote: ${error instanceof Error ? error.message : String(error)}`, 10000);
+				return;
+			}
+			if (saved === "exists") {
+				// Added in git since the settings opened: show it rather than replace it.
+				this.display();
+				return;
+			}
+			noRemote.hide();
+			new Notice("Remote saved. Pulling…");
+			await this.plugin.puller.checkOrigin();
+			await this.plugin.pullNow();
+			this.display();
+		};
+		setting
 			.setDesc(setUp ? "The git URL the vault pulls from, its origin." : "Set up the vault first.")
 			.addText((text) => {
 				text.setPlaceholder("git@github.com:team/model.git").setDisabled(!setUp);
@@ -287,38 +336,8 @@ export class TheorySettingTab extends PluginSettingTab {
 				text.inputEl.addEventListener("keydown", (event) => {
 					if (event.key === "Enter") save();
 				});
-				if (setUp) {
-					originUrl(this.plugin.getVaultPath()).then((url) => {
-						value = url ?? "";
-						text.setValue(value);
-					});
-				}
 			})
 			.addButton((button) => button.setButtonText("Save").setDisabled(!setUp).onClick(() => save()));
-		setting.settingEl.addClass("theory-remote-setting");
-
-		const save = async () => {
-			if (!setUp) return;
-			const problem = remoteUrlProblem(value);
-			if (problem) {
-				new Notice(problem);
-				return;
-			}
-			const vaultPath = this.plugin.getVaultPath();
-			const current = await originUrl(vaultPath);
-			if (current === value) return;
-			if (current !== null && !(await confirmReplace(this.app, current, value))) return;
-			try {
-				await saveOrigin(vaultPath, value);
-			} catch (error) {
-				new Notice(`Couldn't save the remote: ${error instanceof Error ? error.message : String(error)}`, 10000);
-				return;
-			}
-			noRemote.hide();
-			new Notice("Remote saved. Pulling…");
-			await this.plugin.puller.checkOrigin();
-			await this.plugin.pullNow();
-		};
 	}
 
 	/** Scrolls to the Remote setting, for "Add a remote…" in the sync menu (PULL-20). */
@@ -539,27 +558,4 @@ export class TheorySettingTab extends PluginSettingTab {
 			row.setAttr("title", repo);
 		}
 	}
-}
-
-/** Asks before pointing the vault at a different remote (CFG-30). Resolves to true on a yes. */
-function confirmReplace(app: App, from: string, to: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		let answered = false;
-		const modal = new Modal(app);
-		modal.titleEl.setText("Replace the remote?");
-		modal.contentEl.createEl("p", { text: `Replace the remote ${from} with ${to}? Pulls will come from the new remote.` });
-		new Setting(modal.contentEl)
-			.addButton((button) => button.setButtonText("Cancel").onClick(() => modal.close()))
-			.addButton((button) =>
-				button
-					.setButtonText("Replace")
-					.setWarning()
-					.onClick(() => {
-						answered = true;
-						modal.close();
-					}),
-			);
-		modal.onClose = () => resolve(answered);
-		modal.open();
-	});
 }
