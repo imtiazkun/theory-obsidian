@@ -78,6 +78,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Create PR: push the compile branches and open pull requests with `gh`, with a sparkle to write the body; the report, compile history and Repositories page show their state, refreshed when they open, on the compile history's Refresh and when Obsidian gets focus back | Done |
 | Expand: on a model folder's `index.md`, Claude suggests which notes the model is missing. Create note makes an empty note you write yourself; never committed | Done |
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
+| Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
@@ -149,6 +150,8 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 | Effort | Claude Code only. *Claude Code default*, *Low*, *Medium*, *High*, *Extra high* or *Max*, passed to Claude Code as `--effort`. The default passes nothing. Applies from the next compile. |
 | Permission mode | Claude Code only. Anything not allowed becomes a permission card in the compile report: **Allow**, **Always allow** (also adds the request's rules to Allowed commands, all shown on the card: every rule Claude Code suggests for a command, like `Bash(npm run:*)`, one per part of a compound command like `cd app && npm test`, else the exact command; that tool on that exact file for Edit, Write and NotebookEdit; Claude Code's suggestion or the tool's name for other tools) or **Deny**. A card nobody answers is denied after 120 seconds, and every denied step is listed in the report's problems. Writes to the model are denied without asking. *Edit files, run only allowed commands* is the default. *Auto* lets Claude decide what's safe. *Run anything* turns off checks. |
 | Allowed commands | Claude Code only. Claude Code permission rules, separated by spaces. Defaults to `Bash(git *)`. Writes to the model are always denied, whatever this says. |
+| Pull automatically | On by default. Pulls the vault's `main` from `origin` when Obsidian opens, when its window gets focus and every *Check every* minutes (1, 5, 15 or 30; 5 by default). Pulls only fast-forward, never touch a file with uncommitted changes and never ask for a password. **Pull now** and the pull before a compile run even when it's off. |
+| Also pull code repositories | On by default. Each pull also fetches the project folder's repositories and fast-forwards those not on a compile branch, with no uncommitted changes and nothing of their own. |
 
 ## Compile rules
 
