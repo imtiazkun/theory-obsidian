@@ -143,7 +143,8 @@ describe("ACP settings (AGT-5, AGT-6)", () => {
  * in its plan file one by one, and records every answer it gets in its record file.
  */
 const FAKE_AGENT = `
-import { appendFileSync, readFileSync } from "fs";
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 const [plan, record] = process.argv.slice(2);
 const steps = JSON.parse(readFileSync(plan, "utf8"));
 let nextId = 1000;
@@ -153,6 +154,7 @@ const call = (method, params) => new Promise((resolve) => { const id = nextId++;
 const note = (entry) => appendFileSync(record, JSON.stringify(entry) + "\\n");
 let buffer = "";
 let session = "s1";
+let extraFolder = "";
 let cancelled;
 const cancel = new Promise((resolve) => (cancelled = resolve));
 process.stdin.on("data", (chunk) => {
@@ -166,11 +168,22 @@ async function handle(m) {
 	note({ received: m.method, params: m.method === "session/prompt" ? undefined : m.params });
 	if (m.method === "session/cancel") return cancelled();
 	if (m.method === "initialize") return send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
-	if (m.method === "session/new") return send({ id: m.id, result: { sessionId: session } });
+	if (m.method === "session/new") {
+		extraFolder = m.params.additionalDirectories[0];
+		return send({ id: m.id, result: { sessionId: session } });
+	}
 	if (m.method === "session/prompt") {
 		note({ prompt: m.params.prompt[0].text });
 		for (const step of steps) {
 			if (step.say) send({ method: "session/update", params: { sessionId: session, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
+			// Its own shell can write anywhere, past the plugin's file access (AGT-17).
+			if (step.touch) writeFileSync(step.touch, "touched");
+			if (step.touchSnapshot) {
+				// The snapshot is read-only, but nothing stops a shell from making it writable again.
+				chmodSync(join(extraFolder, step.touchSnapshot), 0o644);
+				writeFileSync(join(extraFolder, step.touchSnapshot), "touched");
+			}
+			if (step.stderr) process.stderr.write(step.stderr);
 			if (step.tool) send({ method: "session/update", params: { sessionId: session, update: { sessionUpdate: "tool_call", toolCallId: "t", title: step.tool } } });
 			if (step.ask) {
 				const answer = await call("session/request_permission", { sessionId: session, toolCall: step.ask, options: step.options });
@@ -185,7 +198,7 @@ async function handle(m) {
 				note({ write: step.write, error: answer.error?.message ?? null });
 			}
 		}
-		return send({ id: m.id, result: { stopReason: "end_turn" } });
+		return send({ id: m.id, result: { stopReason: steps.find((step) => step.stop)?.stop ?? "end_turn" } });
 	}
 }
 `;
@@ -302,6 +315,16 @@ describe("compiling with an ACP agent", () => {
 		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
 	});
 
+	it("says why the agent stopped and the end of its error output, never the exit code (AGT-22)", async () => {
+		const s = await setup();
+		const steps = [{ say: "I ran out of room." }, { stderr: "context window full\n" }, { stop: "max_tokens" }];
+		const report = await (await compile(s.options(steps))).done;
+		expect(report.status).toBe("failed");
+		const problem = problemTexts(report).find((p) => p.startsWith("The agent gave no structured answer."));
+		expect(problem).toBe("The agent gave no structured answer. It stopped because: max_tokens. context window full");
+		expect(problemTexts(report).some((p) => p.includes("exit"))).toBe(false);
+	});
+
 	it("denies a change to the model without a card (AGT-12)", async () => {
 		const s = await setup();
 		const asked: PermissionRequest[] = [];
@@ -363,6 +386,23 @@ describe("compiling with an ACP agent", () => {
 		expect(report.status).toBe("cancelled");
 		expect(s.records().find((r) => r.permission)?.permission).toEqual({ outcome: "cancelled" });
 		expect(s.records().some((r) => r.received === "session/cancel")).toBe(true);
+		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+	});
+
+	it("checks the snapshot and the vault after a cancelled compile, and keeps it cancelled (INV-12)", async () => {
+		const s = await setup();
+		const steps = [
+			{ touch: join(s.vault, "Note.md"), touchSnapshot: "Note.md" },
+			{ ask: { toolCallId: "t1", kind: "execute", rawInput: { command: "npm test" } }, options: ALL_OPTIONS },
+		];
+		let run: Awaited<ReturnType<typeof startCompile>>;
+		run = await startCompile({ ...s.options(steps), onPermissionRequest: () => run.cancel() }, () => {});
+		const report = await run.done;
+		expect(report.status).toBe("cancelled");
+		expect(report.summary).toBe("You cancelled this compile. The last compile marker didn't move.");
+		const problems = problemTexts(report);
+		expect(problems.some((p) => p.startsWith("These vault files changed while the compile ran: Note.md."))).toBe(true);
+		expect(problems).toContain("Claude tried to change the model snapshot. Those changes were thrown away.");
 		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
 	});
 });

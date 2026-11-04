@@ -476,7 +476,6 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 		if (error) return { result: null, code, error, stderr };
 		const structured = answerFromMessages(messages);
 		const text = [...messages].reverse().find((m) => m.trim() !== "")?.trim() ?? "";
-		const why = turn.error ? turn.error : turn.stopReason && turn.stopReason !== "end_turn" ? `It stopped: ${turn.stopReason}.` : "";
 		return {
 			result: {
 				isError: Boolean(turn.error) || turn.stopReason !== "end_turn",
@@ -484,7 +483,8 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 				structured: structured ?? undefined,
 			},
 			code,
-			stderr: [why, stderr.trim()].filter(Boolean).join("\n"),
+			stopReason: turn.error || turn.stopReason || "unknown",
+			stderr: stderr.trim(),
 		};
 	})();
 

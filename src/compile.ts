@@ -506,6 +506,8 @@ export interface AgentOutcome {
 	code: number | null;
 	/** Set when the agent couldn't be started. */
 	error?: Error;
+	/** Why an ACP agent stopped: its stop reason, or the error that ended its turn. */
+	stopReason?: string;
 	stderr: string;
 }
 
@@ -733,8 +735,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const agentName = agent === "acp" ? "The agent" : "Claude Code";
 
 	/**
-	 * The snapshot check (INV-5) and the vault check (INV-6). They run after every compile, whatever the
-	 * agent, because an agent's own shell can write anywhere the engineer can (AGT-17).
+	 * The snapshot check (INV-5) and the vault check (INV-6). They run after every compile in which an agent
+	 * started, cancelled ones included, whatever the agent, because an agent's own shell can write anywhere
+	 * the engineer can (AGT-17, INV-12). They never change a cancelled compile's status or move the marker.
 	 */
 	const checkModel = async () => {
 		const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
@@ -752,7 +755,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	];
 
 	const done = (async () => {
-		const { result, code, error, stderr } = await agentRun.done;
+		const { result, code, error, stopReason, stderr } = await agentRun.done;
 		denyAll(`${agentName} exited`);
 		try {
 			// Whatever the outcome, a new branch without commits goes, and its repository goes back to its base.
@@ -804,7 +807,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.problems.push(
 					plainProblem(
 						agent === "acp"
-							? `The agent gave no structured answer. ${stderr.trim()}`.trim()
+							? // The plugin stops an ACP agent itself, so its exit code means nothing (AGT-22).
+								`The agent gave no structured answer. It stopped because: ${(stopReason ?? "unknown").replace(/\.$/, "")}. ${stderr.trim()}`.trim()
 							: `Claude Code exited with code ${code}. ${stderr.trim()}`.trim(),
 					),
 				);
