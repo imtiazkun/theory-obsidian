@@ -50,7 +50,9 @@ Things that need several files to understand:
 - **State lives in only three places:** git (history, plus the `theory/compiled` tag as the last-compile marker), front matter (`realized: false`), and plugin data (settings plus the last 20 reports). Note compile state, pending counts and button states are worked out each time from these, never stored.
 - **Problem anchors** (`src/anchor.ts`): Claude proposes `{path, heading?, quote?}`. `checkProblems` checks them against the snapshot before they're kept. `overlay.ts` (CodeMirror decorations plus banners) and `note-status.ts` use the checked anchors and the report's `suspectNotes`.
 - **Pulls** (`src/pull.ts`) only ever fetch and fast-forward, and run git with `NO_PROMPT_ENV` so a credential prompt fails instead of hanging Obsidian. `Puller` decides when a pull runs (never during a compile, focus at most every 30 seconds) and is shared by the timer, focus, Pull now and the pull at the start of `compile()` in `main.ts`. `compileGate` turns that last pull into a reason not to compile, or the offline notice.
-- **`src/explorer.ts`** patches the file explorer's internal `getSortedFolderItems`. That's private Obsidian API, so it must be undone on unload.
+- **Dot folders** (`.obsidian/`, `.comments/`, any folder starting with `.`) are never theory: `DOT_FOLDERS` in `src/compile.ts` keeps them out of the snapshot, diffs and pending revisions, and `isInDotFolder` in `src/vault.ts` keeps them out of the changed files and the vault check. Comments (`src/comments.ts`) live in `.comments/` and commit themselves, one file per commit.
+- **The author is git's.** `gitIdentity` reads `user.name`/`user.email` from the vault's own config, else the global one, and every commit passes them with `-c`. The settings never edit them; `fullName`/`email` in plugin data are only an older version's values, offered once for the vault's config.
+- **`src/explorer.ts`** patches the file explorer's internal `getSortedFolderItems`, and adds the change dots to the rows of its private `fileItems`. That's private Obsidian API, so it must be undone on unload.
 
 ## Invariants not to break
 
