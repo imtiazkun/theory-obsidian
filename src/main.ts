@@ -20,7 +20,7 @@ import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
 import { RuleCounts } from "./rule-count-header";
-import { EntryFiles, HiddenFolders } from "./explorer";
+import { ChangeDots, EntryFiles, HiddenFolders } from "./explorer";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
 import { ExpandRun, startExpand } from "./expand";
@@ -66,6 +66,7 @@ export default class TheoryPlugin extends Plugin {
 	private ruleCounts = new RuleCounts(this);
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
+	private changeDots = new ChangeDots(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
@@ -167,6 +168,7 @@ export default class TheoryPlugin extends Plugin {
 			this.ruleCounts.sync();
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
+			await this.changeDots.sync();
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
 			// The sync status shows "No remote" or "Not pulled yet" even when no pull runs (PULL-9).
 			await this.puller.checkOrigin();
@@ -180,6 +182,15 @@ export default class TheoryPlugin extends Plugin {
 		for (const event of ["create", "delete", "rename"] as const) {
 			this.registerEvent(this.app.vault.on(event as "create", syncEntryFiles));
 		}
+
+		// The change dots refresh when a file changes and when the window gets focus (UI-29).
+		const syncDotsSoon = debounce(() => this.changeDots.sync(), 800, true);
+		for (const event of ["modify", "create", "delete", "rename"] as const) {
+			this.registerEvent(this.app.vault.on(event as "modify", syncDotsSoon));
+		}
+		this.registerDomEvent(window, "focus", syncDotsSoon);
+		// A new or redrawn explorer gets the dots it already knows.
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.changeDots.render()));
 
 		const syncStatus = () => this.noteStatus.sync();
 		const syncStatusSoon = debounce(syncStatus, 800, true);
@@ -273,6 +284,7 @@ export default class TheoryPlugin extends Plugin {
 		this.ruleCounts.removeAll();
 		this.hiddenFolders.detach();
 		this.entryFiles.detach();
+		this.changeDots.detach();
 		this.compileRun?.cancel();
 		for (const run of this.expandRuns.values()) run.cancel();
 		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
@@ -441,6 +453,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileButton.refresh();
 		this.overlay.sync();
 		this.noteStatus.sync();
+		this.changeDots.sync();
 		const questions = report.questions.length;
 		const extra = questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
 		if (report.status === "succeeded") new Notice(`Compile finished.${extra}`);
@@ -675,6 +688,7 @@ export default class TheoryPlugin extends Plugin {
 	refreshGitState() {
 		this.puller.recount();
 		this.commitButtons.sync();
+		this.changeDots.sync();
 		this.compileButton.refresh();
 		this.noteStatus.sync();
 		for (const leaf of this.app.workspace.getLeavesOfType(HISTORY_VIEW_TYPE)) {

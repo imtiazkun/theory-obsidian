@@ -74,6 +74,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Read-only snapshot, deny rules and the post-compile check | Done |
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
 | Realized box and compile state in each note's header | Done |
+| Change dots in the file explorer: orange for uncommitted changes, the accent colour for committed changes waiting for a compile, on folders too | Done |
 | Rule count in each note's header: "12 rules", with each prefix's count and range in its tooltip, and the warning colour when an ID is declared twice | Done |
 | Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
 | Compile branches: every compile commits on `theory/compile-{revision}`, at most one open per repository; empty ones are deleted | Done |
