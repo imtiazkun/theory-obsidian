@@ -20,8 +20,9 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | Revision | A git commit in the vault repo. |
 | Last compile marker | Git tag `theory/compiled` in the vault repo. It points at the last compiled commit. |
 | Pending revisions | Commits in `theory/compiled..HEAD`. On the first compile (no tag yet), all commits up to `HEAD`. |
-| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. It leaves out the files never sent to Claude (`NOT_SENT` in `src/compile.ts`): hidden folders, `.obsidian/` and `Instructions.md`. |
+| Snapshot | A read-only copy of the vault at `HEAD`, made in a temp folder (`$TMPDIR/theory-model-*`). Claude reads the model from here. It leaves out the files never sent to Claude (`NOT_SENT` in `src/compile.ts`): dot folders, hidden folders, hidden notes (name starts with `_`, like `_welcome.md`) and `Instructions.md`. |
 | Hidden folder | A folder whose name starts with `_`, at any depth, like `_templates`. Committed, but never sent to Claude. |
+| Dot folder | A folder whose name starts with `.`, at any depth, like `.obsidian/` or `.comments/` (`DOT_FOLDERS`, `isInDotFolder`). Never sent to any agent, never counted as a change (`changedFiles`), left out of the vault check, and a revision that changes only dot folders is never pending (`pendingRevisionCount`, `revisionsBetween`). theory.md commits `.comments/` itself; git ignores `.obsidian/`. |
 | Compile report | JSON record of one compile run. Kept in plugin data, never in the vault. |
 | Plugin data | `.obsidian/plugins/theory-md/data.json`. Holds the settings and the last 20 reports. Git ignores it. |
 | Anchor | Where a problem sits in the model: `{path, heading?, quote?}`. Claude proposes it, and the plugin checks it against the snapshot before keeping it. |
@@ -47,6 +48,9 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |
 | `src/overlay.ts` | Failure overlay: CodeMirror highlights, the note banner, jump to spot, dismiss |
 | `src/note-status.ts` | Realized box and compile-state icon in each note's header |
+| `src/comments.ts`, `src/comments-ui.ts`, `src/comments-view.ts` | Comments: one JSON file per note in the model folder's `.comments/` (the vault root's for notes outside every model folder), at the note's path with `.json` (`commentFilePath`). Written with two-space indents and a final newline; a file that can't be parsed is never overwritten. Each comment, reply, resolve and reopen writes the file and commits only it, signed with the git identity; a failed commit leaves it saved with the notice "Comment saved but not committed: {reason}". A renamed, moved or deleted note's comment file follows it in its own commit. The selection button and popover, the underlines (CodeMirror marks and a Reading view post-processor, display only) and the Comments view in the right sidebar. Comments are in a dot folder, so they are never sent to an agent and never pending |
+| `src/change-dots.ts`, `ChangeDots` in `src/explorer.ts` | The file explorer's change dots: orange for uncommitted or untracked files, the accent colour for files changed between `theory/compiled` and `HEAD` (every tracked file without a marker), orange winning; folders take the dots of everything inside them. Hidden notes, hidden folders and the root Instructions never get the accent colour. Read from git on every file change, commit, compile, pull and window focus; never stored. It adds a span to each row of the explorer's private `fileItems`, removed on unload |
+| `src/rule-count.ts`, `src/rule-count-header.ts` | The rule count left of the header icons: paragraphs and list items starting with a bold ID like `**PULL-6.**`, outside front matter and code blocks, from the note's text as it is now (never stored) |
 | `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. Also marks `index.md`/`instructions.md` at the root and directly in a model folder (bold, house or scroll icon) with one stylesheet on the explorer rows' `data-path` (`entryFileSelector`): the file name matches ignoring case, the model folder's name must match the repository exactly. |
 | `src/compile-button.ts` | Floating bottom-right bar: commit button, Expand button (only on a model folder's `index.md`), and compile button with a state and pending count |
 | `src/report-view.ts` | Compile report tab, including permission cards and question suggestions |
@@ -66,14 +70,14 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/repositories.ts` | Repository KPIs, fetch, Add model folder and New repository steps and file texts |
 | `src/templates.ts` | Fills `_templates/index.md` and `_templates/instructions.md` for a new model folder, with the built-in text when a template is missing or empty |
 | `src/repositories-view.ts` | The Repositories page and the New repository form |
-| `src/pull.ts` | Pulls the vault and the code repositories, fast-forward only: the vault pull, the code pulls, the gate before a compile, the sync status text and the `Puller` that decides when a pull runs |
+| `src/pull.ts` | Pulls the vault and the code repositories, fast-forward only: the vault pull, the code pulls, the gate before a compile, the sync status and sync menu text, saving the vault's `origin`, and the `Puller` that decides when a pull runs |
 
 ## 4. Settings
 
 | Key | Default | Used by |
 | --- | --- | --- |
-| `fullName` | `""` | Commit identity (`git -c user.name=…`). Falls back to the git config. |
-| `email` | `""` | Commit identity (`git -c user.email=…`). Falls back to the git config. |
+| `fullName` | `""` | Saved by older versions only. Never signs; the Author section offers to write it into the vault's git config when git lacks a name or email (CFG-37). |
+| `email` | `""` | Same as `fullName`. |
 | `projectFolder` | `""` | `cwd` for Claude Code. Compile won't start without it. |
 | `claudeCommand` | `"claude"` | CLI binary name or absolute path. Used by Compile when `agent` is `"claude"`, and always by Expand, Suggest, commit messages and pull request bodies. |
 | `agent` | `"claude"` | Which agent compiles: `"claude"` (Claude Code) or `"acp"` (an ACP agent). Older data without it compiles with Claude Code. |
@@ -88,6 +92,8 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `pullAutomatically` | `true` | Pull on launch, on focus and on the timer. Pull now and the pull before a compile run either way. |
 | `pullInterval` | `5` | Minutes between timer pulls: 1, 5, 15 or 30. |
 | `pullCodeRepos` | `true` | Each pull also fetches the project folder's repositories with an upstream and fast-forwards the safe ones. |
+
+Remote is a setting too, but it isn't in plugin data: it is the vault's `origin` in its git config. When the vault has an `origin`, the setting shows its URL as plain text with no field, and says to run `git remote set-url origin <url>` in the vault to change it. Without one, Save runs `git remote add origin <url>`, then a pull. Save never replaces or removes a remote. It refuses an empty URL, spaces, a leading `-` and a password or token in an https URL.
 
 ## 5. Lifecycle state machine (per vault)
 
@@ -121,17 +127,17 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 4. Event hooks: vault `modify/create/delete/rename`, workspace `layout-change/file-open` and window `focus` re-sync the buttons and the pending count (debounced).
 
 ### W2. Setup vault (command "Setup vault")
-- **Check first:** the vault isn't already a git repo (no `.git`). An author name and email exist in the settings or the git config. Otherwise it fails with a notice.
-- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists), `_templates/index.md` (the model folder index headings) and `_templates/instructions.md` (the line pointing at the root Instructions). Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
-- **Output:** the vault is a git repo whose initial commit includes the starter files. The UI refreshes and `Index.md` opens.
+- **Check first:** the vault isn't already a git repo (no `.git`). Git runs and has a name and email (`gitIdentity`: the vault's `--local` config, else `--global`). Otherwise it fails with a notice.
+- **Actions:** write the starter files from `src/starter.ts` if the root doesn't already have them under any name, ignoring case: `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine, skipped if `instruction.md` or `instructions.md` exists), `_templates/index.md` (the model folder index headings) and `_templates/instructions.md` (the line pointing at the root Instructions). Then, when the root has `Welcome.md` (ignoring case) and no `_welcome.md`, replace its text with the welcome text (`WELCOME_TEXT` in `src/starter.ts`) and rename it to `_welcome.md`; it is not a starter file, so Create missing files never writes it back. Then `git init -b main`, then add the missing lines to `.gitignore` (`.DS_Store`, `.trash/`, `.obsidian/`), then `git add -A`, then `git commit --allow-empty -m "Initial commit"` signed with the author.
+- **Output:** the vault is a git repo whose initial commit includes the starter files and the welcome note. The UI refreshes and `_welcome.md` opens when setup wrote it, `Index.md` otherwise.
 - **Create missing files** (settings, when the vault is set up but `missingStarters` finds starter files or `.gitignore` lines missing): checks the author, writes only the missing files and lines with the same starter text, never changes a file that exists, and commits only what it wrote as "Add missing starter files". The check runs each time the settings tab opens and after the button runs; nothing is stored.
 
 ### W3. Edit and commit
 - **Trigger:** the commit button in a note's header (marked `is-dirty` when the note has changes), the commit button in the floating bar, or the command "Commit current note".
 - **Check first:** the note is in the list of changed files (`git status --porcelain -z --untracked-files=all`). If not, the notice "No changes to commit in this note." The floating commit button commits the active note when it has changes, else every changed file, else shows "No changes to commit".
 - **Modal:** a message box (default `Update <basename>`, or `Update model` for all files) with a sparkle button that asks Claude to write the message, an "Include all changed files" toggle when other files changed, and the line "Signed as Name <email>". Cmd/Ctrl+Enter submits.
-- **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus hidden folders, `.obsidian/` and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
-- **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A -- <each changed path outside .obsidian/>` (a deletion that is already staged is skipped, since git refuses its path) then `git commit -m <msg>`. Both use `-c user.name/-c user.email`.
+- **Generate (sparkle):** the uncommitted diff of the files being committed (tracked files against `HEAD`, new files whole, minus dot folders, hidden folders, hidden notes and `Instructions.md`, cut at 50,000 characters) goes on stdin to `claude -p --output-format json --no-session-persistence --tools ""`, run in the temp folder, with Edit/Write/NotebookEdit denied on the vault. While Claude writes, the sparkle blinks (fades out and back in about once a second); it never spins and no bar shows. The answer replaces the message. It sends uncommitted text, but never compiles it. On failure: "Couldn't generate a message: <reason>".
+- **Actions:** for one file, `git add -A -- <path>` then `git commit -m <msg> -- <path>`. For all files, `git add -A -- <each changed path outside .obsidian/>` (a deletion that is already staged is skipped, since git refuses its path) then `git commit -m <msg>`. Both use `-c user.name/-c user.email` with the identity `gitIdentity` reads, so what the settings and the modal show is what signs. With no name or email the notice is "Set your name and email in git first. theory.md settings show how." and nothing is committed.
 - **Output:** a notice "Committed <shortHash>". The buttons, the pending count and the history view refresh.
 
 ### W4. Compile (the core pipeline)
@@ -147,10 +153,10 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 4. The project folder must be set and must exist.
 5. `head` = `git rev-parse HEAD`. If there are no commits, it errors.
 6. `from` = the commit the `theory/compiled` tag points to, or `null` if there is no tag.
-7. If `from === head`, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
+7. If `from === head`, or every revision in `from..head` changes only dot folders, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
 7a. Every repository in the project folder must have a clean working tree (`git status --porcelain`), else "These repositories have uncommitted changes: {repos}. Commit or stash them first."
-8. `revisions` = `git log --reverse from..head` (hash, author, ISO date, subject).
-9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes hidden folders, `.obsidian/` and `Instructions.md`.
+8. `revisions` = `git log --reverse from..head -- <DOT_FOLDERS>` (hash, author, ISO date, subject), so revisions that change only dot folders aren't listed.
+9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes dot folders, hidden folders, hidden notes and `Instructions.md`.
 10. Snapshot: `git archive head -- <NOT_SENT>` into a new temp folder, extract it, then `chmod -R a-w`.
 11. Record the guards: a SHA-256 hash of the snapshot tree, and the vault's working-tree state (path → mtime, or "deleted").
 11a. Read each repository's model-folder `instructions.md` from the snapshot (matched ignoring case) for the prompt.
@@ -227,17 +233,18 @@ The right sidebar shows `git log --follow` for the active note (author, relative
 - **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder from the templates committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
 
 ### W14. Pull (`src/pull.ts`)
-- **When:** the vault pulls `main` from `origin` on launch, on window focus (skipped within 30 seconds of the last pull) and on the timer, when Pull automatically is on; on Pull now (command or a click on the sync status) and before every compile, always. A vault without `origin` never pulls. No pull runs during a compile; one that falls due waits for it to end. One pull at a time.
+- **When:** the vault pulls `main` from `origin` on launch, on window focus (skipped within 30 seconds of the last pull) and on the timer, when Pull automatically is on; on Pull now (the command or the sync menu) and before every compile, always. A vault without `origin` never pulls. No pull runs during a compile; one that falls due waits for it to end. One pull at a time.
 - **Git:** `git fetch --no-tags origin` with prompts off (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`), so credentials fail with git's message instead of hanging. Then exactly one of: nothing new; fast-forward (`git merge --ff-only origin/main`) when only the remote moved and none of its commits touch a file with uncommitted changes, with the notice "Pulled N revisions by {authors}. Changed: {notes}." (the engineer's own revisions left out of the names); waiting, when they do touch one; sync needed, when both sides moved; offline, when the fetch failed. Never merges, rebases, commits, pushes, stashes, switches branches or moves the marker.
 - **Code:** with Also pull code repositories on, each pull also fetches every repository with an upstream, and fast-forwards it only when it isn't on a compile branch, has no uncommitted changes, and is behind with nothing of its own. Silent.
-- **Sync status:** left of the commit button, only with an `origin`: "Pulling…", "Synced {time} ago" (plus " · {n} not pushed"), "{n} waiting", "Sync needed", "Offline, {time} ago". Never "Up to date". Nothing is stored; it is lost on reload.
+- **Sync status:** left of the commit button: "No remote", "Not pulled yet", "Pulling…", "Synced {time} ago" (plus " · {n} not pushed"), "{n} waiting", "Sync needed", "Offline, {time} ago". Never "Up to date". Whether the vault has an `origin` is checked on load and after Remote is saved, without fetching.
+- **Sync menu:** a click on the sync status. "Checked the remote {time} ago" (or "Not checked yet"), "Last pulled {n} revisions {time} ago" (or "Nothing pulled since Obsidian opened"), Pull now ("Pulling…" and disabled while one runs) and Pull settings…. Without an `origin`: "This vault has no remote." and Add a remote…, which opens the settings at Remote. Nothing is stored; it is lost on reload.
 
 ### W10. Compile history view
-A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do. Each compile shows its pull request states, which refresh when the view opens and on its Refresh action (see W11).
+A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: git's `user.name`, the vault's config first) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do. Each compile shows its pull request states, which refresh when the view opens and on its Refresh action (see W11).
 
 ### W13. Expand (`src/expand.ts`, `src/expand-view.ts`)
 - **Button:** on a model folder's `index.md` only (`expandRepoFor`), the bar shows Expand beside the commit button. It opens the Expand view for that repository in a tab and asks Claude at once. While it runs, the button and the view say "Expanding…"; one run per repository.
-- **Context:** the model folder's `index.md` and `instructions.md`, the current text of every other note in it (working tree, uncommitted edits included), the root `Index.md` and the names of all its notes. Hidden folders (`_` or `.`) and the root Instructions are never sent.
+- **Context:** the model folder's `index.md` and `instructions.md`, the current text of every other note in it (working tree, uncommitted edits included), the root `Index.md` and the names of all its notes. Hidden folders and notes (`_` or `.`) and the root Instructions are never sent.
 - **Claude:** `claude -p --output-format json --strict-mcp-config` with the model and effort from the settings. When the repository exists, it runs there with `--tools Read,Glob,Grep --permission-mode dontAsk --allowedTools Read(//<repo>/**)`; otherwise in the temp folder with `--tools ""`. At most 10 suggestions (name, question, why, headings); ones that already exist are dropped.
 - **View:** cards with Create note (asks for the name, creates an empty note in the model folder and opens it, "{name} already exists." when it does; never commits), Copy (plain text, "Copied. Write the note in your own words.") and Dismiss. Suggestions live only on screen; closing the view discards them and stops the run.
 
@@ -245,7 +252,7 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 
 1. **The AI never writes to the model.** This is enforced by: the read-only snapshot outside the vault, `--disallowedTools` on the vault and the snapshot, the snapshot hash check (the compile fails if it changed) and the vault working-tree check (it reports changed files).
 2. **Only committed revisions are compiled.** The snapshot is `git archive HEAD`, not the working tree.
-3. **Every model revision has a human author.** Commits use `user.name`/`user.email` from the settings or the git config. A commit fails if neither is set.
+3. **Every model revision has a human author.** Commits use the `user.name`/`user.email` git uses: the vault's own config, else the global one. A commit fails when either is missing. The settings never edit them.
 4. **One compile at a time per app instance** (`compileRun` lock).
 5. **The marker moves once Claude has run, whether it succeeded or failed. It never moves on cancel, when compile can't start, or when the CLI can't be launched.** Failed revisions are not retried by themselves. Re-applying them is a human decision.
 6. **Reports live only in plugin data**, which git ignores. The last 20 are kept.

@@ -76,7 +76,7 @@ describe("Add model folder", () => {
 		// A template edit not committed yet, and another note in progress.
 		write(vault, { "_templates/instructions.md": "Only {{name}}.\n", "Draft.md": "draft\n" });
 		const plugin = {
-			settings: { fullName: "Ada Engineer", email: "ada@example.com" },
+			settings: {},
 			getVaultPath: () => vault,
 			app: {
 				vault: {

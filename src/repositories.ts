@@ -144,12 +144,12 @@ async function writeVaultFile(plugin: TheoryPlugin, path: string, content: strin
 export async function addModelFolder(plugin: TheoryPlugin, fields: TemplateFields, message: string): Promise<string> {
 	const vaultPath = plugin.getVaultPath();
 	// Checked before anything is written, so a missing author never leaves files behind.
-	await identityArgs(vaultPath, plugin.settings);
+	await identityArgs(vaultPath);
 	const texts = await modelFolderTexts(vaultPath, fields);
 	const paths = [`${fields.name}/index.md`, `${fields.name}/instructions.md`];
 	await writeVaultFile(plugin, paths[0], texts.index);
 	await writeVaultFile(plugin, paths[1], texts.instructions);
-	return commit(vaultPath, plugin.settings, message, paths);
+	return commit(vaultPath, message, paths);
 }
 
 export type Visibility = "private" | "public";
@@ -228,7 +228,7 @@ export async function createRepository(plugin: TheoryPlugin, r: NewRepository, d
 
 	const problem = nameProblem(plugin, r.name);
 	if (problem) throw new Error(problem);
-	const identity = await identityArgs(vaultPath, plugin.settings);
+	const identity = await identityArgs(vaultPath);
 	if (r.github) {
 		const blocked = await ghProblem(plugin.settings.projectFolder);
 		if (blocked) throw new Error(blocked);

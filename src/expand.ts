@@ -38,12 +38,12 @@ export interface ExpandContext {
 	names: string[];
 }
 
-/** Folders whose name starts with `_` or `.` are never sent. */
+/** Folders and notes whose name starts with `_` or `.` are never sent. */
 function isHidden(name: string): boolean {
 	return name.startsWith("_") || name.startsWith(".");
 }
 
-/** Every note in `folder` (vault-relative), outside hidden folders, sorted. */
+/** Every note in `folder` (vault-relative), outside hidden folders and without hidden notes, sorted. */
 async function notesIn(vaultPath: string, folder: string): Promise<string[]> {
 	const entries = await readdir(join(vaultPath, folder), { withFileTypes: true }).catch(() => []);
 	const paths: string[] = [];
@@ -51,7 +51,7 @@ async function notesIn(vaultPath: string, folder: string): Promise<string[]> {
 		const path = `${folder}/${entry.name}`;
 		if (entry.isDirectory()) {
 			if (!isHidden(entry.name)) paths.push(...(await notesIn(vaultPath, path)));
-		} else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+		} else if (entry.isFile() && !isHidden(entry.name) && entry.name.toLowerCase().endsWith(".md")) {
 			paths.push(path);
 		}
 	}

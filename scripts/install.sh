@@ -116,8 +116,8 @@ enable_plugin() {
 	fi
 }
 
-# First install only: the author from git, the project folder, and a request to set up the vault
-# when the plugin first loads. An existing data.json holds the engineer's settings and reports, so
+# First install only: the project folder, and a request to set up the vault when the plugin first
+# loads. Commits are signed with the name and email git uses, so no author is saved here. An existing data.json holds the engineer's settings and reports, so
 # it's never changed.
 seed_settings() {
 	data="$1/data.json"
@@ -130,14 +130,12 @@ seed_settings() {
 	email=$(git config --get user.email 2> /dev/null || true)
 	{
 		printf '{\n'
-		printf '  "fullName": %s,\n' "$(json_string "$name")"
-		printf '  "email": %s,\n' "$(json_string "$email")"
 		[ -z "$project" ] || printf '  "projectFolder": %s,\n' "$(json_string "$project")"
 		printf '  "setupOnLoad": true\n'
 		printf '}\n'
 	} > "$data"
 	settings="new"
-	[ -n "$name" ] && [ -n "$email" ] || warn "git has no user.name or user.email. Enter them in Settings → theory.md, then run theory.md: Setup vault."
+	[ -n "$name" ] && [ -n "$email" ] || warn "git has no user.name or user.email. Set them with git config --global, then run theory.md: Setup vault."
 }
 
 obsidian_running() {

@@ -159,10 +159,26 @@
 	animation: theory-sparkle-fade 2.4s ease-in-out infinite;
 }
 
-.theory-commit-generate.is-loading svg {
+/* While Claude writes, the sparkle blinks about once a second. It never spins (CMT-15). */
+.theory-commit-generate.is-generating svg {
 	animation:
-		theory-spin 1.2s linear infinite,
+		theory-sparkle-blink 1s ease-in-out infinite,
 		theory-sparkle-fade 2.4s ease-in-out infinite;
+}
+
+/* A disabled button must not dim the blink or draw anything around it. */
+.theory-commit-generate.is-generating:disabled {
+	opacity: 1;
+}
+
+@keyframes theory-sparkle-blink {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.15;
+	}
 }
 
 @keyframes theory-sparkle-fade {
@@ -539,12 +555,16 @@ body button.theory-sync-fab.is-diverged {
 	color: var(--text-warning);
 }
 
-body button.theory-sync-fab.is-offline {
+body button.theory-sync-fab.is-offline,
+body button.theory-sync-fab.is-no-remote,
+body button.theory-sync-fab.is-not-pulled {
 	color: var(--text-faint);
 }
 
-body button.theory-sync-fab[aria-disabled="true"] {
-	cursor: default;
+/* The remote's URL needs room to be read. */
+.theory-remote-url {
+	width: 22em;
+	max-width: 100%;
 }
 
 /* Commit: a round, icon-only button. The accent dot marks uncommitted changes. */
@@ -923,4 +943,167 @@ body button.theory-expand-fab[aria-disabled="true"] {
 .theory-expand-headings {
 	margin: var(--size-4-1) 0;
 	color: var(--text-muted);
+}
+
+/* Settings → Author: the commands that set what git lacks (CFG-36). */
+.theory-author-problem {
+	padding: var(--size-4-2) 0;
+}
+
+.theory-author-command {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin: var(--size-4-1) 0;
+}
+
+.theory-author-command code {
+	user-select: text;
+}
+
+/* The note header's rule count (HDR-9, HDR-13). */
+.theory-rule-count {
+	align-self: center;
+	margin-right: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.theory-rule-count.is-duplicate {
+	color: var(--text-warning);
+}
+
+/* The file explorer's change dots (UI-24 to UI-26). */
+.theory-change-dot {
+	flex: none;
+	align-self: center;
+	width: 6px;
+	height: 6px;
+	margin-left: auto;
+	margin-right: var(--size-4-1);
+	border-radius: 50%;
+}
+
+.theory-change-dot.is-uncommitted {
+	background-color: var(--color-orange);
+}
+
+.theory-change-dot.is-pending {
+	background-color: var(--interactive-accent);
+}
+
+/* Comments (CMNT-3 to CMNT-24). */
+.theory-comment-button {
+	position: fixed;
+	z-index: var(--layer-popover);
+	padding: var(--size-4-1);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	box-shadow: var(--shadow-s);
+}
+
+.theory-comment-popover {
+	position: fixed;
+	z-index: var(--layer-popover);
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-l);
+}
+
+.theory-comment-popover textarea,
+.theory-comment-reply {
+	width: 100%;
+	resize: vertical;
+}
+
+.theory-comment-popover-buttons,
+.theory-comment-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+.theory-comments {
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+.theory-comments-empty {
+	color: var(--text-muted);
+}
+
+.theory-comment-thread {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2) 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.theory-comment-thread.is-focused {
+	background-color: var(--background-modifier-hover);
+}
+
+.theory-comment-quote {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	padding-left: var(--size-4-2);
+	border-left: 2px solid var(--interactive-accent);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.theory-comment-changed,
+.theory-comment-resolved-by {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-style: italic;
+}
+
+.theory-comment-meta {
+	display: flex;
+	gap: var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+}
+
+.theory-comment-author {
+	font-weight: var(--font-semibold);
+}
+
+.theory-comment-time {
+	color: var(--text-muted);
+}
+
+.theory-comment-text {
+	white-space: pre-wrap;
+	user-select: text;
+}
+
+.theory-comment-replies {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	padding-left: var(--size-4-3);
+}
+
+.theory-comments-resolved summary {
+	padding: var(--size-4-2) 0;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.theory-comment-mark {
+	text-decoration: underline;
+	text-decoration-color: var(--interactive-accent);
+	text-decoration-thickness: 2px;
+	text-underline-offset: 3px;
+	cursor: pointer;
 }

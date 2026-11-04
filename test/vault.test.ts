@@ -1,10 +1,8 @@
 import { renameSync, rmSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { Author, changedFiles, commit } from "../src/vault";
+import { changedFiles, commit } from "../src/vault";
 import { initRepo, out, tempFolder, write } from "./helpers";
-
-const AUTHOR: Author = { fullName: "Ada Engineer", email: "ada@example.com" };
 
 /** Paths in the newest commit. */
 async function committed(vault: string): Promise<string[]> {
@@ -23,8 +21,11 @@ describe("changed files and commits", () => {
 		write(vault, { "A.md": "a2\n", "B.md": "b2\n", "New.md": "new\n" });
 		// Something already staged must not slip in.
 		await out(vault, ["add", "B.md"]);
+		// Signed with the name and email git uses, the vault's own config first (CFG-34).
+		await out(vault, ["config", "user.name", "Ada Engineer"]);
+		await out(vault, ["config", "user.email", "ada@example.com"]);
 
-		await commit(vault, AUTHOR, "Update A", ["A.md"]);
+		await commit(vault, "Update A", ["A.md"]);
 
 		expect(await committed(vault)).toEqual(["A.md"]);
 		expect(await out(vault, ["log", "-1", "--format=%an <%ae>|%s"])).toBe("Ada Engineer <ada@example.com>|Update A");
@@ -38,7 +39,7 @@ describe("changed files and commits", () => {
 		await out(vault, ["mv", "Old.md", "Renamed.md"]);
 
 		expect((await changedFiles(vault)).sort()).toEqual(["A.md", "Gone.md", "Renamed.md", "folder/New.md"]);
-		await commit(vault, AUTHOR, "Update model", "all");
+		await commit(vault, "Update model", "all");
 
 		expect(await committed(vault)).toEqual(["A.md", "Gone.md", "Old.md", "Renamed.md", "folder/New.md"]);
 		expect(await changedFiles(vault)).toEqual([]);
@@ -49,7 +50,7 @@ describe("changed files and commits", () => {
 		renameSync(join(vault, "Old.md"), join(vault, "Kept.md"));
 		rmSync(join(vault, "Gone.md"));
 
-		await commit(vault, AUTHOR, "Update model", "all");
+		await commit(vault, "Update model", "all");
 
 		expect(await committed(vault)).toEqual(["Gone.md", "Kept.md", "Old.md"]);
 		expect(await changedFiles(vault)).toEqual([]);
@@ -60,7 +61,7 @@ describe("changed files and commits", () => {
 		write(vault, { ".obsidian/app.json": "{}\n", "A.md": "a2\n" });
 
 		expect(await changedFiles(vault)).toEqual(["A.md"]);
-		await commit(vault, AUTHOR, "Update model", "all");
+		await commit(vault, "Update model", "all");
 
 		expect(await committed(vault)).toEqual(["A.md"]);
 		expect(await changedFiles(vault)).toEqual([]);
@@ -71,7 +72,7 @@ describe("changed files and commits", () => {
 		write(vault, { ".obsidian/app.json": '{"changed":true}\n', ".obsidian/new.json": "{}\n", "A.md": "a2\n" });
 
 		expect(await changedFiles(vault)).toEqual(["A.md"]);
-		await commit(vault, AUTHOR, "Update model", "all");
+		await commit(vault, "Update model", "all");
 
 		expect(await committed(vault)).toEqual(["A.md"]);
 		// Obsidian's config stays as it is, uncommitted.

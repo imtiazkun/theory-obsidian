@@ -1,5 +1,6 @@
 import { TAbstractFile, TFolder, View, getIcon, getIconIds } from "obsidian";
 import { projectRepos } from "./branches";
+import { ChangeDot, DOT_TOOLTIPS, changeDots, isOrange, readDotState } from "./change-dots";
 import type TheoryPlugin from "./main";
 
 /** Folders whose name starts with this are hidden folders, like `_templates`. */
@@ -127,5 +128,71 @@ export class EntryFiles {
 	detach() {
 		this.styleEl?.remove();
 		this.styleEl = null;
+	}
+}
+
+// The explorer's items aren't in Obsidian's public types. Each has the row of its file or folder.
+interface ExplorerFileItem {
+	selfEl?: HTMLElement;
+}
+interface ExplorerWithItems extends View {
+	fileItems?: Record<string, ExplorerFileItem>;
+}
+
+const DOT_CLASS = "theory-change-dot";
+
+/**
+ * A coloured dot right of each file and folder name in the file explorer: orange for uncommitted
+ * changes, the accent colour for committed changes waiting for a compile (UI-24 to UI-27). Worked out
+ * from git each time and never stored (UI-29). It only adds a small element to each row, so it never
+ * writes to a file and never changes how the explorer sorts (UI-30).
+ */
+export class ChangeDots {
+	private dots = new Map<string, ChangeDot>();
+	// Ignores results from an older sync that finishes after a newer one.
+	private syncId = 0;
+
+	constructor(private plugin: TheoryPlugin) {}
+
+	async sync() {
+		const id = ++this.syncId;
+		let dots = new Map<string, ChangeDot>();
+		try {
+			if (this.plugin.isVaultSetUp()) dots = changeDots(await readDotState(this.plugin.getVaultPath()));
+		} catch {
+			// Git couldn't be read; show no dots rather than wrong ones.
+		}
+		if (id !== this.syncId) return;
+		this.dots = dots;
+		this.render();
+	}
+
+	/** Puts the dots on every explorer's rows again, e.g. after the layout changes. */
+	render() {
+		for (const leaf of this.plugin.app.workspace.getLeavesOfType("file-explorer")) {
+			const items = (leaf.view as ExplorerWithItems).fileItems;
+			if (!items) continue;
+			for (const [path, item] of Object.entries(items)) {
+				if (item.selfEl) this.renderRow(item.selfEl, this.dots.get(path));
+			}
+		}
+	}
+
+	private renderRow(row: HTMLElement, dot: ChangeDot | undefined) {
+		let el = row.querySelector<HTMLElement>(`:scope > .${DOT_CLASS}`);
+		if (!dot) {
+			el?.remove();
+			return;
+		}
+		el ??= row.createSpan({ cls: DOT_CLASS });
+		el.toggleClass("is-uncommitted", isOrange(dot));
+		el.toggleClass("is-pending", !isOrange(dot));
+		el.setAttr("aria-label", DOT_TOOLTIPS[dot]);
+	}
+
+	detach() {
+		this.syncId++;
+		this.dots.clear();
+		document.querySelectorAll(`.${DOT_CLASS}`).forEach((el) => el.remove());
 	}
 }

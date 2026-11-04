@@ -253,7 +253,7 @@ export class CreatePullRequestView extends ItemView {
 		setIcon(generate, "sparkles");
 		const running = this.generating.has(key);
 		generate.disabled = running;
-		generate.toggleClass("is-loading", running);
+		generate.toggleClass("is-generating", running);
 		generate.addEventListener("click", async () => {
 			const report = this.report();
 			if (!report || this.generating.has(key)) return;
