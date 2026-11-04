@@ -21,6 +21,8 @@ import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
 import { RuleCounts } from "./rule-count-header";
 import { ChangeDots, EntryFiles, HiddenFolders } from "./explorer";
+import { Comments } from "./comments-ui";
+import { COMMENTS_VIEW_TYPE, CommentsView } from "./comments-view";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
 import { ExpandRun, startExpand } from "./expand";
@@ -67,6 +69,7 @@ export default class TheoryPlugin extends Plugin {
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
+	comments = new Comments(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
@@ -150,6 +153,17 @@ export default class TheoryPlugin extends Plugin {
 			name: "Pull now",
 			callback: () => this.pullNow(),
 		});
+		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsView(leaf, this));
+		this.addCommand({
+			id: "comment-on-selection",
+			name: "Comment on selection",
+			callback: () => this.comments.commentOnSelection(),
+		});
+		this.addCommand({
+			id: "show-comments",
+			name: "Show comments",
+			callback: () => this.showComments(null),
+		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
@@ -160,6 +174,8 @@ export default class TheoryPlugin extends Plugin {
 			if (launching) await this.openIndex();
 			await this.showHistoryView(false);
 			await this.showCompileHistoryView();
+			await this.showCommentsView();
+			await this.comments.refresh();
 			await this.commitButtons.sync();
 			this.compileButton.attach();
 			await this.compileButton.refresh();
@@ -206,6 +222,22 @@ export default class TheoryPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("file-open", syncRuleCounts));
 		this.registerEvent(this.app.workspace.on("editor-change", debounce(syncRuleCounts, 300, true)));
 		this.registerEvent(this.app.vault.on("modify", debounce(syncRuleCounts, 300, true)));
+
+		// Comments: the button over a selection, the underlines, and the comment file following its note (CMNT-3, CMNT-15, CMNT-24).
+		this.registerDomEvent(document, "selectionchange", debounce(() => this.comments.selectionChanged(), 150, true));
+		this.registerEditorExtension(this.comments.editorExtension());
+		this.registerMarkdownPostProcessor(this.comments.postProcessor());
+		this.registerEvent(this.app.workspace.on("file-open", () => this.comments.refresh()));
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (file instanceof TFile) this.comments.renamed(file, oldPath);
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (file instanceof TFile) this.comments.deleted(file);
+			}),
+		);
 
 		this.registerEditorExtension(this.overlay.editorExtension());
 		const syncOverlay = () => this.overlay.sync();
@@ -266,6 +298,8 @@ export default class TheoryPlugin extends Plugin {
 			new Notice(pulledNotice(outcome.vault), 8000);
 			this.refreshGitState();
 			this.overlay.sync();
+			// A pull may bring new comments (CMNT-23).
+			this.comments.refresh();
 		} else if (reason === "now" && outcome.vault?.kind === "offline") {
 			new Notice(`Couldn't pull: ${outcome.vault.message}`, 10000);
 		}
@@ -285,6 +319,7 @@ export default class TheoryPlugin extends Plugin {
 		this.hiddenFolders.detach();
 		this.entryFiles.detach();
 		this.changeDots.detach();
+		this.comments.removeAll();
 		this.compileRun?.cancel();
 		for (const run of this.expandRuns.values()) run.cancel();
 		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
@@ -682,6 +717,33 @@ export default class TheoryPlugin extends Plugin {
 		const right = workspace.getRightLeaf(false);
 		if (!right) return;
 		await right.setViewState({ type: COMPILE_HISTORY_VIEW_TYPE, active: false });
+	}
+
+	/** Adds the Comments tab to the right sidebar, beside commit history and compile history (UI-23). */
+	private async showCommentsView() {
+		const { workspace } = this.app;
+		if (workspace.getLeavesOfType(COMMENTS_VIEW_TYPE).length > 0) return;
+		const right = workspace.getRightLeaf(false);
+		if (!right) return;
+		await right.setViewState({ type: COMMENTS_VIEW_TYPE, active: false });
+	}
+
+	/** Opens the Comments view, at one thread when `threadId` is given (CMNT-24). */
+	async showComments(threadId: string | null) {
+		await this.showCommentsView();
+		const leaf = this.app.workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)[0];
+		if (!leaf) return;
+		await this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof CommentsView) {
+			if (threadId) await leaf.view.showThread(threadId);
+			else await leaf.view.refresh();
+		}
+	}
+
+	refreshCommentsViews() {
+		for (const leaf of this.app.workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)) {
+			if (leaf.view instanceof CommentsView) leaf.view.refresh();
+		}
 	}
 
 	/** Updates everything that shows git state after the repository changes. */

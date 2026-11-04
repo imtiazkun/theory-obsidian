@@ -292,7 +292,7 @@ export interface SyncState {
 	lastPulled: { at: number; count: number } | null;
 }
 
-function duration(ms: number): string {
+export function duration(ms: number): string {
 	const minutes = Math.floor(ms / 60_000);
 	if (minutes < 1) return "less than a minute";
 	if (minutes < 60) return `${minutes} min`;

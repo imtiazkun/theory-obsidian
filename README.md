@@ -74,6 +74,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Read-only snapshot, deny rules and the post-compile check | Done |
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
 | Realized box and compile state in each note's header | Done |
+| Comments: select text in a note and click the comment button, or run Comment on selection. Comments are signed with your git identity, saved in the model folder's `.comments/` and committed on their own, never sent to Claude. The Comments view in the right sidebar shows the active note's threads, with replies, resolve and reopen; quoted text is underlined in the note | Done |
 | Change dots in the file explorer: orange for uncommitted changes, the accent colour for committed changes waiting for a compile, on folders too | Done |
 | Rule count in each note's header: "12 rules", with each prefix's count and range in its tooltip, and the warning colour when an ID is declared twice | Done |
 | Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
