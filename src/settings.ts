@@ -5,13 +5,18 @@ import { hasOrigin } from "./github";
 import { findProjectRepos, pickFolder } from "./project";
 import { PULL_INTERVALS, originUrl, remoteUrlProblem, saveOrigin } from "./pull";
 import type TheoryPlugin from "./main";
+import {
+	GIT_MISSING,
+	IDENTITY_COMMANDS,
+	type SavedAuthor,
+	gitIdentity,
+	isVaultSetUp,
+	missingIdentity,
+	savedAuthorOffer,
+	useSavedAuthor,
+} from "./vault";
 
-export interface AuthorSettings {
-	fullName: string;
-	email: string;
-}
-
-export interface TheorySettings extends AuthorSettings {
+export interface TheorySettings extends SavedAuthor {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
@@ -57,12 +62,6 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	pullCodeRepos: true,
 };
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-export function isValidEmail(email: string): boolean {
-	return EMAIL_PATTERN.test(email);
-}
-
 /** The Compile heading's description, naming the agent that compiles (AGT-28). */
 export function compileDescription(agent: CompileAgent): string {
 	return agent === "acp"
@@ -91,45 +90,9 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Author")
-			.setDesc("Used to sign the revisions you make in this vault.")
+			.setDesc("The name and email git signs this vault's commits with: the vault's own git config, else the global one.")
 			.setHeading();
-
-		new Setting(containerEl)
-			.setName("Full name")
-			.setDesc("Your name as it should appear in signatures.")
-			.addText((text) =>
-				text
-					.setPlaceholder("Jane Doe")
-					.setValue(this.plugin.settings.fullName)
-					.onChange(async (value) => {
-						this.plugin.settings.fullName = value.trim();
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		const emailSetting = new Setting(containerEl)
-			.setName("Email address")
-			.setDesc("Contact address shown next to your name.");
-		emailSetting.addText((text) => {
-			text.inputEl.type = "email";
-			text
-				.setPlaceholder("jane@example.com")
-				.setValue(this.plugin.settings.email)
-				.onChange(async (value) => {
-					const email = value.trim();
-					const valid = email === "" || isValidEmail(email);
-					text.inputEl.toggleClass("theory-invalid", !valid);
-					emailSetting.setDesc(
-						valid
-							? "Contact address shown next to your name."
-							: "This doesn't look like a valid email address.",
-					);
-					if (valid) {
-						this.plugin.settings.email = email;
-						await this.plugin.saveSettings();
-					}
-				});
-		});
+		this.displayAuthor(containerEl.createDiv({ cls: "theory-author" }));
 
 		new Setting(containerEl).setName("Vault").setHeading();
 
@@ -205,6 +168,59 @@ export class TheorySettingTab extends PluginSettingTab {
 		// Settings never start the agent, not even to read its model list (AGT-25).
 		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
 		else this.displayClaudeCode(containerEl);
+	}
+
+	/** The identity git signs with, read from git each time and never edited here (CFG-34 to CFG-37). */
+	private async displayAuthor(containerEl: HTMLElement) {
+		containerEl.empty();
+		const basePath = this.plugin.getVaultPath();
+		const identity = await gitIdentity(basePath);
+		if (identity.kind === "no-git") {
+			containerEl.createDiv({ cls: "setting-item-description theory-author-problem", text: GIT_MISSING });
+			return;
+		}
+		const missing = missingIdentity(identity);
+		if (missing.length === 0) {
+			new Setting(containerEl).setName("Name").setDesc(identity.name);
+			new Setting(containerEl).setName("Email").setDesc(identity.email);
+			return;
+		}
+
+		const what = missing.length === 2 ? "a name or an email" : `a ${missing[0]}`;
+		containerEl.createDiv({
+			cls: "setting-item-description theory-author-problem",
+			text: `Git has no ${what} to sign your commits with. Set ${missing.length === 2 ? "them" : "it"} in a terminal:`,
+		});
+		for (const key of missing) {
+			const command = IDENTITY_COMMANDS[key];
+			const row = containerEl.createDiv({ cls: "theory-author-command" });
+			row.createEl("code", { text: command });
+			const copy = row.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Copy" } });
+			setIcon(copy, "copy");
+			copy.addEventListener("click", async () => {
+				await navigator.clipboard.writeText(command);
+				new Notice("Copied.");
+			});
+		}
+		const actions = new Setting(containerEl).addButton((button) =>
+			button.setButtonText("Check again").onClick(() => this.displayAuthor(containerEl)),
+		);
+		const offer = savedAuthorOffer(identity, this.plugin.settings);
+		if (offer && isVaultSetUp(basePath)) {
+			actions.addButton((button) =>
+				button
+					.setButtonText(`Use ${offer.name} <${offer.email}> for this vault`)
+					.setCta()
+					.onClick(async () => {
+						try {
+							await useSavedAuthor(basePath, offer);
+						} catch (error) {
+							new Notice(`Couldn't save the author: ${error instanceof Error ? error.message : String(error)}`, 10000);
+						}
+						this.displayAuthor(containerEl);
+					}),
+			);
+		}
 	}
 
 	/** Remote, Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-33). */

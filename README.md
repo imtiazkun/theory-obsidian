@@ -55,10 +55,10 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Feature | Status |
 | --- | --- |
 | Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the templates in `_templates/`, and an initial commit | Done |
-| Install with a coding agent: `INSTALL.md` and `scripts/install.sh` download and check the latest release, turn the plugin on, and on a first install fill in the author from git and run Setup vault on the first load | Done |
+| Install with a coding agent: `INSTALL.md` and `scripts/install.sh` download and check the latest release, turn the plugin on, and on a first install run Setup vault on the first load | Done |
 | Create missing files: a vault set up by an older version, or missing a starter file, gets only the missing files and `.gitignore` lines from the settings, committed on their own | Done |
 | Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
-| Author settings: full name and email used to sign commits | Done |
+| Author: commits are signed with the name and email git uses (the vault's git config, else the global one). The settings show them, explain how to set what is missing, and can write a name and email saved by an older version into the vault's git config | Done |
 | Commit button in each note's header, marked when the note has changes | Done |
 | Commit modal: message, with an option to include all changed files | Done |
 | Generate the commit message with Claude (sparkle button in the commit modal) | Done |
@@ -152,7 +152,7 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 
 If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email.
 
-1. Open Settings → theory.md and enter your full name and email.
+1. Make sure git knows your name and email: `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`. Settings → theory.md → Author shows what git signs with.
 2. Run **theory.md: Setup vault** from the command palette.
 3. In Settings → theory.md → Vault, click **Browse…** next to **Project folder** and pick the folder holding the code. It can be one repository, or a folder with several repositories side by side (a whole ecosystem). theory.md lists the git repositories it finds, or warns when there are none. Then, under Compile, add the commands Claude may run to **Allowed commands**, for example `Bash(npm run *)`.
 4. Setup vault creates `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine), and the templates `_templates/index.md` and `_templates/instructions.md`, each unless the vault already has it. `Instructions.md` is for humans; Compile doesn't send it to Claude. When the new vault has Obsidian's `Welcome.md`, Setup replaces it with `_welcome.md`, which says where to start, and opens it. Delete it once read; notes whose name starts with `_` are never sent to Claude. Edit the templates to change how new model folders start. When a vault is missing any of these, the settings offer Create missing files.

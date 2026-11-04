@@ -18,10 +18,22 @@ const GITIGNORE_LINES = [
 /** Obsidian's config folder isn't part of the model, even in vaults that track it from before. */
 const OBSIDIAN_CONFIG = ".obsidian/";
 
-export interface Author {
-	fullName: string;
+/** Who signs the vault's commits: the name and email git uses (CFG-34). */
+export interface Identity {
+	name: string;
 	email: string;
 }
+
+/** Shown when git isn't installed, or theory.md can't find it (CFG-35). */
+export const GIT_MISSING = "theory.md needs git, and can't find it. Install git from git-scm.com, then reopen Obsidian.";
+/** Shown when git has no name or no email (CMT-11, CMNT-8). */
+export const IDENTITY_MISSING = "Set your name and email in git first. theory.md settings show how.";
+
+/** A failure the engineer fixes in git, shown as it is, without a "failed:" prefix. */
+export class IdentityError extends Error {}
+
+/** What the Author section shows: git missing, or the name and email git uses, either of which may be "". */
+export type GitIdentity = { kind: "no-git" } | ({ kind: "found" } & Identity);
 
 export function isVaultSetUp(basePath: string): boolean {
 	return existsSync(join(basePath, ".git"));
@@ -36,13 +48,89 @@ export async function git(basePath: string, args: string[], env: Record<string, 
 	});
 }
 
-async function hasGitConfig(basePath: string, key: string): Promise<boolean> {
+function isMissingCommand(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+/** One value from one git config file, or "" when it isn't set. Throws only when git can't run. */
+async function configValue(basePath: string, scope: "--local" | "--global", key: string, command: string): Promise<string> {
 	try {
-		const { stdout } = await git(basePath, ["config", "--get", key]);
-		return stdout.trim() !== "";
-	} catch {
-		return false;
+		const { stdout } = await run(command, ["config", scope, "--get", key], { cwd: basePath, env: { ...process.env, PATH: toolPath() } });
+		return stdout.trim();
+	} catch (error) {
+		if (isMissingCommand(error)) throw error;
+		// Not set, or `--local` outside a repository.
+		return "";
 	}
+}
+
+/**
+ * The name and email git signs the vault's commits with: the vault's own config, else the global one
+ * (CFG-34). `command` is git's, replaceable only so tests can make git missing.
+ */
+export async function gitIdentity(basePath: string, command = "git"): Promise<GitIdentity> {
+	try {
+		const value = async (key: string) =>
+			(await configValue(basePath, "--local", key, command)) || (await configValue(basePath, "--global", key, command));
+		return { kind: "found", name: await value("user.name"), email: await value("user.email") };
+	} catch {
+		return { kind: "no-git" };
+	}
+}
+
+/** What git lacks to sign a commit, in the words the Author section uses (CFG-36). */
+export function missingIdentity(identity: Identity): ("name" | "email")[] {
+	const missing: ("name" | "email")[] = [];
+	if (!identity.name) missing.push("name");
+	if (!identity.email) missing.push("email");
+	return missing;
+}
+
+/** The name and email git uses. Throws an IdentityError when git is missing or lacks either. */
+export async function requireIdentity(basePath: string): Promise<Identity> {
+	const identity = await gitIdentity(basePath);
+	if (identity.kind === "no-git") throw new IdentityError(GIT_MISSING);
+	if (missingIdentity(identity).length > 0) throw new IdentityError(IDENTITY_MISSING);
+	return { name: identity.name, email: identity.email };
+}
+
+/** Git `-c` arguments that sign a commit with the identity git uses, so what the settings show is what signs. */
+export async function identityArgs(basePath: string): Promise<string[]> {
+	const { name, email } = await requireIdentity(basePath);
+	return ["-c", `user.name=${name}`, "-c", `user.email=${email}`];
+}
+
+/**
+ * The name and email older versions took in settings (CFG-1 to CFG-3, retired). Never used to sign;
+ * kept so the Author section can offer them for this vault (CFG-37).
+ */
+export interface SavedAuthor {
+	fullName: string;
+	email: string;
+}
+
+/** The commands that set what git lacks (CFG-36). */
+export const IDENTITY_COMMANDS = {
+	name: 'git config --global user.name "Your Name"',
+	email: 'git config --global user.email "you@example.com"',
+};
+
+/** The author an older version saved, when git lacks a name or email and both were saved (CFG-37). */
+export function savedAuthorOffer(identity: GitIdentity, saved: SavedAuthor): Identity | null {
+	if (identity.kind !== "found" || missingIdentity(identity).length === 0) return null;
+	const name = saved.fullName.trim();
+	const email = saved.email.trim();
+	return name && email ? { name, email } : null;
+}
+
+/**
+ * Writes a name and email saved by an older version into the vault's own git config, never the global
+ * one (CFG-37).
+ */
+export async function useSavedAuthor(basePath: string, author: Identity): Promise<void> {
+	if (!isVaultSetUp(basePath)) throw new Error("Set up the vault first.");
+	await git(basePath, ["config", "--local", "user.name", author.name]);
+	await git(basePath, ["config", "--local", "user.email", author.email]);
 }
 
 async function readGitignore(basePath: string): Promise<string> {
@@ -63,34 +151,6 @@ async function ensureGitignore(basePath: string): Promise<boolean> {
 	const prefix = existing === "" || existing.endsWith("\n") ? existing : existing + "\n";
 	await writeFile(join(basePath, ".gitignore"), prefix + missing.join("\n") + "\n");
 	return true;
-}
-
-/**
- * Git `-c` arguments that sign commits as the author from theory.md settings,
- * falling back to git's own config. Throws when neither has a name or email.
- */
-export async function identityArgs(basePath: string, author: Author): Promise<string[]> {
-	if (!author.fullName && !(await hasGitConfig(basePath, "user.name"))) {
-		throw new Error("Set your full name in theory.md settings first.");
-	}
-	if (!author.email && !(await hasGitConfig(basePath, "user.email"))) {
-		throw new Error("Set your email address in theory.md settings first.");
-	}
-	const args: string[] = [];
-	if (author.fullName) args.push("-c", `user.name=${author.fullName}`);
-	if (author.email) args.push("-c", `user.email=${author.email}`);
-	return args;
-}
-
-/** The author's name from theory.md settings, else from the git config, else "". */
-export async function authorName(basePath: string, author: Author): Promise<string> {
-	if (author.fullName) return author.fullName;
-	try {
-		const { stdout } = await git(basePath, ["config", "--get", "user.name"]);
-		return stdout.trim();
-	} catch {
-		return "";
-	}
 }
 
 /** The path (relative to `basePath`) of the file or folder at `path`, matched ignoring case, or null. */
@@ -159,11 +219,11 @@ export async function writeWelcome(basePath: string): Promise<boolean> {
  * Turns the vault into a git repository whose initial commit includes the starter files and the
  * welcome note. Returns whether it wrote the welcome note.
  */
-export async function setUpVault(basePath: string, author: Author, starterFiles: StarterFile[]): Promise<boolean> {
+export async function setUpVault(basePath: string, starterFiles: StarterFile[]): Promise<boolean> {
 	if (isVaultSetUp(basePath)) return false;
 
-	// Check before `git init`, otherwise a failed commit leaves a half set-up repository.
-	const identity = await identityArgs(basePath, author);
+	// Check before `git init`, otherwise a failed commit leaves a half set-up repository (SET-3).
+	const identity = await identityArgs(basePath);
 
 	await addStarterFiles(basePath, starterFiles);
 	const welcomed = await writeWelcome(basePath);
@@ -178,13 +238,13 @@ export async function setUpVault(basePath: string, author: Author, starterFiles:
  * Writes the starter files and `.gitignore` lines a set-up vault is missing, and commits only those
  * files as "Add missing starter files". Returns the number of files written or changed.
  */
-export async function addMissingStarterFiles(basePath: string, author: Author, starterFiles: StarterFile[]): Promise<number> {
+export async function addMissingStarterFiles(basePath: string, starterFiles: StarterFile[]): Promise<number> {
 	// Checked before anything is written, so a missing author never leaves files behind.
-	await identityArgs(basePath, author);
+	await identityArgs(basePath);
 	const paths = await addStarterFiles(basePath, starterFiles);
 	if (await ensureGitignore(basePath)) paths.push(".gitignore");
 	if (paths.length === 0) return 0;
-	await commit(basePath, author, "Add missing starter files", paths);
+	await commit(basePath, "Add missing starter files", paths);
 	return paths.length;
 }
 
@@ -217,13 +277,8 @@ export async function changedFiles(basePath: string): Promise<string[]> {
  * Commits `paths` (relative to the vault), or every change when `paths` is "all".
  * Returns the new commit's short hash.
  */
-export async function commit(
-	basePath: string,
-	author: Author,
-	message: string,
-	paths: string[] | "all",
-): Promise<string> {
-	const identity = await identityArgs(basePath, author);
+export async function commit(basePath: string, message: string, paths: string[] | "all"): Promise<string> {
+	const identity = await identityArgs(basePath);
 	if (paths === "all") {
 		// Stage the changed files by name. Excluding `.obsidian/` with a pathspec fails once
 		// .gitignore lists it, because git then refuses the ignored path outright.

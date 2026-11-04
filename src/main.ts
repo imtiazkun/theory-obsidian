@@ -31,19 +31,25 @@ import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
 import {
+	IdentityError,
 	MissingStarters,
 	addMissingStarterFiles,
-	authorName,
 	changedFiles,
 	commit,
-	git,
+	gitIdentity,
 	isVaultSetUp,
 	missingStarters,
+	requireIdentity,
 	setUpVault,
 } from "./vault";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** "{prefix}: {reason}", except for a git identity problem, which is shown as it is (CMT-11). */
+function failure(prefix: string, error: unknown): string {
+	return error instanceof IdentityError ? error.message : `${prefix}: ${errorMessage(error)}`;
 }
 
 const MAX_REPORTS = 20;
@@ -227,15 +233,10 @@ export default class TheoryPlugin extends Plugin {
 		await this.puller.pull("now");
 	}
 
-	/** The email the engineer's own revisions are signed with: the settings', else git's. */
+	/** The email the engineer's own revisions are signed with: the one git uses (CFG-34). */
 	private async ownEmail(): Promise<string> {
-		if (this.settings.email) return this.settings.email;
-		try {
-			const { stdout } = await git(this.getVaultPath(), ["config", "--get", "user.email"]);
-			return stdout.trim();
-		} catch {
-			return "";
-		}
+		const identity = await gitIdentity(this.getVaultPath());
+		return identity.kind === "found" ? identity.email : "";
 	}
 
 	/** After a pull: names what changed in the vault (PULL-8) and redraws what shows git state. Code pulls stay silent. */
@@ -366,9 +367,9 @@ export default class TheoryPlugin extends Plugin {
 				const count = uncommitted.length;
 				new Notice(`${count} uncommitted ${count === 1 ? "file isn't" : "files aren't"} part of this compile.`);
 			}
-			author = await authorName(vaultPath, this.settings);
+			author = (await requireIdentity(vaultPath)).name;
 		} catch (error) {
-			new Notice(`Compile failed: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Compile failed", error), 10000);
 			return;
 		}
 
@@ -547,9 +548,10 @@ export default class TheoryPlugin extends Plugin {
 				return;
 			}
 			const others = changed.filter((path) => path !== file.path);
-			new CommitModal(this.app, this, file, others).open();
+			const signer = await requireIdentity(this.getVaultPath());
+			new CommitModal(this.app, this, file, others, signer).open();
 		} catch (error) {
-			new Notice(`Couldn't read changes: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Couldn't read changes", error), 10000);
 		}
 	}
 
@@ -561,21 +563,22 @@ export default class TheoryPlugin extends Plugin {
 				new Notice("No changes to commit.");
 				return;
 			}
-			new CommitModal(this.app, this, null, changed).open();
+			const signer = await requireIdentity(this.getVaultPath());
+			new CommitModal(this.app, this, null, changed, signer).open();
 		} catch (error) {
-			new Notice(`Couldn't read changes: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Couldn't read changes", error), 10000);
 		}
 	}
 
 	/** Returns true when the commit was made. */
 	async commitChanges(message: string, paths: string[] | "all"): Promise<boolean> {
 		try {
-			const hash = await commit(this.getVaultPath(), this.settings, message, paths);
+			const hash = await commit(this.getVaultPath(), message, paths);
 			new Notice(`Committed ${hash}`);
 			this.refreshGitState();
 			return true;
 		} catch (error) {
-			new Notice(`Commit failed: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Commit failed", error), 10000);
 			return false;
 		}
 	}
@@ -715,7 +718,7 @@ export default class TheoryPlugin extends Plugin {
 				new Notice("This vault is already set up.");
 				return true;
 			}
-			const welcomed = await setUpVault(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			const welcomed = await setUpVault(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			new Notice("Vault set up as a git repository with an initial commit.");
 			// The welcome note says what to do first (SET-10).
@@ -753,7 +756,7 @@ export default class TheoryPlugin extends Plugin {
 	/** Writes the missing starter files and commits only them. */
 	async addMissingStarterFiles(): Promise<void> {
 		try {
-			const added = await addMissingStarterFiles(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			const added = await addMissingStarterFiles(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			new Notice(`Added ${added} missing files.`);
 		} catch (error) {

@@ -1,6 +1,6 @@
 import { App, MarkdownView, Modal, Setting, TFile, getIconIds, setIcon } from "obsidian";
 import type TheoryPlugin from "./main";
-import { hasUncommittedChanges } from "./vault";
+import { type Identity, hasUncommittedChanges } from "./vault";
 
 export function commitIcon(): string {
 	// Newer Lucide versions renamed "git-commit" to "git-commit-horizontal".
@@ -16,6 +16,8 @@ export class CommitModal extends Modal {
 		/** The note to commit, or null to commit every changed file. */
 		private file: TFile | null,
 		private otherChanges: string[],
+		/** Who signs, as git reports it (CMT-9). */
+		private signer: Identity,
 	) {
 		super(app);
 	}
@@ -68,11 +70,7 @@ export class CommitModal extends Modal {
 		}
 
 		const footer = contentEl.createDiv({ cls: "theory-commit-footer" });
-		const { fullName, email } = this.plugin.settings;
-		footer.createDiv({
-			cls: "theory-commit-author",
-			text: fullName ? `Signed as ${fullName}${email ? ` <${email}>` : ""}` : "Signed with your git identity",
-		});
+		footer.createDiv({ cls: "theory-commit-author", text: `Signed as ${this.signer.name} <${this.signer.email}>` });
 
 		const buttons = footer.createDiv({ cls: "modal-button-container" });
 		buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());

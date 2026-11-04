@@ -944,3 +944,19 @@ body button.theory-expand-fab[aria-disabled="true"] {
 	margin: var(--size-4-1) 0;
 	color: var(--text-muted);
 }
+
+/* Settings → Author: the commands that set what git lacks (CFG-36). */
+.theory-author-problem {
+	padding: var(--size-4-2) 0;
+}
+
+.theory-author-command {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin: var(--size-4-1) 0;
+}
+
+.theory-author-command code {
+	user-select: text;
+}
