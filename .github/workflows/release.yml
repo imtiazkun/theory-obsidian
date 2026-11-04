@@ -35,11 +35,15 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # scripts/install.sh checks the download against these.
+      - name: Write the checksums
+        run: cd dist && sha256sum main.js manifest.json styles.css > checksums.txt
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/main.js dist/manifest.json dist/styles.css \
+            dist/main.js dist/manifest.json dist/styles.css dist/checksums.txt \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
