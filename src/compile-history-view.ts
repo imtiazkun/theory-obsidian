@@ -62,10 +62,13 @@ export class CompileHistoryView extends ItemView {
 			meta.createSpan({ text: timeAgo(started) });
 			meta.createSpan({ text: " · " });
 			meta.createSpan({ text: report.author || "Unknown author" });
-			meta.createSpan({ text: " · " });
-			meta.createSpan({
-				text: report.tokens === undefined ? "tokens unknown" : `${count.format(report.tokens)} tokens`,
-			});
+			// An ACP agent reports how full its context is, not the tokens used, so there is no count (AGT-20).
+			if (report.agent !== "acp") {
+				meta.createSpan({ text: " · " });
+				meta.createSpan({
+					text: report.tokens === undefined ? "tokens unknown" : `${count.format(report.tokens)} tokens`,
+				});
+			}
 
 			// The state of its pull requests, one per repository when there are several.
 			const prs = report.pullRequests ?? [];

@@ -4,11 +4,13 @@ import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
+import { runAcpAgent } from "./acp";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { CompileBranch, PreparedBranch, dirtyRepos, finishBranches, prepareBranches, undoBranches } from "./branches";
 import type { PullRequest } from "./github";
 import { findProjectRepos } from "./project";
-import { TOOL_PATH, git } from "./vault";
+import { toolPath } from "./tool-path";
+import { git } from "./vault";
 
 /** Tag in the vault repository that marks the last compiled commit. */
 export const COMPILED_TAG = "theory/compiled";
@@ -27,6 +29,8 @@ export const NOT_SENT = [
 ];
 
 export type PermissionMode = "acceptEdits" | "auto" | "bypassPermissions";
+/** The agent that compiles: Claude Code (the default) or an agent speaking the Agent Client Protocol over stdio. */
+export type CompileAgent = "claude" | "acp";
 /** A Claude Code model alias, or "" to let Claude Code decide. Aliases always mean the latest model of their kind. */
 export type CompileModel = "" | "fable" | "opus" | "sonnet" | "haiku";
 /** A Claude Code effort level, or "" to let Claude Code decide. */
@@ -55,6 +59,8 @@ export interface PermissionRequest {
 	reason: string;
 	/** The rules Always allow adds to Allowed commands, or none when there is nothing to add (a file tool with no file). */
 	rules: string[];
+	/** True for an ACP agent's request: Always allow lasts for this compile only and never changes Allowed commands. */
+	sessionOnly?: boolean;
 	/** When the request is denied by itself, in milliseconds since the epoch. */
 	expiresAt: number;
 	/** Where the request sits in the report's activity log. Its card shows there, and its answer replaces that line. */
@@ -66,6 +72,14 @@ export interface CompileOptions {
 	/** Folder holding the project's code: one repository, or several side by side. Claude works here. */
 	projectFolder: string;
 	claudeCommand: string;
+	/** Which agent compiles. Claude Code when unset. */
+	agent?: CompileAgent;
+	/** The command that starts the ACP agent, with its arguments. Used when `agent` is "acp". */
+	agentCommand?: string;
+	/** The ACP agent's model, by value or name. "" or unset means the agent's default. Never Claude Code's model (AGT-24). */
+	agentModel?: string;
+	/** The ACP agent's thinking level, by value or name. "" or unset means the agent's default. */
+	agentThinkingLevel?: string;
 	permissionMode: PermissionMode;
 	/** Space-separated Claude Code permission rules, e.g. `Bash(npm run *)`. */
 	allowedTools: string;
@@ -119,6 +133,8 @@ export interface CompileReport {
 	author?: string;
 	/** Every token Claude Code counted in this compile: input, output and cache. Unset when it never reported usage. */
 	tokens?: number;
+	/** "acp" when an ACP agent compiled. Unset for Claude Code. An ACP agent reports no token count. */
+	agent?: CompileAgent;
 	/** Each repository's compile branch, its base and the commits this compile added. Set once Claude has finished. */
 	branches?: CompileBranch[];
 	/** Pull requests opened from this report with Create PR. */
@@ -133,6 +149,12 @@ export async function pendingRevisionCount(vaultPath: string): Promise<number> {
 	if (from === head) return 0;
 	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head]);
 	return Number(stdout.trim()) || 0;
+}
+
+/** The rules Always allow saves to Allowed commands for this request. An ACP agent's request saves none (AGT-14). */
+export function rulesToSave(request: PermissionRequest, answer: PermissionAnswer): string[] {
+	if (answer !== "always" || request.sessionOnly) return [];
+	return request.rules;
 }
 
 /** Thrown when every committed revision has already been compiled. */
@@ -151,7 +173,7 @@ const ANCHOR_SCHEMA = {
 	required: ["path"],
 };
 
-const REPORT_SCHEMA = {
+export const REPORT_SCHEMA = {
 	type: "object",
 	properties: {
 		status: { type: "string", enum: ["succeeded", "failed"] },
@@ -290,7 +312,7 @@ async function hashTree(dir: string): Promise<string> {
 
 function runTool(command: string, args: string[]): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, { env: { ...process.env, PATH: TOOL_PATH } });
+		const child = spawn(command, args, { env: { ...process.env, PATH: toolPath() } });
 		let stderr = "";
 		child.stderr.on("data", (chunk) => (stderr += chunk));
 		child.on("error", reject);
@@ -465,18 +487,69 @@ function totalTokens(usage: unknown): number | undefined {
 	return counts.length > 0 ? counts.reduce((sum, n) => sum + n, 0) : undefined;
 }
 
-interface ClaudeResult {
+/** The agent's answer in the shape of REPORT_SCHEMA (CMP-15). */
+export interface StructuredAnswer {
+	status: "succeeded" | "failed";
+	summary: string;
+	changes: string[];
+	/** Question anchors are checked by `checkAnchors` before anything is shown. */
+	questions: (Omit<Question, "anchors"> & { anchors?: unknown })[];
+	/** Checked by `checkProblems` before anything is shown. */
+	problems: unknown;
+}
+
+export interface AgentResult {
 	isError: boolean;
 	text: string;
-	structured?: {
-		status: "succeeded" | "failed";
-		summary: string;
-		changes: string[];
-		/** Question anchors are checked by `checkAnchors` before anything is shown. */
-		questions: (Omit<Question, "anchors"> & { anchors?: unknown })[];
-		/** Checked by `checkProblems` before anything is shown. */
-		problems: unknown;
-	};
+	structured?: StructuredAnswer;
+}
+
+/** How the agent's run ended. */
+export interface AgentOutcome {
+	result: AgentResult | null;
+	code: number | null;
+	/** Set when the agent couldn't be started. */
+	error?: Error;
+	/** Why an ACP agent stopped: its stop reason, or the error that ended its turn. */
+	stopReason?: string;
+	stderr: string;
+}
+
+/** What the compile offers the agent it runs: the activity log, permission cards and problems. */
+export interface AgentHost {
+	log(line: string): void;
+	/**
+	 * Shows a permission card. `respond` is called once with the engineer's answer, a timeout ("deny"),
+	 * or "cancelled" when the compile ends first. `message` says why, for the agent.
+	 */
+	ask(
+		request: Omit<PermissionRequest, "expiresAt" | "line">,
+		respond: (choice: PermissionAnswer | "cancelled", message: string) => void,
+	): void;
+	/** Closes a card the agent withdrew before anyone answered. */
+	withdraw(id: string): void;
+	/** A step that didn't run. It becomes a problem. */
+	skip(problem: string): void;
+	/** Answers every open request, e.g. when the agent finished. */
+	closeAll(message: string): void;
+}
+
+export interface AgentRun {
+	done: Promise<AgentOutcome>;
+	cancel(): void;
+}
+
+/** What an ACP agent is told on top of the prompt Claude Code gets: the answer's shape (AGT-9). */
+export function acpAnswerInstructions(): string {
+	return `
+## Your answer
+
+When you are done, end your last message with your answer as one JSON block in a \`\`\`json fence. It must match this JSON Schema:
+
+\`\`\`json
+${JSON.stringify(REPORT_SCHEMA, null, 2)}
+\`\`\`
+`;
 }
 
 export interface CompileRun {
@@ -496,9 +569,13 @@ export interface CompileRun {
  */
 export async function startCompile(options: CompileOptions, onUpdate: (report: CompileReport) => void): Promise<CompileRun> {
 	const { vaultPath, projectFolder } = options;
+	const agent: CompileAgent = options.agent ?? "claude";
 	if (!projectFolder) throw new Error("Choose the project folder in theory.md settings first.");
 	if (!existsSync(projectFolder) || !statSync(projectFolder).isDirectory()) {
 		throw new Error(`The project folder doesn't exist: ${projectFolder}`);
+	}
+	if (agent === "acp" && !options.agentCommand?.trim()) {
+		throw new Error("Set the agent command in theory.md settings first.");
 	}
 
 	const head = await headCommit(vaultPath);
@@ -549,9 +626,245 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		problems: [],
 		log: branches.map((b) => `Checked out ${b.branch} in ${b.name}${b.created ? ` (new, from ${b.base})` : ""}`),
 		author: options.author,
+		...(agent === "acp" ? { agent } : {}),
+	};
+
+	let cancelled = false;
+	const requests: PermissionRequest[] = [];
+	const log = (line: string) => {
+		report.log.push(line);
+		if (report.log.length > MAX_LOG_LINES) {
+			report.log.shift();
+			for (const request of requests) request.line--;
+		}
+		onUpdate(report);
+	};
+
+	type Respond = (choice: PermissionAnswer | "cancelled", message: string) => void;
+	const pending = new Map<string, { respond: Respond; timer: ReturnType<typeof setTimeout> }>();
+	// Steps that didn't run because a request was denied or timed out. Each becomes a problem.
+	const skipped: string[] = [];
+
+	/** Closes a request. Its card becomes one line in the activity log, e.g. "Allowed: npm test". */
+	const close = (id: string, outcome: string) => {
+		const open = pending.get(id);
+		if (!open) return null;
+		clearTimeout(open.timer);
+		pending.delete(id);
+		const index = requests.findIndex((r) => r.id === id);
+		const [request] = index >= 0 ? requests.splice(index, 1) : [];
+		if (request) {
+			const text = `${outcome}: ${request.target}`;
+			if (request.line >= 0 && request.line < report.log.length) report.log[request.line] = text;
+			else report.log.push(text);
+		}
+		onUpdate(report);
+		return request ? { request, respond: open.respond } : null;
+	};
+
+	const answer = (id: string, choice: PermissionAnswer) => {
+		const closed = close(id, choice === "deny" ? "Denied" : choice === "always" ? "Always allowed" : "Allowed");
+		if (!closed) return;
+		const { request, respond } = closed;
+		if (choice === "deny") {
+			skipped.push(`You denied ${request.tool}: ${request.target}. ${agent === "acp" ? "The agent" : "Claude"} carried on without it.`);
+			respond("deny", "The engineer denied this. Carry on without this step and name it in problems.");
+			return;
+		}
+		respond(choice, "");
+	};
+
+	/** Denies every open request, e.g. on cancel or when the agent exits. */
+	const denyAll = (message: string, choice: "deny" | "cancelled" = "deny") => {
+		for (const id of [...pending.keys()]) {
+			const closed = close(id, "Denied");
+			if (!closed) continue;
+			skipped.push(`${closed.request.tool}: ${closed.request.target} was denied because ${message}.`);
+			closed.respond(choice, `Denied because ${message}.`);
+		}
+	};
+
+	const host: AgentHost = {
+		log,
+		ask(request, respond) {
+			const permission: PermissionRequest = {
+				...request,
+				expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
+				line: report.log.length,
+			};
+			const timer = setTimeout(() => {
+				if (!close(permission.id, "Timed out")) return;
+				const step = `${permission.tool}: ${permission.target}`;
+				skipped.push(
+					`Nobody answered the request for ${step} within 120 seconds, so it was denied. ${agent === "acp" ? "The agent" : "Claude"} carried on without it.`,
+				);
+				respond("deny", "Nobody answered in time, so this was denied. Carry on without this step and name it in problems.");
+			}, PERMISSION_TIMEOUT_MS);
+			pending.set(permission.id, { respond, timer });
+			requests.push(permission);
+			// The card shows on this line until it's answered.
+			log(`Asking: ${permission.target}`);
+			options.onPermissionRequest?.(permission);
+		},
+		withdraw: (id) => void close(id, "Withdrawn"),
+		skip: (problem) => void skipped.push(problem),
+		closeAll: (message) => denyAll(message),
 	};
 
 	const protectedPaths = [vaultPath, snapshot];
+	const prompt = buildPrompt({ snapshot, projectFolder, head, from, revisions, diff, branches, instructions });
+	let agentRun: AgentRun;
+	try {
+		agentRun =
+			agent === "acp"
+				? runAcpAgent(
+						{
+							command: options.agentCommand ?? "",
+							projectFolder,
+							snapshot,
+							protectedPaths,
+							// Same prompt as Claude Code, plus the answer's shape, since ACP has none built in.
+							prompt: prompt + acpAnswerInstructions(),
+							model: options.agentModel ?? "",
+							thinkingLevel: options.agentThinkingLevel ?? "",
+						},
+						host,
+					)
+				: runClaudeCode(options, { snapshot, protectedPaths, prompt, report }, host);
+	} catch (error) {
+		await undoBranches(branches);
+		await removeSnapshot(snapshot);
+		throw error;
+	}
+	const agentName = agent === "acp" ? "The agent" : "Claude Code";
+
+	/**
+	 * The snapshot check (INV-5) and the vault check (INV-6). They run after every compile in which an agent
+	 * started, cancelled ones included, whatever the agent, because an agent's own shell can write anywhere
+	 * the engineer can (AGT-17, INV-12). They never change a cancelled compile's status or move the marker.
+	 */
+	const checkModel = async () => {
+		const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
+		const vaultAfter = await workingTreeState(vaultPath).catch(() => vaultBefore);
+		// A file that was dirty before and is clean now changed too, so compare both ways.
+		const paths = new Set([...vaultBefore.keys(), ...vaultAfter.keys()]);
+		const touched = [...paths].filter((path) => vaultBefore.get(path) !== vaultAfter.get(path));
+		return { intact, touched };
+	};
+	const modelProblems = ({ intact, touched }: { intact: boolean; touched: string[] }): Problem[] => [
+		...(touched.length > 0
+			? [plainProblem(`These vault files changed while the compile ran: ${touched.join(", ")}. If you didn't edit them, revert them.`)]
+			: []),
+		...(intact ? [] : [plainProblem("Claude tried to change the model snapshot. Those changes were thrown away.")]),
+	];
+
+	const done = (async () => {
+		const { result, code, error, stopReason, stderr } = await agentRun.done;
+		denyAll(`${agentName} exited`);
+		try {
+			// Whatever the outcome, a new branch without commits goes, and its repository goes back to its base.
+			report.branches = await finishBranches(branches);
+			for (const b of report.branches) {
+				if (!b.kept) log(`Deleted ${b.branch} in ${b.repo}, which got no commits, and checked out ${b.base}`);
+			}
+			// Uncommitted work would block the next compile, so the engineer must hear about it.
+			const left = await dirtyRepos(projectFolder).catch(() => []);
+			if (left.length > 0) skipped.push(`These repositories have uncommitted changes after the compile: ${left.join(", ")}.`);
+			if (cancelled) {
+				report.status = "cancelled";
+				report.summary = "You cancelled this compile. The last compile marker didn't move.";
+				report.problems.unshift(...modelProblems(await checkModel()));
+				return report;
+			}
+			if (error) {
+				report.status = "failed";
+				report.summary = `${agent === "acp" ? "The agent" : "Claude Code"} couldn't be started.`;
+				const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+				report.problems.push(
+					plainProblem(
+						!missing
+							? error.message
+							: agent === "acp"
+								? `Couldn't find the agent ("${options.agentCommand}"). Set its command in theory.md settings.`
+								: `Couldn't find the Claude Code CLI ("${options.claudeCommand}"). Set its path in theory.md settings.`,
+					),
+				);
+				report.problems.unshift(...modelProblems(await checkModel()));
+				return report;
+			}
+
+			report.suspectNotes = notes;
+			const structured = result?.structured;
+			let claimedProblems: unknown = [];
+			if (structured) {
+				report.status = structured.status === "succeeded" && !result?.isError ? "succeeded" : "failed";
+				report.summary = structured.summary;
+				report.changes = structured.changes ?? [];
+				report.questions = (structured.questions ?? []).map((q) => ({
+					question: q.question,
+					notes: (q.notes ?? []).map((note) => note.replace(/^\.?\//, "")),
+				}));
+				claimedProblems = structured.problems;
+			} else {
+				report.status = "failed";
+				report.summary = result?.text || `${agentName} finished without a report.`;
+				report.problems.push(
+					plainProblem(
+						agent === "acp"
+							? // The plugin stops an ACP agent itself, so its exit code means nothing (AGT-22).
+								`The agent gave no structured answer. It stopped because: ${(stopReason ?? "unknown").replace(/\.$/, "")}. ${stderr.trim()}`.trim()
+							: `Claude Code exited with code ${code}. ${stderr.trim()}`.trim(),
+					),
+				);
+			}
+
+			// The model must come back exactly as it went in.
+			const checked = await checkModel();
+			const { intact } = checked;
+			// Anchors are only checked against a snapshot that is still the compiled revision.
+			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			// The engineer must know which steps didn't run, whatever Claude reported.
+			report.problems.push(...skipped.map(plainProblem));
+			for (let i = 0; i < report.questions.length; i++) {
+				const anchors = await checkAnchors(intact ? snapshot : null, structured?.questions?.[i]?.anchors);
+				if (anchors.length > 0) report.questions[i].anchors = anchors;
+			}
+			if (!intact) report.status = "failed";
+			report.problems.unshift(...modelProblems(checked));
+
+			// The marker moves even when the compile fails, so the next compile only takes newer revisions.
+			await git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
+			return report;
+		} finally {
+			report.finishedAt = new Date().toISOString();
+			await removeSnapshot(snapshot);
+			onUpdate(report);
+		}
+	})();
+
+	return {
+		report,
+		done,
+		requests,
+		answer,
+		cancel() {
+			if (report.status !== "running" || cancelled) return;
+			cancelled = true;
+			// An ACP agent hears its open requests were cancelled (AGT-18); Claude Code hears they were denied.
+			denyAll("the compile was cancelled", agent === "acp" ? "cancelled" : "deny");
+			agentRun.cancel();
+		},
+	};
+}
+
+/** Runs Claude Code with `-p` and stream-json in the project folder for one compile. */
+function runClaudeCode(
+	options: CompileOptions,
+	params: { snapshot: string; protectedPaths: string[]; prompt: string; report: CompileReport },
+	host: AgentHost,
+): AgentRun {
+	const { projectFolder } = options;
+	const { snapshot, protectedPaths, prompt, report } = params;
 	const disallowed = protectedPaths.flatMap((path) =>
 		["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(//${path.replace(/^\//, "")}/**)`),
 	);
@@ -581,28 +894,10 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const allowed = options.allowedTools.trim();
 	if (allowed) args.push("--allowedTools", allowed);
 
-	let child: ChildProcess;
-	try {
-		child = spawn(options.claudeCommand || "claude", args, {
-			cwd: projectFolder,
-			env: { ...process.env, PATH: TOOL_PATH },
-		});
-	} catch (error) {
-		await undoBranches(branches);
-		await removeSnapshot(snapshot);
-		throw error;
-	}
-
-	let cancelled = false;
-	const requests: PermissionRequest[] = [];
-	const log = (line: string) => {
-		report.log.push(line);
-		if (report.log.length > MAX_LOG_LINES) {
-			report.log.shift();
-			for (const request of requests) request.line--;
-		}
-		onUpdate(report);
-	};
+	const child: ChildProcess = spawn(options.claudeCommand || "claude", args, {
+		cwd: projectFolder,
+		env: { ...process.env, PATH: toolPath() },
+	});
 
 	const send = (message: unknown) => {
 		if (child.stdin?.writable) child.stdin.write(JSON.stringify(message) + "\n");
@@ -610,62 +905,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	// The process may exit while an answer is on its way.
 	child.stdin?.on("error", () => {});
 
-	const pending = new Map<string, { input: Record<string, unknown>; timer: ReturnType<typeof setTimeout> }>();
-	// Steps that didn't run because a request was denied or timed out. Each becomes a problem.
-	const skipped: string[] = [];
-
 	const reply = (id: string, response: Record<string, unknown>) =>
 		send({ type: "control_response", response: { subtype: "success", request_id: id, response } });
 	const deny = (id: string, message: string) => reply(id, { behavior: "deny", message });
-
-	/** Closes a request. Its card becomes one line in the activity log, e.g. "Allowed: npm test". */
-	const close = (id: string, outcome: string) => {
-		const open = pending.get(id);
-		if (!open) return null;
-		clearTimeout(open.timer);
-		pending.delete(id);
-		const index = requests.findIndex((r) => r.id === id);
-		const [request] = index >= 0 ? requests.splice(index, 1) : [];
-		if (request) {
-			const text = `${outcome}: ${request.target}`;
-			if (request.line >= 0 && request.line < report.log.length) report.log[request.line] = text;
-			else report.log.push(text);
-		}
-		onUpdate(report);
-		return request ? { request, input: open.input } : null;
-	};
-
-	const answer = (id: string, choice: PermissionAnswer) => {
-		const closed = close(id, choice === "deny" ? "Denied" : choice === "always" ? "Always allowed" : "Allowed");
-		if (!closed) return;
-		const { request, input } = closed;
-		const step = `${request.tool}: ${request.target}`;
-		if (choice === "deny") {
-			skipped.push(`You denied ${step}. Claude carried on without it.`);
-			deny(id, "The engineer denied this. Carry on without this step and name it in problems.");
-			return;
-		}
-		const rules = request.rules.map((rule) => {
-			const [toolName, ruleContent] = rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [request.tool];
-			return ruleContent ? { toolName, ruleContent } : { toolName };
-		});
-		reply(id, {
-			behavior: "allow",
-			updatedInput: input,
-			...(choice === "always" && rules.length > 0
-				? {
-						updatedPermissions: [
-							{
-								type: "addRules",
-								rules,
-								behavior: "allow",
-								destination: "session",
-							},
-						],
-					}
-				: {}),
-		});
-	};
 
 	const handleControlRequest = (id: string, request: any) => {
 		if (request?.subtype !== "can_use_tool") {
@@ -677,204 +919,99 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		const file = writtenFile(tool, input, projectFolder);
 		// Writes to the model never reach a card.
 		if (file && protectedPaths.some((dir) => isInside(file, dir))) {
-			skipped.push(`Claude tried to write to the model (${file}). That was denied.`);
-			log(`Denied: ${file}`);
+			host.skip(`Claude tried to write to the model (${file}). That was denied.`);
+			host.log(`Denied: ${file}`);
 			deny(id, "Writing to the model is forbidden. Carry on without this step.");
 			return;
 		}
 		const description = typeof input.description === "string" ? input.description : "";
 		const reason = description || (typeof request.decision_reason === "string" ? request.decision_reason : "");
-		const permission: PermissionRequest = {
-			id,
-			tool,
-			target: requestTarget(tool, input),
-			reason: reason || "Claude didn't give a reason.",
-			rules: requestRules(tool, input, projectFolder, request.permission_suggestions),
-			expiresAt: Date.now() + PERMISSION_TIMEOUT_MS,
-			line: report.log.length,
-		};
-		const timer = setTimeout(() => {
-			if (!close(id, "Timed out")) return;
-			const step = `${permission.tool}: ${permission.target}`;
-			skipped.push(`Nobody answered the request for ${step} within 120 seconds, so it was denied. Claude carried on without it.`);
-			deny(id, "Nobody answered in time, so this was denied. Carry on without this step and name it in problems.");
-		}, PERMISSION_TIMEOUT_MS);
-		pending.set(id, { input, timer });
-		requests.push(permission);
-		// The card shows on this line until it's answered.
-		log(`Asking: ${permission.target}`);
-		options.onPermissionRequest?.(permission);
+		const rules = requestRules(tool, input, projectFolder, request.permission_suggestions);
+		host.ask(
+			{
+				id,
+				tool,
+				target: requestTarget(tool, input),
+				reason: reason || "Claude didn't give a reason.",
+				rules,
+			},
+			(choice, message) => {
+				if (choice === "deny" || choice === "cancelled") return deny(id, message);
+				const updated = rules.map((rule) => {
+					const [toolName, ruleContent] = rule.match(/^([^(]+)(?:\((.*)\))?$/s)?.slice(1) ?? [tool];
+					return ruleContent ? { toolName, ruleContent } : { toolName };
+				});
+				reply(id, {
+					behavior: "allow",
+					updatedInput: input,
+					...(choice === "always" && updated.length > 0
+						? { updatedPermissions: [{ type: "addRules", rules: updated, behavior: "allow", destination: "session" }] }
+						: {}),
+				});
+			},
+		);
 	};
 
-	/** Denies every open request, e.g. on cancel or when Claude Code exits. */
-	const denyAll = (message: string) => {
-		for (const id of [...pending.keys()]) {
-			const closed = close(id, "Denied");
-			if (!closed) continue;
-			skipped.push(`${closed.request.tool}: ${closed.request.target} was denied because ${message}.`);
-			deny(id, `Denied because ${message}.`);
-		}
-	};
-
-	const claudeDone = new Promise<{ result: ClaudeResult | null; code: number | null; error?: Error; stderr: string }>(
-		(resolve) => {
-			let result: ClaudeResult | null = null;
-			let buffer = "";
-			let stderr = "";
-			const handleLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
-				if (event.type === "assistant") {
-					for (const block of event.message?.content ?? []) {
-						if (block.type === "tool_use" && block.name !== "StructuredOutput") {
-							log(describeToolUse(block.name, block.input ?? {}));
-						}
+	const done = new Promise<AgentOutcome>((resolve) => {
+		let result: AgentResult | null = null;
+		let buffer = "";
+		let stderr = "";
+		const handleLine = (line: string) => {
+			if (!line.trim()) return;
+			let event: any;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				return;
+			}
+			if (event.type === "assistant") {
+				for (const block of event.message?.content ?? []) {
+					if (block.type === "tool_use" && block.name !== "StructuredOutput") {
+						host.log(describeToolUse(block.name, block.input ?? {}));
 					}
-				} else if (event.type === "control_request") {
-					handleControlRequest(String(event.request_id), event.request);
-				} else if (event.type === "control_cancel_request") {
-					close(String(event.request_id), "Withdrawn");
-				} else if (event.type === "result") {
-					report.tokens = totalTokens(event.usage);
-					result = {
-						isError: Boolean(event.is_error) || event.subtype !== "success",
-						text: typeof event.result === "string" ? event.result : "",
-						structured: event.structured_output,
-					};
-					// Claude is done; closing stdin lets Claude Code exit.
-					denyAll("Claude finished");
-					child.stdin?.end();
 				}
-			};
-			child.stdout?.on("data", (chunk) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-				lines.forEach(handleLine);
-			});
-			child.stderr?.on("data", (chunk) => (stderr += chunk));
-			child.on("error", (error) => {
-				denyAll("Claude Code couldn't run");
-				resolve({ result, code: null, error, stderr });
-			});
-			child.on("close", (code) => {
-				handleLine(buffer);
-				denyAll("Claude Code exited");
-				resolve({ result, code, stderr });
-			});
-			// Stdin stays open for the answers to permission requests until the result arrives.
-			send({ type: "control_request", request_id: "initialize", request: { subtype: "initialize", hooks: null } });
-			// Keeps the prompt out of the argument list, which has a size limit.
-			send({
-				type: "user",
-				message: {
-					role: "user",
-					content: buildPrompt({ snapshot, projectFolder, head, from, revisions, diff, branches, instructions }),
-				},
-				parent_tool_use_id: null,
-				session_id: "",
-			});
-		},
-	);
+			} else if (event.type === "control_request") {
+				handleControlRequest(String(event.request_id), event.request);
+			} else if (event.type === "control_cancel_request") {
+				host.withdraw(String(event.request_id));
+			} else if (event.type === "result") {
+				report.tokens = totalTokens(event.usage);
+				result = {
+					isError: Boolean(event.is_error) || event.subtype !== "success",
+					text: typeof event.result === "string" ? event.result : "",
+					structured: event.structured_output,
+				};
+				// Claude is done; closing stdin lets Claude Code exit.
+				host.closeAll("Claude finished");
+				child.stdin?.end();
+			}
+		};
+		child.stdout?.on("data", (chunk) => {
+			buffer += chunk;
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			lines.forEach(handleLine);
+		});
+		child.stderr?.on("data", (chunk) => (stderr += chunk));
+		child.on("error", (error) => {
+			host.closeAll("Claude Code couldn't run");
+			resolve({ result, code: null, error, stderr });
+		});
+		child.on("close", (code) => {
+			handleLine(buffer);
+			host.closeAll("Claude Code exited");
+			resolve({ result, code, stderr });
+		});
+		// Stdin stays open for the answers to permission requests until the result arrives.
+		send({ type: "control_request", request_id: "initialize", request: { subtype: "initialize", hooks: null } });
+		// Keeps the prompt out of the argument list, which has a size limit.
+		send({
+			type: "user",
+			message: { role: "user", content: prompt },
+			parent_tool_use_id: null,
+			session_id: "",
+		});
+	});
 
-	const done = (async () => {
-		const { result, code, error, stderr } = await claudeDone;
-		try {
-			// Whatever the outcome, a new branch without commits goes, and its repository goes back to its base.
-			report.branches = await finishBranches(branches);
-			for (const b of report.branches) {
-				if (!b.kept) log(`Deleted ${b.branch} in ${b.repo}, which got no commits, and checked out ${b.base}`);
-			}
-			// Uncommitted work would block the next compile, so the engineer must hear about it.
-			const left = await dirtyRepos(projectFolder).catch(() => []);
-			if (left.length > 0) skipped.push(`These repositories have uncommitted changes after the compile: ${left.join(", ")}.`);
-			if (cancelled) {
-				report.status = "cancelled";
-				report.summary = "You cancelled this compile. The last compile marker didn't move.";
-				return report;
-			}
-			if (error) {
-				report.status = "failed";
-				report.summary = "Claude Code couldn't be started.";
-				report.problems.push(
-					plainProblem(
-						(error as NodeJS.ErrnoException).code === "ENOENT"
-							? `Couldn't find the Claude Code CLI ("${options.claudeCommand}"). Set its path in theory.md settings.`
-							: error.message,
-					),
-				);
-				return report;
-			}
-
-			report.suspectNotes = notes;
-			const structured = result?.structured;
-			let claimedProblems: unknown = [];
-			if (structured) {
-				report.status = structured.status === "succeeded" && !result?.isError ? "succeeded" : "failed";
-				report.summary = structured.summary;
-				report.changes = structured.changes ?? [];
-				report.questions = (structured.questions ?? []).map((q) => ({
-					question: q.question,
-					notes: (q.notes ?? []).map((note) => note.replace(/^\.?\//, "")),
-				}));
-				claimedProblems = structured.problems;
-			} else {
-				report.status = "failed";
-				report.summary = result?.text || "Claude Code finished without a report.";
-				report.problems.push(plainProblem(`Claude Code exited with code ${code}. ${stderr.trim()}`.trim()));
-			}
-
-			// The model must come back exactly as it went in.
-			const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
-			// Anchors are only checked against a snapshot that is still the compiled revision.
-			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
-			// The engineer must know which steps didn't run, whatever Claude reported.
-			report.problems.push(...skipped.map(plainProblem));
-			for (let i = 0; i < report.questions.length; i++) {
-				const anchors = await checkAnchors(intact ? snapshot : null, structured?.questions?.[i]?.anchors);
-				if (anchors.length > 0) report.questions[i].anchors = anchors;
-			}
-			if (!intact) {
-				report.status = "failed";
-				report.problems.unshift(plainProblem("Claude tried to change the model snapshot. Those changes were thrown away."));
-			}
-			const vaultAfter = await workingTreeState(vaultPath);
-			// A file that was dirty before and is clean now changed too, so compare both ways.
-			const paths = new Set([...vaultBefore.keys(), ...vaultAfter.keys()]);
-			const touched = [...paths].filter((path) => vaultBefore.get(path) !== vaultAfter.get(path));
-			if (touched.length > 0) {
-				report.problems.unshift(
-					plainProblem(
-						`These vault files changed while the compile ran: ${touched.join(", ")}. If you didn't edit them, revert them.`,
-					),
-				);
-			}
-
-			// The marker moves even when the compile fails, so the next compile only takes newer revisions.
-			await git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
-			return report;
-		} finally {
-			report.finishedAt = new Date().toISOString();
-			await removeSnapshot(snapshot);
-			onUpdate(report);
-		}
-	})();
-
-	return {
-		report,
-		done,
-		requests,
-		answer,
-		cancel() {
-			if (report.status !== "running" || cancelled) return;
-			cancelled = true;
-			denyAll("the compile was cancelled");
-			child.kill("SIGTERM");
-		},
-	};
+	return { done, cancel: () => child.kill("SIGTERM") };
 }

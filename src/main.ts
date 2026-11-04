@@ -10,6 +10,7 @@ import {
 	PermissionAnswer,
 	PermissionRequest,
 	startCompile,
+	rulesToSave,
 	withAllowedRules,
 } from "./compile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
@@ -27,6 +28,7 @@ import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
+import { loadToolPath } from "./tool-path";
 import {
 	MissingStarters,
 	addMissingStarterFiles,
@@ -69,6 +71,8 @@ export default class TheoryPlugin extends Plugin {
 	});
 
 	async onload() {
+		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
+		await loadToolPath();
 		await this.loadSettings();
 		this.addSettingTab(new TheorySettingTab(this.app, this));
 
@@ -268,7 +272,8 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const { projectFolder, claudeCommand, permissionMode, allowedTools, model, effort } = this.settings;
+		const { projectFolder, claudeCommand, agent, agentCommand, agentModel, agentThinkingLevel, permissionMode, allowedTools, model, effort } =
+			this.settings;
 		let run: CompileRun;
 		try {
 			run = await startCompile(
@@ -276,6 +281,10 @@ export default class TheoryPlugin extends Plugin {
 					vaultPath,
 					projectFolder,
 					claudeCommand,
+					agent,
+					agentCommand,
+					agentModel,
+					agentThinkingLevel,
 					permissionMode,
 					allowedTools,
 					model,
@@ -283,7 +292,8 @@ export default class TheoryPlugin extends Plugin {
 					author,
 					reports: this.reports,
 					onPermissionRequest: (request) => {
-						new Notice(`Claude is asking to use ${request.tool}. Answer in the compile report.`);
+						const who = request.sessionOnly ? "The agent" : "Claude";
+						new Notice(`${who} is asking to use ${request.tool}. Answer in the compile report.`);
 						this.showReportView();
 					},
 				},
@@ -333,13 +343,14 @@ export default class TheoryPlugin extends Plugin {
 		return this.compileRun?.requests ?? [];
 	}
 
-	/** Answers one permission request. Always allow also adds its rules to Allowed commands. */
+	/** Answers one permission request. Always allow on a Claude Code card also adds its rules to Allowed commands. */
 	async answerPermission(id: string, answer: PermissionAnswer) {
 		const request = this.compileRun?.requests.find((r) => r.id === id);
 		if (!request) return;
 		this.compileRun?.answer(id, answer);
-		if (answer !== "always" || request.rules.length === 0) return;
-		this.settings.allowedTools = withAllowedRules(this.settings.allowedTools, request.rules);
+		const rules = rulesToSave(request, answer);
+		if (rules.length === 0) return;
+		this.settings.allowedTools = withAllowedRules(this.settings.allowedTools, rules);
 		await this.saveSettings();
 	}
 

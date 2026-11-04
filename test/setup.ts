@@ -4,7 +4,8 @@ import { join } from "path";
 import { afterAll } from "vitest";
 
 // Tests never reach Claude Code or GitHub: fake `claude` and `gh` come first on PATH and always fail.
-// This runs before the tested modules load, so the plugin's TOOL_PATH starts with them too.
+// This runs before the tested modules load, so the plugin's tool PATH starts with them too
+// (tests never call loadToolPath, so it is Obsidian's own PATH plus the extra folders).
 const fakes = mkdtempSync(join(tmpdir(), "theory-test-bin-"));
 for (const tool of ["claude", "gh"]) {
 	const path = join(fakes, tool);

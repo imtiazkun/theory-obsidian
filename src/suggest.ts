@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from "child_process";
 import { tmpdir } from "os";
 import type { Anchor } from "./anchor";
 import type { CompileEffort, CompileModel, Question } from "./compile";
-import { TOOL_PATH } from "./vault";
+import { toolPath } from "./tool-path";
 
 /** Ideation for the engineer, shown on screen only. It is never model text and is never saved. */
 export interface Suggestion {
@@ -106,7 +106,7 @@ export function startSuggest(options: SuggestOptions): SuggestRun {
 		try {
 			child = spawn(options.claudeCommand || "claude", args, {
 				cwd: tmpdir(),
-				env: { ...process.env, PATH: TOOL_PATH },
+				env: { ...process.env, PATH: toolPath() },
 			});
 		} catch (error) {
 			reject(error);

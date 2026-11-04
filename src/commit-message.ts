@@ -1,7 +1,8 @@
 import { spawn } from "child_process";
 import { tmpdir } from "os";
 import { NOT_SENT } from "./compile";
-import { TOOL_PATH, uncommittedDiff } from "./vault";
+import { toolPath } from "./tool-path";
+import { uncommittedDiff } from "./vault";
 
 // Enough for Claude to see what changed, small enough to answer quickly.
 const MAX_DIFF_CHARS = 50_000;
@@ -57,7 +58,7 @@ export async function generateCommitMessage(
 	];
 
 	const output = await new Promise<string>((resolve, reject) => {
-		const child = spawn(claudeCommand || "claude", args, { cwd: tmpdir(), env: { ...process.env, PATH: TOOL_PATH } });
+		const child = spawn(claudeCommand || "claude", args, { cwd: tmpdir(), env: { ...process.env, PATH: toolPath() } });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => (stdout += chunk));
