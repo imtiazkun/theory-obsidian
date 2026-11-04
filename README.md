@@ -55,6 +55,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Feature | Status |
 | --- | --- |
 | Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the templates in `_templates/`, and an initial commit | Done |
+| Install with a coding agent: `INSTALL.md` and `scripts/install.sh` download and check the latest release, turn the plugin on, and on a first install fill in the author from git and run Setup vault on the first load | Done |
 | Create missing files: a vault set up by an older version, or missing a starter file, gets only the missing files and `.gitignore` lines from the settings, committed on their own | Done |
 | Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
 | Author settings: full name and email used to sign commits | Done |
@@ -84,7 +85,26 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 
 ## Install
 
-theory.md is desktop only and needs Obsidian 1.5.0 or later. It needs `git` on your machine, and Compile will also need the [Claude Code CLI](https://claude.com/claude-code). It isn't in Obsidian's Community plugins list yet, so install it one of these two ways.
+theory.md is desktop only and needs Obsidian 1.5.0 or later. It needs `git` on your machine, and Compile will also need the [Claude Code CLI](https://claude.com/claude-code). It isn't in Obsidian's Community plugins list yet, so install it one of these ways.
+
+### With a coding agent
+
+Paste this into Claude Code, Codex, Gemini CLI or any coding agent that can run shell commands, with your vault's path:
+
+```
+Install the theory.md Obsidian plugin into my vault at ~/path/to/vault.
+Follow https://raw.githubusercontent.com/imtiazkun/theory-obsidian/main/INSTALL.md
+```
+
+Leave out the path and the agent lists your vaults and asks. It runs [`scripts/install.sh`](scripts/install.sh), which downloads the latest release, checks it against the release's checksums and turns the plugin on. On a first install it also takes your name and email from git, and asks the plugin to run **Setup vault** when it first loads. The agent asks before it restarts Obsidian. Obsidian may then ask you to trust the vault's plugins.
+
+You can run the script yourself too:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imtiazkun/theory-obsidian/main/scripts/install.sh | sh -s -- --vault ~/path/to/vault
+```
+
+Add `--project <folder>` to set the folder holding your code. Run it again to update.
 
 ### With BRAT
 
@@ -129,6 +149,8 @@ Use `npm run dev` to rebuild on every change.
 Run the tests with `npm test` (Vitest). Run one file or one test with `npm test -- test/branches.test.ts -t "reuses"`.
 
 ## First use
+
+If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email.
 
 1. Open Settings → theory.md and enter your full name and email.
 2. Run **theory.md: Setup vault** from the command palette.

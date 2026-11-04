@@ -91,6 +91,8 @@ export default class TheoryPlugin extends Plugin {
 		pulled: (outcome, reason) => this.pulled(outcome, reason),
 	});
 	private pullTimer: number | null = null;
+	// Set by scripts/install.sh on a first install: run Setup vault once, on the first load.
+	private setupOnLoad = false;
 
 	async onload() {
 		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
@@ -154,6 +156,7 @@ export default class TheoryPlugin extends Plugin {
 			await this.noteStatus.sync();
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
+			if (this.setupOnLoad) await this.setUpOnFirstLoad();
 			if (launching) this.puller.pull("launch");
 			this.restartPullTimer();
 		});
@@ -648,8 +651,9 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const { reports, codeRepoPath, repos, ...settings } = (await this.loadData()) ?? {};
+		const { reports, codeRepoPath, repos, setupOnLoad, ...settings } = (await this.loadData()) ?? {};
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+		this.setupOnLoad = setupOnLoad === true;
 		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
 		// Earlier versions called the project folder the code repository, and briefly kept a list of repos.
 		if (!this.settings.projectFolder && typeof codeRepoPath === "string") this.settings.projectFolder = codeRepoPath;
@@ -701,6 +705,24 @@ export default class TheoryPlugin extends Plugin {
 		} catch (error) {
 			new Notice(`Setup vault failed: ${errorMessage(error)}`, 10000);
 			return false;
+		}
+	}
+
+	/**
+	 * Sets up a freshly installed vault, once. The request is dropped from plugin data first, so a failed
+	 * setup is never retried on its own; Setup vault in the command palette does that.
+	 */
+	private async setUpOnFirstLoad() {
+		this.setupOnLoad = false;
+		await this.saveSettings();
+		if (!this.isVaultSetUp()) {
+			await this.setUpVault();
+			return;
+		}
+		// A vault that already has git is left as it is.
+		const missing = await this.missingStarters();
+		if (missing.files.length > 0 || missing.gitignoreLines.length > 0) {
+			new Notice("theory.md is installed. This vault already uses git, so it was left as it is. Settings → theory.md can add the missing starter files.", 10000);
 		}
 	}
 
