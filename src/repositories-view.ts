@@ -3,6 +3,7 @@ import { projectRepos } from "./branches";
 import { timeAgo } from "./history-view";
 import type TheoryPlugin from "./main";
 import { findProjectRepos } from "./project";
+import { fastForwardRepo } from "./pull";
 import { PR_STATE_TEXT, STATUS_TEXT } from "./report-view";
 import {
 	NewRepository,
@@ -180,6 +181,19 @@ export class RepositoriesView extends ItemView {
 					kpi.remote.ahead === null
 						? "This branch isn't on origin"
 						: `${kpi.remote.ahead} ahead, ${kpi.remote.behind} behind origin`,
+			});
+		}
+		if (kpi.canPull) {
+			const pull = remote.createEl("button", { text: "Pull" });
+			pull.setAttr("title", `Fast-forward ${kpi.name} to its upstream`);
+			pull.addEventListener("click", async () => {
+				pull.disabled = true;
+				try {
+					if (await fastForwardRepo(kpi.path)) new Notice(`Pulled ${kpi.name}.`);
+				} catch (error) {
+					new Notice(`Couldn't pull ${kpi.name}: ${errorMessage(error)}`, 10000);
+				}
+				await this.refresh(false);
 			});
 		}
 	}

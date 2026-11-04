@@ -65,7 +65,7 @@ export async function dirtyRepos(projectFolder: string): Promise<string[]> {
 	return dirty;
 }
 
-function isCompileBranch(branch: string | null): boolean {
+export function isCompileBranch(branch: string | null): boolean {
 	return branch?.startsWith(COMPILE_BRANCH_PREFIX) === true;
 }
 

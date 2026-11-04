@@ -1,7 +1,9 @@
 import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
+import { hasOrigin } from "./github";
 import { findProjectRepos, pickFolder } from "./project";
+import { PULL_INTERVALS } from "./pull";
 import type TheoryPlugin from "./main";
 
 export interface AuthorSettings {
@@ -28,6 +30,12 @@ export interface TheorySettings extends AuthorSettings {
 	/** Passed to Claude Code as `--effort`, unless it's "" (Claude Code default). */
 	effort: CompileEffort;
 	showCompileButton: boolean;
+	/** Pull on launch, on focus and on the timer (CFG-25). */
+	pullAutomatically: boolean;
+	/** Minutes between timer pulls (CFG-26). */
+	pullInterval: number;
+	/** Each pull also pulls the code repositories (CFG-27). */
+	pullCodeRepos: boolean;
 }
 
 export const DEFAULT_SETTINGS: TheorySettings = {
@@ -44,6 +52,9 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	model: "",
 	effort: "",
 	showCompileButton: true,
+	pullAutomatically: true,
+	pullInterval: 5,
+	pullCodeRepos: true,
 };
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -126,6 +137,8 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		this.displayProject(containerEl.createDiv({ cls: "theory-project" }));
 
+		this.displayPull(containerEl.createDiv({ cls: "theory-pull-settings" }));
+
 		new Setting(containerEl)
 			.setName("Compile")
 			.setDesc(compileDescription(this.plugin.settings.agent))
@@ -192,6 +205,59 @@ export class TheorySettingTab extends PluginSettingTab {
 		// Settings never start the agent, not even to read its model list (AGT-25).
 		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
 		else this.displayClaudeCode(containerEl);
+	}
+
+	/** Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-28). */
+	private displayPull(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName("Pull")
+			.setDesc("Keeps the vault and the code up to date with their remotes. Pulls only ever fast-forward.")
+			.setHeading();
+		const noRemote = containerEl.createDiv({ cls: "setting-item-description theory-pull-no-remote" });
+		noRemote.hide();
+		if (this.plugin.isVaultSetUp()) {
+			hasOrigin(this.plugin.getVaultPath()).then((origin) => {
+				if (origin) return;
+				noRemote.setText("This vault has no remote, so its notes are never pulled.");
+				noRemote.show();
+			});
+		} else {
+			noRemote.setText("This vault has no remote, so its notes are never pulled.");
+			noRemote.show();
+		}
+
+		new Setting(containerEl)
+			.setName("Pull automatically")
+			.setDesc("Pull when Obsidian opens, when its window gets focus, and on a timer. Pull now and the pull before a compile always run.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.pullAutomatically).onChange(async (value) => {
+					this.plugin.settings.pullAutomatically = value;
+					await this.plugin.saveSettings();
+					this.plugin.restartPullTimer();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Check every")
+			.setDesc("How often the timer pulls.")
+			.addDropdown((dropdown) => {
+				for (const minutes of PULL_INTERVALS) dropdown.addOption(String(minutes), `${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
+				dropdown.setValue(String(this.plugin.settings.pullInterval)).onChange(async (value) => {
+					this.plugin.settings.pullInterval = Number(value);
+					await this.plugin.saveSettings();
+					this.plugin.restartPullTimer();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Also pull code repositories")
+			.setDesc("Each pull also fetches the repositories in the project folder, and fast-forwards those that are safe to.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.pullCodeRepos).onChange(async (value) => {
+					this.plugin.settings.pullCodeRepos = value;
+					await this.plugin.saveSettings();
+				}),
+			);
 	}
 
 	/** Model and thinking level as text, matched against the agent's choices at compile (AGT-6, AGT-23). */

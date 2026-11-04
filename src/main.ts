@@ -26,6 +26,7 @@ import { ExpandRun, startExpand } from "./expand";
 import { EXPAND_VIEW_TYPE, ExpandView } from "./expand-view";
 import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
+import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNotice } from "./pull";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
@@ -35,6 +36,7 @@ import {
 	authorName,
 	changedFiles,
 	commit,
+	git,
 	isVaultSetUp,
 	missingStarters,
 	setUpVault,
@@ -58,6 +60,8 @@ export default class TheoryPlugin extends Plugin {
 	private entryFiles = new EntryFiles(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
+	// True from the click until the compile runs or fails to start, so a second click can't start another.
+	private compileStarting = false;
 	// At most one Expand per repository at a time, keyed by its name.
 	private expandRuns = new Map<string, ExpandRun>();
 	private statusBar: HTMLElement | null = null;
@@ -69,6 +73,24 @@ export default class TheoryPlugin extends Plugin {
 			this.pullRequestsChanged();
 		},
 	});
+
+	puller = new Puller({
+		vaultPath: () => {
+			try {
+				return this.isVaultSetUp() ? this.getVaultPath() : null;
+			} catch {
+				return null;
+			}
+		},
+		projectFolder: () => this.settings.projectFolder,
+		automatic: () => this.settings.pullAutomatically,
+		pullCode: () => this.settings.pullCodeRepos,
+		ownEmail: () => this.ownEmail(),
+		compiling: () => this.isCompiling(),
+		changed: () => this.compileButton.render(),
+		pulled: (outcome, reason) => this.pulled(outcome, reason),
+	});
+	private pullTimer: number | null = null;
 
 	async onload() {
 		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
@@ -110,6 +132,11 @@ export default class TheoryPlugin extends Plugin {
 			callback: () => this.showRepositories(),
 		});
 		this.addRibbonIcon("folder-git-2", "Show repositories", () => this.showRepositories());
+		this.addCommand({
+			id: "pull-now",
+			name: "Pull now",
+			callback: () => this.pullNow(),
+		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
@@ -127,6 +154,8 @@ export default class TheoryPlugin extends Plugin {
 			await this.noteStatus.sync();
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
+			if (launching) this.puller.pull("launch");
+			this.restartPullTimer();
 		});
 		// A file explorer opened later gets the same sorting and the same entry files.
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.hiddenFolders.attach()));
@@ -174,6 +203,48 @@ export default class TheoryPlugin extends Plugin {
 		this.registerDomEvent(window, "focus", refreshCompileSoon);
 		// A pull request merged in the browser shows as merged on coming back. Never on a timer.
 		this.registerDomEvent(window, "focus", () => this.refreshPullRequestStates("focus"));
+		this.registerDomEvent(window, "focus", () => this.puller.pull("focus"));
+	}
+
+	/** Starts the pull timer again after its settings change (CFG-25, CFG-26). */
+	restartPullTimer() {
+		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
+		this.pullTimer = null;
+		if (!this.settings.pullAutomatically) return;
+		this.pullTimer = window.setInterval(() => this.puller.pull("timer"), this.settings.pullInterval * 60_000);
+	}
+
+	/** Pulls at once, even when automatic pulls are off (PULL-11). */
+	async pullNow() {
+		if (this.isCompiling()) new Notice("A compile is running. The pull runs once it ends.");
+		await this.puller.pull("now");
+	}
+
+	/** The email the engineer's own revisions are signed with: the settings', else git's. */
+	private async ownEmail(): Promise<string> {
+		if (this.settings.email) return this.settings.email;
+		try {
+			const { stdout } = await git(this.getVaultPath(), ["config", "--get", "user.email"]);
+			return stdout.trim();
+		} catch {
+			return "";
+		}
+	}
+
+	/** After a pull: names what changed in the vault (PULL-8) and redraws what shows git state. Code pulls stay silent. */
+	private async pulled(outcome: PullOutcome, reason: PullReason) {
+		if (outcome.vault?.kind === "pulled") {
+			new Notice(pulledNotice(outcome.vault), 8000);
+			this.refreshGitState();
+			this.overlay.sync();
+		} else if (reason === "now" && outcome.vault?.kind === "offline") {
+			new Notice(`Couldn't pull: ${outcome.vault.message}`, 10000);
+		}
+		if (outcome.repos.some((repo) => repo.pulled) || reason === "now") {
+			for (const leaf of this.app.workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)) {
+				if (leaf.view instanceof RepositoriesView) leaf.view.refresh(false);
+			}
+		}
 	}
 
 	onunload() {
@@ -185,6 +256,7 @@ export default class TheoryPlugin extends Plugin {
 		this.entryFiles.detach();
 		this.compileRun?.cancel();
 		for (const run of this.expandRuns.values()) run.cancel();
+		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
 	}
 
 	isExpanding(repo: string): boolean {
@@ -243,20 +315,41 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	isCompiling(): boolean {
-		return this.compileRun !== null;
+		return this.compileRun !== null || this.compileStarting;
 	}
 
 	/** Compiles every revision committed since the last compile. */
 	async compile() {
-		if (this.compileRun) {
+		if (this.isCompiling()) {
 			new Notice("A compile is already running.");
 			await this.showReportView();
 			return;
 		}
+		this.compileStarting = true;
+		try {
+			await this.runCompile();
+		} finally {
+			this.compileStarting = false;
+			this.compileRun = null;
+			this.compileButton.refresh();
+			// A pull that fell due during the compile runs now (PULL-4).
+			this.puller.compileEnded();
+		}
+	}
+
+	private async runCompile() {
 		let vaultPath: string;
 		let author: string;
 		try {
 			vaultPath = this.getVaultPath();
+			// The newest model into the newest code, even when automatic pulls are off (PULL-15).
+			const pull = await this.puller.pull("compile");
+			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? []);
+			if (gate.error) {
+				new Notice(`Compile failed: ${gate.error}`, 10000);
+				return;
+			}
+			if (gate.offline) new Notice("Couldn't reach the remote, so this compile uses the local vault and code.", 8000);
 			if (!this.isVaultSetUp()) {
 				new Notice("Set up the vault before compiling.");
 				return;
@@ -311,6 +404,7 @@ export default class TheoryPlugin extends Plugin {
 		}
 
 		this.compileRun = run;
+		this.compileStarting = false;
 		this.reports = [run.report, ...this.reports].slice(0, MAX_REPORTS);
 		this.statusBar?.setText("Compiling…");
 		this.statusBar?.show();
@@ -544,6 +638,7 @@ export default class TheoryPlugin extends Plugin {
 
 	/** Updates everything that shows git state after the repository changes. */
 	refreshGitState() {
+		this.puller.recount();
 		this.commitButtons.sync();
 		this.compileButton.refresh();
 		this.noteStatus.sync();
@@ -555,6 +650,7 @@ export default class TheoryPlugin extends Plugin {
 	async loadSettings() {
 		const { reports, codeRepoPath, repos, ...settings } = (await this.loadData()) ?? {};
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
 		// Earlier versions called the project folder the code repository, and briefly kept a list of repos.
 		if (!this.settings.projectFolder && typeof codeRepoPath === "string") this.settings.projectFolder = codeRepoPath;
 		this.reports = Array.isArray(reports) ? reports : [];

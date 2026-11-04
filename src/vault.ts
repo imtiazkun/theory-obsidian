@@ -27,10 +27,10 @@ export function isVaultSetUp(basePath: string): boolean {
 	return existsSync(join(basePath, ".git"));
 }
 
-export async function git(basePath: string, args: string[]) {
+export async function git(basePath: string, args: string[], env: Record<string, string> = {}) {
 	return run("git", args, {
 		cwd: basePath,
-		env: { ...process.env, PATH: toolPath() },
+		env: { ...process.env, PATH: toolPath(), ...env },
 		// Diffs of a large model can exceed the 1 MB default.
 		maxBuffer: 64 * 1024 * 1024,
 	});

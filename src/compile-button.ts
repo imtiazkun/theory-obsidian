@@ -4,6 +4,7 @@ import { projectRepos } from "./branches";
 import { pendingRevisionCount, timeLeft } from "./compile";
 import { expandRepoFor } from "./expand";
 import type TheoryPlugin from "./main";
+import { syncStatus } from "./pull";
 import { changedFiles } from "./vault";
 
 type CompileState =
@@ -27,11 +28,14 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /**
- * Floating bar at the bottom right of the editor area: an icon-only commit button and a
- * compile button that shows what Compile would do.
+ * Floating bar at the bottom right of the editor area: the sync status, an icon-only commit button
+ * and a compile button that shows what Compile would do.
  */
 export class CompileButton {
 	private barEl: HTMLElement;
+	private syncEl: HTMLButtonElement;
+	private syncLabelEl: HTMLElement;
+	private syncIconEl: HTMLElement;
 	private commitEl: HTMLButtonElement;
 	private expandEl: HTMLButtonElement;
 	private expandLabelEl: HTMLElement;
@@ -51,6 +55,14 @@ export class CompileButton {
 
 	constructor(private plugin: TheoryPlugin) {
 		this.barEl = createDiv({ cls: "theory-action-bar" });
+
+		// The sync status, left of the commit button, only when the vault has an origin (PULL-9).
+		this.syncEl = this.barEl.createEl("button", { cls: "theory-fab theory-sync-fab" });
+		this.syncIconEl = this.syncEl.createSpan({ cls: "theory-compile-fab-icon" });
+		this.syncLabelEl = this.syncEl.createSpan({ cls: "theory-compile-fab-label" });
+		this.syncEl.addEventListener("click", () => {
+			if (!this.plugin.puller.state.running) this.plugin.pullNow();
+		});
 
 		this.commitEl = this.barEl.createEl("button", { cls: "theory-fab theory-commit-fab" });
 		setIcon(this.commitEl, commitIcon());
@@ -82,6 +94,7 @@ export class CompileButton {
 		}
 		this.ticker ??= window.setInterval(() => {
 			if (this.state.compile.kind === "running") this.render();
+			else if (this.state.compile.kind !== "hidden") this.renderSync();
 		}, 1000);
 		// The root split's element isn't in Obsidian's public types, though every split has one.
 		const root = this.plugin.app.workspace.rootSplit as unknown as { containerEl: HTMLElement };
@@ -177,6 +190,7 @@ export class CompileButton {
 		const { compile } = this.state;
 		this.barEl.toggle(compile.kind !== "hidden");
 		if (compile.kind === "hidden") return;
+		this.renderSync();
 		this.renderCommit();
 		this.renderExpand();
 		this.renderCompile(compile);
@@ -205,6 +219,24 @@ export class CompileButton {
 	private onExpandClick() {
 		const repo = this.expandRepo();
 		if (repo && !this.plugin.isExpanding(repo)) this.plugin.expand(repo);
+	}
+
+	private renderSync() {
+		const status = syncStatus(this.plugin.puller.state, Date.now());
+		this.syncEl.toggle(status !== null);
+		if (!status) return;
+		for (const kind of ["pulling", "synced", "waiting", "diverged", "offline"]) this.syncEl.toggleClass(`is-${kind}`, status.kind === kind);
+		const icons: Record<string, string> = {
+			pulling: "loader",
+			synced: "cloud",
+			waiting: "clock",
+			diverged: "git-compare-arrows",
+			offline: "cloud-off",
+		};
+		setIcon(this.syncIconEl, icons[status.kind] ?? "cloud");
+		this.syncLabelEl.setText(status.label);
+		this.syncEl.setAttr("aria-disabled", String(status.kind === "pulling"));
+		setTooltip(this.syncEl, status.tooltip, { placement: "top" });
 	}
 
 	private renderCommit() {

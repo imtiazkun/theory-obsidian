@@ -7,6 +7,7 @@ import { COMPILED_TAG, type CompileReport } from "./compile";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
 import { REALIZED_KEY } from "./note-status";
+import { NO_PROMPT_ENV, repoPullState } from "./pull";
 import { type TemplateFields, modelFolderTexts } from "./templates";
 import { commit, git, identityArgs } from "./vault";
 
@@ -34,6 +35,8 @@ export interface RepoKpis extends CodeRepo {
 	model: { notes: number; unrealized: number; waiting: number } | null;
 	/** Null when the repository has no `origin`. */
 	remote: { url: string | null; ahead: number; behind: number } | { url: string | null; ahead: null; behind: null } | null;
+	/** True when the repository could fast-forward to its upstream (PULL-13), so its card offers Pull (REPO-24). */
+	canPull: boolean;
 }
 
 async function lastCommit(repoPath: string): Promise<{ date: Date; author: string } | null> {
@@ -110,6 +113,7 @@ export async function repoKpis(plugin: TheoryPlugin, repos: CodeRepo[]): Promise
 			compile: { last, openBranch },
 			model,
 			remote,
+			canPull: (await repoPullState(repo.path).catch(() => null))?.canFastForward === true,
 		});
 	}
 	return result;
@@ -120,7 +124,7 @@ export async function fetchAll(repos: CodeRepo[]): Promise<string[]> {
 	const failed: string[] = [];
 	for (const repo of repos) {
 		if (!(await hasOrigin(repo.path))) continue;
-		await git(repo.path, ["fetch", "--quiet"]).catch(() => failed.push(repo.name));
+		await git(repo.path, ["fetch", "--quiet"], NO_PROMPT_ENV).catch(() => failed.push(repo.name));
 	}
 	return failed;
 }

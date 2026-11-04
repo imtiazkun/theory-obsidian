@@ -66,6 +66,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/repositories.ts` | Repository KPIs, fetch, Add model folder and New repository steps and file texts |
 | `src/templates.ts` | Fills `_templates/index.md` and `_templates/instructions.md` for a new model folder, with the built-in text when a template is missing or empty |
 | `src/repositories-view.ts` | The Repositories page and the New repository form |
+| `src/pull.ts` | Pulls the vault and the code repositories, fast-forward only: the vault pull, the code pulls, the gate before a compile, the sync status text and the `Puller` that decides when a pull runs |
 
 ## 4. Settings
 
@@ -84,6 +85,9 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `model` | `""` | Passed to `--model` (`fable`, `opus`, `sonnet`, `haiku`). `""` passes nothing and Claude Code decides. |
 | `effort` | `""` | Passed to `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). `""` passes nothing. |
 | `showCompileButton` | `true` | Shows or hides the floating bar. |
+| `pullAutomatically` | `true` | Pull on launch, on focus and on the timer. Pull now and the pull before a compile run either way. |
+| `pullInterval` | `5` | Minutes between timer pulls: 1, 5, 15 or 30. |
+| `pullCodeRepos` | `true` | Each pull also fetches the project folder's repositories with an upstream and fast-forwards the safe ones. |
 
 ## 5. Lifecycle state machine (per vault)
 
@@ -112,8 +116,8 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 
 ### W1. Plugin load (`onload`)
 1. Load the settings and reports from plugin data. Any report still marked `running` becomes `failed` with the problem "Obsidian closed before this compile finished."
-2. Register the commands `setup-vault`, `show-commit-history`, `compile`, `show-compile-report`, `commit-current-note` and `show-repositories`, plus a ribbon hammer icon (Compile), a ribbon Repositories icon and a status bar item.
-3. When the layout is ready: open `Index.md` (only on app launch, not when the plugin is turned on mid-session), add the history view to the right sidebar, sync the commit buttons and attach and refresh the compile bar.
+2. Register the commands `setup-vault`, `show-commit-history`, `compile`, `show-compile-report`, `commit-current-note`, `show-repositories` and `pull-now`, plus a ribbon hammer icon (Compile), a ribbon Repositories icon and a status bar item.
+3. When the layout is ready: open `Index.md` (only on app launch, not when the plugin is turned on mid-session), add the history view to the right sidebar, sync the commit buttons and attach and refresh the compile bar. On launch, pull (W14) and start the pull timer.
 4. Event hooks: vault `modify/create/delete/rename`, workspace `layout-change/file-open` and window `focus` re-sync the buttons and the pending count (debounced).
 
 ### W2. Setup vault (command "Setup vault")
@@ -134,7 +138,8 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 **Trigger:** the compile button, the ribbon hammer or the command "Compile".
 
 **Phase A: checks in `main.ts`** (if one fails, it shows a notice and does nothing else)
-1. If a compile is already running, show "A compile is already running." and open the report. This is an in-memory lock, one compile per app.
+1. If a compile is already running (or starting), show "A compile is already running." and open the report. This is an in-memory lock, one compile per app.
+1a. Pull the vault and the code repositories (W14), even with automatic pulls off. A sync needed, waiting revisions or a repository that is behind and can't fast-forward stops the compile with "Compile failed: …". A failed fetch shows "Couldn't reach the remote, so this compile uses the local vault and code." and carries on.
 2. The vault must be set up.
 3. Count the uncommitted files and warn that they aren't part of this compile. Only committed revisions are compiled.
 
@@ -216,10 +221,16 @@ The right sidebar shows `git log --follow` for the active note (author, relative
 
 ### W12. Repositories page (`src/repositories-view.ts`)
 - **Opens** from the ribbon or "Show repositories", in a tab. One card per repository in the project folder, sorted by name; clicking the name opens the model folder's `index.md`. No project folder: a message and an Open settings button. A single-repository project folder: a message, and New repository is disabled. None: "No repositories yet. Create one to start."
-- **KPIs** (worked out each time, never stored): Code (branch, last commit when and who, uncommitted files), Compile (the newest report that added commits to it, or "Never compiled", and its open compile branch with the recorded pull request state), Model (notes in its model folder, how many are `realized: false`, how many are waiting for a compile), Remote (the GitHub `origin` link and ahead/behind `origin/<branch>`, or "No remote"). Opening never fetches or asks GitHub; the Refresh action runs `git fetch` in every repository first.
+- **KPIs** (worked out each time, never stored): Code (branch, last commit when and who, uncommitted files), Compile (the newest report that added commits to it, or "Never compiled", and its open compile branch with the recorded pull request state), Model (notes in its model folder, how many are `realized: false`, how many are waiting for a compile), Remote (the GitHub `origin` link and ahead/behind `origin/<branch>`, or "No remote"). Opening never fetches or asks GitHub; the Refresh action runs `git fetch` in every repository first. A card whose repository could fast-forward (W14) shows Pull, which fast-forwards that repository only.
 - **Add model folder:** for a repository without one, writes `index.md` and `instructions.md` from the templates (with `{{description}}` and `{{purpose}}` empty) and commits only those two as "Add model folder for {name}".
 - **Templates:** Add model folder and New repository read `_templates/index.md` and `_templates/instructions.md` at that moment (`modelFolderTexts`). `{{name}}`, `{{description}}` and `{{purpose}}` are replaced as typed; a line holding only an empty field's placeholder is dropped with the blank line after it; everything else stays. A missing or whitespace-only template gives the built-in text: the "What this repository is" heading with the description and purpose (or "Manifesting {name}" when both are empty), and the line pointing at the root Instructions. The templates are never committed with the model folder.
 - **New repository:** a form (name, description, purpose, stack, build/test/run commands, conventions, Create GitHub repository with visibility). Create checks the name, the author and `gh`, then makes `{name}/` in the project folder with `git init -b main`, `README.md` and `AGENTS.md` committed as "Initial commit"; then the model folder from the templates committed as "Add repository {name}"; then, when asked, `gh repo create --source . --remote origin --push`. The form's text goes in as typed. A failed step stops there and lists the steps done; nothing is deleted.
+
+### W14. Pull (`src/pull.ts`)
+- **When:** the vault pulls `main` from `origin` on launch, on window focus (skipped within 30 seconds of the last pull) and on the timer, when Pull automatically is on; on Pull now (command or a click on the sync status) and before every compile, always. A vault without `origin` never pulls. No pull runs during a compile; one that falls due waits for it to end. One pull at a time.
+- **Git:** `git fetch --no-tags origin` with prompts off (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`), so credentials fail with git's message instead of hanging. Then exactly one of: nothing new; fast-forward (`git merge --ff-only origin/main`) when only the remote moved and none of its commits touch a file with uncommitted changes, with the notice "Pulled N revisions by {authors}. Changed: {notes}." (the engineer's own revisions left out of the names); waiting, when they do touch one; sync needed, when both sides moved; offline, when the fetch failed. Never merges, rebases, commits, pushes, stashes, switches branches or moves the marker.
+- **Code:** with Also pull code repositories on, each pull also fetches every repository with an upstream, and fast-forwards it only when it isn't on a compile branch, has no uncommitted changes, and is behind with nothing of its own. Silent.
+- **Sync status:** left of the commit button, only with an `origin`: "Pulling…", "Synced {time} ago" (plus " · {n} not pushed"), "{n} waiting", "Sync needed", "Offline, {time} ago". Never "Up to date". Nothing is stored; it is lost on reload.
 
 ### W10. Compile history view
 A second right-sidebar tab, beside the commit history, lists the reports in plugin data, newest first: status, relative start time, who ran it (`report.author`: the settings name, else git's `user.name`) and the total tokens (`report.tokens`: input, output and cache tokens from the `usage` of Claude's `result` event; "tokens unknown" when Claude never reported it, e.g. on cancel). A click opens that report. It redraws whenever the report views do. Each compile shows its pull request states, which refresh when the view opens and on its Refresh action (see W11).
@@ -248,6 +259,8 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 | Situation | Where | Marker moves? | User sees |
 | --- | --- | --- | --- |
 | Compile already running | main | — | Notice, report tab opens |
+| The pull before it: sync needed, revisions waiting, or a repository can't fast-forward | main | No | "Compile failed: …" |
+| The pull before it can't reach a remote | main | — | Notice, the compile carries on with what is local |
 | Vault not set up | main | No | "Set up the vault before compiling." |
 | No project folder, or it doesn't exist | startCompile | No | "Compile failed: …" |
 | No commits in the vault | startCompile | No | "The vault has no commits yet…" |

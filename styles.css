@@ -524,6 +524,29 @@ body button.theory-fab:focus-visible {
 	box-shadow: 0 0 0 3px var(--background-modifier-border-focus);
 }
 
+/* Sync status, left of the commit button. Quieter than the buttons beside it. */
+body button.theory-sync-fab {
+	font-weight: var(--font-normal);
+}
+
+body button.theory-sync-fab svg {
+	width: 16px;
+	height: 16px;
+}
+
+body button.theory-sync-fab.is-waiting,
+body button.theory-sync-fab.is-diverged {
+	color: var(--text-warning);
+}
+
+body button.theory-sync-fab.is-offline {
+	color: var(--text-faint);
+}
+
+body button.theory-sync-fab[aria-disabled="true"] {
+	cursor: default;
+}
+
 /* Commit: a round, icon-only button. The accent dot marks uncommitted changes. */
 body button.theory-commit-fab {
 	width: 40px;
