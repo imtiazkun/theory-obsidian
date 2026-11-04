@@ -17,6 +17,10 @@ export interface TheorySettings extends AuthorSettings {
 	agent: CompileAgent;
 	/** The command that starts the ACP agent, with its arguments. Empty by default. */
 	agentCommand: string;
+	/** The ACP agent's model, matched by value or name at compile. "" means the agent's default. Kept apart from `model` (AGT-24). */
+	agentModel: string;
+	/** The ACP agent's thinking level, matched by value or name at compile. "" means the agent's default. Kept apart from `effort`. */
+	agentThinkingLevel: string;
 	permissionMode: PermissionMode;
 	allowedTools: string;
 	/** Passed to Claude Code as `--model`, unless it's "" (Claude Code default). */
@@ -33,6 +37,8 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	claudeCommand: "claude",
 	agent: "claude",
 	agentCommand: "",
+	agentModel: "",
+	agentThinkingLevel: "",
 	permissionMode: "acceptEdits",
 	allowedTools: "Bash(git *)",
 	model: "",
@@ -44,6 +50,20 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function isValidEmail(email: string): boolean {
 	return EMAIL_PATTERN.test(email);
+}
+
+/** The Compile heading's description, naming the agent that compiles (AGT-28). */
+export function compileDescription(agent: CompileAgent): string {
+	return agent === "acp"
+		? "Compile hands new revisions of the model to the ACP agent, which updates the code to match."
+		: "Compile hands new revisions of the model to Claude Code, which updates the code to match.";
+}
+
+/** The Claude Code command's description. With an ACP agent, Claude Code still runs everything but Compile (AGT-27). */
+export function claudeCommandDescription(agent: CompileAgent): string {
+	return agent === "acp"
+		? "The Claude Code CLI, as a command name or an absolute path. Used for Expand, commit messages and pull request bodies."
+		: "The Claude Code CLI, as a command name or an absolute path.";
 }
 
 export class TheorySettingTab extends PluginSettingTab {
@@ -108,7 +128,7 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Compile")
-			.setDesc("Compile hands new revisions of the model to Claude Code, which updates the code to match.")
+			.setDesc(compileDescription(this.plugin.settings.agent))
 			.setHeading();
 
 		new Setting(containerEl)
@@ -158,7 +178,7 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Claude Code command")
-			.setDesc("The Claude Code CLI, as a command name or an absolute path.")
+			.setDesc(claudeCommandDescription(this.plugin.settings.agent))
 			.addText((text) =>
 				text
 					.setPlaceholder("claude")
@@ -169,11 +189,43 @@ export class TheorySettingTab extends PluginSettingTab {
 					}),
 			);
 
+		// Settings never start the agent, not even to read its model list (AGT-25).
+		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
+		else this.displayClaudeCode(containerEl);
+	}
+
+	/** Model and thinking level as text, matched against the agent's choices at compile (AGT-6, AGT-23). */
+	private displayAcpAgent(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName("Agent model")
+			.setDesc(
+				"The model the agent compiles with, by its value or its name as the agent shows it. Empty means the agent's default. The activity log says which model the agent picked.",
+			)
+			.addText((text) =>
+				text.setValue(this.plugin.settings.agentModel).onChange(async (value) => {
+					this.plugin.settings.agentModel = value.trim();
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Agent thinking level")
+			.setDesc(
+				"How much the agent thinks while it compiles, by its value or its name as the agent shows it. Empty means the agent's default.",
+			)
+			.addText((text) =>
+				text.setValue(this.plugin.settings.agentThinkingLevel).onChange(async (value) => {
+					this.plugin.settings.agentThinkingLevel = value.trim();
+					await this.plugin.saveSettings();
+				}),
+			);
+	}
+
+	/** Model, effort, permission mode and allowed commands: Claude Code only (AGT-7, AGT-26). */
+	private displayClaudeCode(containerEl: HTMLElement) {
 		new Setting(containerEl)
 			.setName("Model")
-			.setDesc(
-				"The Claude model that compiles. An ACP agent gets it only when it offers a matching model. A change applies from the next compile.",
-			)
+			.setDesc("The Claude model that compiles. A change applies from the next compile.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("", "Claude Code default")
@@ -190,9 +242,7 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Effort")
-			.setDesc(
-				"How much Claude thinks while it compiles. An ACP agent gets it only when it offers a matching thinking level. A change applies from the next compile.",
-			)
+			.setDesc("How much Claude thinks while it compiles. A change applies from the next compile.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("", "Claude Code default")
@@ -211,7 +261,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Permission mode")
 			.setDesc(
-				"How much Claude may do without asking. Claude Code only: an ACP agent decides by itself what to ask about. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
+				"How much Claude may do without asking. Anything not allowed shows up in the compile report for you to allow or deny. Unanswered requests are denied after 120 seconds.",
 			)
 			.addDropdown((dropdown) =>
 				dropdown
@@ -228,7 +278,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Allowed commands")
 			.setDesc(
-				"Claude Code only. Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the request's rules here: every rule Claude Code suggests for a command (else the exact command), the exact file for a file tool. Writes to the model are always denied.",
+				"Claude Code permission rules, separated by spaces, for the commands Claude may run, e.g. Bash(npm run *). Always allow on a permission card adds the request's rules here: every rule Claude Code suggests for a command (else the exact command), the exact file for a file tool. Writes to the model are always denied.",
 			)
 			.addText((text) =>
 				text
@@ -301,7 +351,9 @@ export class TheorySettingTab extends PluginSettingTab {
 		if (folder) {
 			setting.descEl.createDiv({ cls: "theory-project-path", text: folder });
 		} else {
-			setting.setDesc("The folder holding this project's code. Compile runs Claude Code here.");
+			setting.setDesc(
+				`The folder holding this project's code. Compile runs ${this.plugin.settings.agent === "acp" ? "the ACP agent" : "Claude Code"} here.`,
+			);
 		}
 		if (folder) {
 			setting.addExtraButton((button) =>

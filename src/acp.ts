@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from "child_process";
 import { existsSync, realpathSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "path";
-import type { AgentHost, AgentOutcome, AgentRun, CompileEffort, CompileModel, PermissionAnswer, StructuredAnswer } from "./compile";
+import type { AgentHost, AgentOutcome, AgentRun, PermissionAnswer, StructuredAnswer } from "./compile";
 import { toolPath } from "./tool-path";
 
 /** After Cancel, an agent that hasn't stopped in this time is stopped by the plugin. */
@@ -231,27 +231,11 @@ function configValues(option: any): { value: string; name: string }[] {
 	return values;
 }
 
-/** The value matching the model alias, e.g. "opus" matches "claude-opus-4" or "Opus". */
-export function matchModel(options: { value: string; name: string }[], model: CompileModel): string | null {
-	if (!model) return null;
-	const found = options.find((o) => o.value.toLowerCase().includes(model) || o.name.toLowerCase().includes(model));
-	return found?.value ?? null;
-}
-
-const EFFORT_NAMES: Record<string, string[]> = {
-	low: ["low"],
-	medium: ["medium"],
-	high: ["high"],
-	xhigh: ["xhigh", "extra high", "extra-high", "x-high"],
-	max: ["max", "maximum"],
-};
-
-/** The value matching the effort level by its value or name, e.g. "xhigh" or "Extra high". */
-export function matchEffort(options: { value: string; name: string }[], effort: CompileEffort): string | null {
-	if (!effort) return null;
-	const names = EFFORT_NAMES[effort] ?? [effort];
-	const found = options.find((o) => names.includes(o.value.toLowerCase()) || names.includes(o.name.toLowerCase()));
-	return found?.value ?? null;
+/** The choice whose value or name is the wanted text, ignoring case and surrounding spaces (AGT-23). */
+export function matchChoice(options: { value: string; name: string }[], wanted: string): { value: string; name: string } | null {
+	const text = wanted.trim().toLowerCase();
+	if (!text) return null;
+	return options.find((o) => o.value.trim().toLowerCase() === text) ?? options.find((o) => o.name.trim().toLowerCase() === text) ?? null;
 }
 
 export interface AcpOptions {
@@ -262,8 +246,10 @@ export interface AcpOptions {
 	/** The vault and the snapshot: the agent may never write to them. */
 	protectedPaths: string[];
 	prompt: string;
-	model: CompileModel;
-	effort: CompileEffort;
+	/** The Agent model setting, matched against the agent's model choices. "" means the agent's default. */
+	model: string;
+	/** The Agent thinking level setting, matched against the agent's thinking-level choices. "" means the agent's default. */
+	thinkingLevel: string;
 }
 
 /** Runs an Agent Client Protocol agent over stdio for one compile. */
@@ -410,19 +396,20 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 		});
 	});
 
-	/** Picks the model or thinking level the settings ask for, when the agent offers a match (AGT-6). */
-	const choose = async (label: string, wanted: string, choice: Choice | null, match: (o: Choice["options"]) => string | null) => {
-		if (!wanted) return;
-		const value = choice ? match(choice.options) : null;
-		if (!choice || value === null) {
-			host.log(`The agent offers no ${label} matching "${wanted}", so it uses its default.`);
+	/** Picks the model or thinking level the settings ask for, when the agent offers a match (AGT-6, AGT-23). */
+	const choose = async (label: string, wanted: string, choice: Choice | null) => {
+		if (!wanted.trim()) return;
+		const picked = choice ? matchChoice(choice.options, wanted) : null;
+		if (!choice || !picked) {
+			host.log(`The agent has no ${label} matching "${wanted.trim()}", so it uses its default.`);
 			return;
 		}
+		const shown = picked.name === picked.value ? picked.value : `${picked.name} (${picked.value})`;
 		try {
-			await choice.set(value);
-			host.log(`Using ${label} ${value}.`);
+			await choice.set(picked.value);
+			host.log(`Using ${label} ${shown}.`);
 		} catch {
-			host.log(`The agent didn't accept ${label} ${value}, so it uses its default.`);
+			host.log(`The agent didn't accept ${label} ${shown}, so it uses its default.`);
 		}
 	};
 
@@ -457,8 +444,8 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 					set: (modelId) => call("session/set_model", { sessionId, modelId }),
 				};
 			}
-			await choose("model", options.model, modelChoice, (o) => matchModel(o, options.model));
-			await choose("thinking level", options.effort, configChoice("thought_level"), (o) => matchEffort(o, options.effort));
+			await choose("model", options.model, modelChoice);
+			await choose("thinking level", options.thinkingLevel, configChoice("thought_level"));
 
 			const result = await call("session/prompt", { sessionId, prompt: [{ type: "text", text: options.prompt }] });
 			return { stopReason: String(result?.stopReason ?? "") };

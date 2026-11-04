@@ -272,7 +272,8 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const { projectFolder, claudeCommand, agent, agentCommand, permissionMode, allowedTools, model, effort } = this.settings;
+		const { projectFolder, claudeCommand, agent, agentCommand, agentModel, agentThinkingLevel, permissionMode, allowedTools, model, effort } =
+			this.settings;
 		let run: CompileRun;
 		try {
 			run = await startCompile(
@@ -282,6 +283,8 @@ export default class TheoryPlugin extends Plugin {
 					claudeCommand,
 					agent,
 					agentCommand,
+					agentModel,
+					agentThinkingLevel,
 					permissionMode,
 					allowedTools,
 					model,

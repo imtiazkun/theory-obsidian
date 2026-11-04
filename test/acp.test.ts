@@ -6,8 +6,7 @@ import {
 	acpOptionId,
 	answerFromMessages,
 	lastJsonBlock,
-	matchEffort,
-	matchModel,
+	matchChoice,
 	modelChange,
 	refusedWrite,
 	splitCommand,
@@ -120,28 +119,25 @@ describe("ACP settings (AGT-5, AGT-6)", () => {
 		expect(splitCommand("  ")).toEqual([]);
 	});
 
-	it("matches the model and effort to the agent's choices", () => {
+	it("matches a setting to the agent's choices by value or by name (AGT-23)", () => {
 		const models = [
 			{ value: "claude-sonnet-5", name: "Sonnet" },
 			{ value: "claude-opus-5", name: "Opus" },
 		];
-		expect(matchModel(models, "opus")).toBe("claude-opus-5");
-		expect(matchModel(models, "haiku")).toBeNull();
-		expect(matchModel(models, "")).toBeNull();
+		expect(matchChoice(models, "claude-opus-5")).toEqual({ value: "claude-opus-5", name: "Opus" });
+		expect(matchChoice(models, " sonnet ")).toEqual({ value: "claude-sonnet-5", name: "Sonnet" });
+		expect(matchChoice(models, "opus-5")).toBeNull();
+		expect(matchChoice(models, "haiku")).toBeNull();
+		expect(matchChoice(models, "")).toBeNull();
 		const levels = [
 			{ value: "low", name: "Low" },
 			{ value: "x", name: "Extra high" },
 		];
-		expect(matchEffort(levels, "xhigh")).toBe("x");
-		expect(matchEffort(levels, "low")).toBe("low");
-		expect(matchEffort(levels, "max")).toBeNull();
+		expect(matchChoice(levels, "extra high")?.value).toBe("x");
+		expect(matchChoice(levels, "low")?.value).toBe("low");
 	});
 });
 
-/**
- * A small fake ACP agent. It answers initialize and session/new, then on session/prompt it runs the steps
- * in its plan file one by one, and records every answer it gets in its record file.
- */
 const FAKE_AGENT = `
 import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -170,8 +166,10 @@ async function handle(m) {
 	if (m.method === "initialize") return send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: {} } });
 	if (m.method === "session/new") {
 		extraFolder = m.params.additionalDirectories[0];
-		return send({ id: m.id, result: { sessionId: session } });
+		const offers = steps.find((step) => step.offers)?.offers ?? {};
+		return send({ id: m.id, result: { sessionId: session, ...offers } });
 	}
+	if (m.method === "session/set_model" || m.method === "session/set_config_option") return send({ id: m.id, result: {} });
 	if (m.method === "session/prompt") {
 		note({ prompt: m.params.prompt[0].text });
 		for (const step of steps) {
@@ -304,6 +302,38 @@ describe("compiling with an ACP agent", () => {
 		expect(session.additionalDirectories).toHaveLength(1);
 		expect(records.find((r) => r.received === "initialize")?.params.clientCapabilities.terminal).toBe(false);
 		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
+	});
+
+	it("picks the agent model and thinking level from the agent's choices, never Claude Code's (AGT-6, AGT-23, AGT-24)", async () => {
+		const s = await setup();
+		const offers = {
+			models: { availableModels: [{ modelId: "gemini-pro", name: "Gemini Pro" }, { modelId: "opus", name: "Opus" }] },
+			configOptions: [{ id: "thinking", category: "thought_level", options: [{ value: "hi", name: "High" }] }],
+		};
+		const run = await compile({
+			...s.options([{ offers }, answerStep()]),
+			model: "opus",
+			effort: "max",
+			agentModel: "Gemini Pro",
+			agentThinkingLevel: "high",
+		});
+		const report = await run.done;
+		expect(report.log).toContain("Using model Gemini Pro (gemini-pro).");
+		expect(report.log).toContain("Using thinking level High (hi).");
+		const records = s.records();
+		expect(records.find((r) => r.received === "session/set_model")?.params.modelId).toBe("gemini-pro");
+		expect(records.find((r) => r.received === "session/set_config_option")?.params).toMatchObject({ configId: "thinking", value: "hi" });
+	});
+
+	it("says the agent uses its default when it has no match, and sends nothing for empty fields (AGT-6, AGT-23)", async () => {
+		const s = await setup();
+		const offers = { models: { availableModels: [{ modelId: "gemini-pro", name: "Gemini Pro" }] } };
+		const run = await compile({ ...s.options([{ offers }, answerStep()]), agentModel: "gpt-9", model: "opus", effort: "high" });
+		const report = await run.done;
+		expect(report.log).toContain('The agent has no model matching "gpt-9", so it uses its default.');
+		expect(report.log.some((line) => line.includes("thinking level"))).toBe(false);
+		const records = s.records();
+		expect(records.some((r) => r.received === "session/set_model" || r.received === "session/set_config_option")).toBe(false);
 	});
 
 	it("fails without a structured answer when the last JSON block lacks a field", async () => {

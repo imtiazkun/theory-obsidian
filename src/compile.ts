@@ -76,6 +76,10 @@ export interface CompileOptions {
 	agent?: CompileAgent;
 	/** The command that starts the ACP agent, with its arguments. Used when `agent` is "acp". */
 	agentCommand?: string;
+	/** The ACP agent's model, by value or name. "" or unset means the agent's default. Never Claude Code's model (AGT-24). */
+	agentModel?: string;
+	/** The ACP agent's thinking level, by value or name. "" or unset means the agent's default. */
+	agentThinkingLevel?: string;
 	permissionMode: PermissionMode;
 	/** Space-separated Claude Code permission rules, e.g. `Bash(npm run *)`. */
 	allowedTools: string;
@@ -721,8 +725,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 							protectedPaths,
 							// Same prompt as Claude Code, plus the answer's shape, since ACP has none built in.
 							prompt: prompt + acpAnswerInstructions(),
-							model: options.model,
-							effort: options.effort,
+							model: options.agentModel ?? "",
+							thinkingLevel: options.agentThinkingLevel ?? "",
 						},
 						host,
 					)
