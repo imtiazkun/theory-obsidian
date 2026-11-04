@@ -159,10 +159,26 @@
 	animation: theory-sparkle-fade 2.4s ease-in-out infinite;
 }
 
-.theory-commit-generate.is-loading svg {
+/* While Claude writes, the sparkle blinks about once a second. It never spins (CMT-15). */
+.theory-commit-generate.is-generating svg {
 	animation:
-		theory-spin 1.2s linear infinite,
+		theory-sparkle-blink 1s ease-in-out infinite,
 		theory-sparkle-fade 2.4s ease-in-out infinite;
+}
+
+/* A disabled button must not dim the blink or draw anything around it. */
+.theory-commit-generate.is-generating:disabled {
+	opacity: 1;
+}
+
+@keyframes theory-sparkle-blink {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.15;
+	}
 }
 
 @keyframes theory-sparkle-fade {

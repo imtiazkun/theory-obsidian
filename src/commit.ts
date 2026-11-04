@@ -47,11 +47,11 @@ export class CommitModal extends Modal {
 		generate.addEventListener("click", async () => {
 			if (generate.disabled) return;
 			generate.disabled = true;
-			generate.addClass("is-loading");
+			generate.addClass("is-generating");
 			const paths = this.includeAll || !file ? [...(file ? [file.path] : []), ...this.otherChanges] : [file.path];
 			const generated = await this.plugin.generateCommitMessage(paths);
 			generate.disabled = false;
-			generate.removeClass("is-loading");
+			generate.removeClass("is-generating");
 			if (generated === null) return;
 			message.value = generated;
 			updateSubmit();
