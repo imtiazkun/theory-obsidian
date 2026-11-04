@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, rmSync } from "fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { MODEL_INSTRUCTIONS, starterFiles } from "../src/starter";
+import { MODEL_INSTRUCTIONS, WELCOME_TEXT, starterFiles } from "../src/starter";
 import { Author, addMissingStarterFiles, changedFiles, missingStarters, setUpVault } from "../src/vault";
 import { initRepo, out, tempFolder, write } from "./helpers";
 
@@ -39,6 +39,46 @@ describe("Setup vault", () => {
 		expect(existsSync(join(vault, "Instructions.md"))).toBe(false);
 		// The missing template goes into the folder that is already there.
 		expect(readFileSync(join(vault, "_Templates/instructions.md"), "utf8")).toBe(MODEL_INSTRUCTIONS);
+	});
+});
+
+describe("the welcome note", () => {
+	it("replaces Obsidian's Welcome.md with the welcome text, renames it to _welcome.md and commits it", async () => {
+		const vault = tempFolder();
+		write(vault, { "welcome.MD": "This is your new vault.\n" });
+		expect(await setUpVault(vault, AUTHOR, STARTERS)).toBe(true);
+
+		expect(readdirSync(vault).filter((name) => name.toLowerCase().includes("welcome"))).toEqual(["_welcome.md"]);
+		expect(readFileSync(join(vault, "_welcome.md"), "utf8")).toBe(WELCOME_TEXT);
+		expect(WELCOME_TEXT).toMatch(/^# Welcome to theory\.md\n/);
+		expect(await committed(vault)).toContain("_welcome.md");
+		expect(await changedFiles(vault)).toEqual([]);
+	});
+
+	it("isn't written when the vault has no Welcome.md", async () => {
+		const vault = tempFolder();
+		expect(await setUpVault(vault, AUTHOR, STARTERS)).toBe(false);
+		expect(readdirSync(vault).some((name) => name.toLowerCase().includes("welcome"))).toBe(false);
+	});
+
+	it("leaves both notes alone when _welcome.md exists", async () => {
+		const vault = tempFolder();
+		write(vault, { "Welcome.md": "Obsidian's\n", "_Welcome.md": "kept\n" });
+		expect(await setUpVault(vault, AUTHOR, STARTERS)).toBe(false);
+		expect(readFileSync(join(vault, "Welcome.md"), "utf8")).toBe("Obsidian's\n");
+		expect(readFileSync(join(vault, "_Welcome.md"), "utf8")).toBe("kept\n");
+	});
+
+	it("is never a missing starter file, and Create missing files never writes it back", async () => {
+		const vault = tempFolder();
+		write(vault, { "Welcome.md": "Obsidian's\n" });
+		await setUpVault(vault, AUTHOR, STARTERS);
+		rmSync(join(vault, "_welcome.md"));
+		await out(vault, ["commit", "-am", "Read it"]);
+
+		expect(await missingPaths(vault)).toEqual({ files: [], lines: [] });
+		expect(await addMissingStarterFiles(vault, AUTHOR, STARTERS)).toBe(0);
+		expect(existsSync(join(vault, "_welcome.md"))).toBe(false);
 	});
 });
 

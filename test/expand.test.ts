@@ -24,6 +24,7 @@ const VAULT = {
 	"app/flows/Login.md": "login\n",
 	"app/_drafts/Draft.md": "draft\n",
 	"app/.hidden/Secret.md": "secret\n",
+	"app/_Scratch.md": "scratch\n",
 	"other/index.md": "other index\n",
 };
 
@@ -45,13 +46,13 @@ describe("Expand: the context it sends", () => {
 		expect(context.names.sort()).toEqual(["Compile", "Login", "New", "index", "instructions"]);
 	});
 
-	it("never sends hidden folders, the root Instructions or other model folders", async () => {
+	it("never sends hidden folders, hidden notes, the root Instructions or other model folders", async () => {
 		const vault = tempFolder();
 		await initRepo(vault, VAULT);
 		const prompt = buildExpandPrompt(await expandContext(vault, "app"), true);
 		expect(prompt).toContain("app index");
 		expect(prompt).toContain("root index");
-		for (const text of ["for humans only", "draft", "secret", "template", "other index", "{}"]) {
+		for (const text of ["for humans only", "draft", "secret", "scratch", "_Scratch", "template", "other index", "{}"]) {
 			expect(prompt).not.toContain(text);
 		}
 	});

@@ -14,7 +14,7 @@ export function tempFolder(): string {
 }
 
 afterEach(() => {
-	for (const dir of folders.splice(0)) rmSync(dir, { recursive: true, force: true });
+	for (const dir of folders.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); // A git process may still be finishing.
 });
 
 /** Writes `files` (path relative to `root` → text), creating folders as needed. */

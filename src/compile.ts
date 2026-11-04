@@ -19,10 +19,11 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 // Larger diffs are cut; Claude can still read every file in the snapshot.
 const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
-// Git pathspecs for vault files that are never sent to Claude: hidden folders (name starts
-// with `_`, at any depth), Obsidian's config folder, and the human-only Instructions.md.
+// Git pathspecs for vault files that are never sent to Claude: hidden folders and hidden notes
+// (name starts with `_`, at any depth), Obsidian's config folder, and the human-only Instructions.md.
 export const NOT_SENT = [
 	":(exclude,glob)**/_*/**",
+	":(exclude,glob)**/_*",
 	":(exclude).obsidian/",
 	":(exclude,icase)instructions.md",
 	":(exclude,icase)instruction.md",

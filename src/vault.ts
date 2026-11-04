@@ -1,9 +1,9 @@
 import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { mkdir, readFile, readdir, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { promisify } from "util";
-import type { StarterFile } from "./starter";
+import { WELCOME_PATH, WELCOME_TEXT, type StarterFile } from "./starter";
 import { toolPath } from "./tool-path";
 
 const run = promisify(execFile);
@@ -141,18 +141,37 @@ async function addStarterFiles(basePath: string, files: StarterFile[]): Promise<
 	return written;
 }
 
-/** Turns the vault into a git repository whose initial commit includes the starter files. */
-export async function setUpVault(basePath: string, author: Author, starterFiles: StarterFile[]): Promise<void> {
-	if (isVaultSetUp(basePath)) return;
+/**
+ * Turns Obsidian's `Welcome.md` at the vault root into theory.md's welcome note, `_welcome.md` (SET-16).
+ * Writes nothing when there is no `Welcome.md`, or when `_welcome.md` already exists (SET-17).
+ * Returns whether it wrote the welcome note.
+ */
+export async function writeWelcome(basePath: string): Promise<boolean> {
+	if ((await findIgnoringCase(basePath, WELCOME_PATH)) !== null) return false;
+	const welcome = await findIgnoringCase(basePath, "Welcome.md");
+	if (welcome === null) return false;
+	await writeFile(join(basePath, welcome), WELCOME_TEXT);
+	await rename(join(basePath, welcome), join(basePath, WELCOME_PATH));
+	return true;
+}
+
+/**
+ * Turns the vault into a git repository whose initial commit includes the starter files and the
+ * welcome note. Returns whether it wrote the welcome note.
+ */
+export async function setUpVault(basePath: string, author: Author, starterFiles: StarterFile[]): Promise<boolean> {
+	if (isVaultSetUp(basePath)) return false;
 
 	// Check before `git init`, otherwise a failed commit leaves a half set-up repository.
 	const identity = await identityArgs(basePath, author);
 
 	await addStarterFiles(basePath, starterFiles);
+	const welcomed = await writeWelcome(basePath);
 	await git(basePath, ["init", "-b", "main"]);
 	await ensureGitignore(basePath);
 	await git(basePath, ["add", "-A"]);
 	await git(basePath, [...identity, "commit", "--allow-empty", "-m", "Initial commit"]);
+	return welcomed;
 }
 
 /**

@@ -28,7 +28,7 @@ import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNotice } from "./pull";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
-import { starterFiles } from "./starter";
+import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
 import {
 	MissingStarters,
@@ -585,36 +585,48 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/** Opens the vault's root Index.md, reusing its tab if it's already open. */
-	async openIndex() {
+	openIndex() {
+		return this.openRootNote("index.md");
+	}
+
+	/** Opens the note `name` at the vault root, matched ignoring case, reusing its tab if it's already open. */
+	private async openRootNote(name: string) {
 		const { vault, workspace } = this.app;
-		const index = vault
+		const note = vault
 			.getRoot()
-			.children.find((child) => child instanceof TFile && child.name.toLowerCase() === "index.md");
-		if (!(index instanceof TFile)) return;
+			.children.find((child) => child instanceof TFile && child.name.toLowerCase() === name);
+		if (!(note instanceof TFile)) return;
 
 		const existing = workspace
 			.getLeavesOfType("markdown")
-			.find((leaf) => leaf.view instanceof MarkdownView && leaf.view.file === index);
+			.find((leaf) => leaf.view instanceof MarkdownView && leaf.view.file === note);
 		if (existing) {
 			workspace.setActiveLeaf(existing, { focus: true });
 		} else {
-			await workspace.getLeaf(false).openFile(index);
+			await workspace.getLeaf(false).openFile(note);
 		}
 	}
 
-	/** Opens Index.md, waiting for Obsidian to notice it when setup has only just written it. */
-	private openIndexWhenReady() {
-		const isIndex = (file: TAbstractFile) => file.parent?.isRoot() === true && file.name.toLowerCase() === "index.md";
-		if (this.app.vault.getRoot().children.some(isIndex)) {
-			this.openIndex();
+	/**
+	 * Opens the root note `name` (lower case), waiting for Obsidian to notice it when setup has only just
+	 * written it or renamed it there.
+	 */
+	private openRootNoteWhenReady(name: string) {
+		const isNote = (file: TAbstractFile) => file.parent?.isRoot() === true && file.name.toLowerCase() === name;
+		if (this.app.vault.getRoot().children.some(isNote)) {
+			this.openRootNote(name);
 			return;
 		}
-		const ref = this.app.vault.on("create", (file) => {
-			if (!isIndex(file)) return;
-			this.app.vault.offref(ref);
-			this.openIndex();
-		});
-		this.registerEvent(ref);
+		const onFile = (file: TAbstractFile) => {
+			if (!isNote(file)) return;
+			this.app.vault.offref(created);
+			this.app.vault.offref(renamed);
+			this.openRootNote(name);
+		};
+		const created = this.app.vault.on("create", onFile);
+		const renamed = this.app.vault.on("rename", onFile);
+		this.registerEvent(created);
+		this.registerEvent(renamed);
 	}
 
 	/** Adds the commit history tab to the right sidebar if it isn't there yet. */
@@ -697,10 +709,11 @@ export default class TheoryPlugin extends Plugin {
 				new Notice("This vault is already set up.");
 				return true;
 			}
-			await setUpVault(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			const welcomed = await setUpVault(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			new Notice("Vault set up as a git repository with an initial commit.");
-			this.openIndexWhenReady();
+			// The welcome note says what to do first (SET-10).
+			this.openRootNoteWhenReady(welcomed ? WELCOME_PATH : "index.md");
 			return true;
 		} catch (error) {
 			new Notice(`Setup vault failed: ${errorMessage(error)}`, 10000);

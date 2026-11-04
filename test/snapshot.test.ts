@@ -13,13 +13,15 @@ function files(dir: string): string[] {
 }
 
 describe("the snapshot", () => {
-	it("leaves out hidden folders, `.obsidian/` and the root Instructions, and only holds committed text", async () => {
+	it("leaves out hidden folders, hidden notes, `.obsidian/` and the root Instructions, and only holds committed text", async () => {
 		const vault = tempFolder();
 		await initRepo(vault, {
 			"Index.md": "index\n",
 			"Instructions.md": "for humans\n",
 			".obsidian/app.json": "{}\n",
 			"_templates/Note.md": "template\n",
+			"_welcome.md": "for people\n",
+			"app/_Scratch.md": "for people\n",
 			"app/index.md": "app\n",
 			"app/instructions.md": "for Claude\n",
 			"app/_drafts/Draft.md": "draft\n",
