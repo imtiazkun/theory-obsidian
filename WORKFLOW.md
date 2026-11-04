@@ -48,6 +48,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |
 | `src/overlay.ts` | Failure overlay: CodeMirror highlights, the note banner, jump to spot, dismiss |
 | `src/note-status.ts` | Realized box and compile-state icon in each note's header |
+| `src/rule-count.ts`, `src/rule-count-header.ts` | The rule count left of the header icons: paragraphs and list items starting with a bold ID like `**PULL-6.**`, outside front matter and code blocks, from the note's text as it is now (never stored) |
 | `src/explorer.ts` | Hidden folders (name starts with `_`): wraps the file explorer's internal `getSortedFolderItems` to list them last, and removes the wrapper on unload. styles.css greys them out by `data-path`. Also marks `index.md`/`instructions.md` at the root and directly in a model folder (bold, house or scroll icon) with one stylesheet on the explorer rows' `data-path` (`entryFileSelector`): the file name matches ignoring case, the model folder's name must match the repository exactly. |
 | `src/compile-button.ts` | Floating bottom-right bar: commit button, Expand button (only on a model folder's `index.md`), and compile button with a state and pending count |
 | `src/report-view.ts` | Compile report tab, including permission cards and question suggestions |

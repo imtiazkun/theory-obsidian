@@ -960,3 +960,16 @@ body button.theory-expand-fab[aria-disabled="true"] {
 .theory-author-command code {
 	user-select: text;
 }
+
+/* The note header's rule count (HDR-9, HDR-13). */
+.theory-rule-count {
+	align-self: center;
+	margin-right: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.theory-rule-count.is-duplicate {
+	color: var(--text-warning);
+}

@@ -19,6 +19,7 @@ import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
+import { RuleCounts } from "./rule-count-header";
 import { EntryFiles, HiddenFolders } from "./explorer";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
@@ -62,6 +63,7 @@ export default class TheoryPlugin extends Plugin {
 	private compileButton = new CompileButton(this);
 	overlay = new FailureOverlay(this);
 	private noteStatus = new NoteStatus(this);
+	private ruleCounts = new RuleCounts(this);
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
 	// Single user for now, so the compile lock only has to hold within this app.
@@ -162,6 +164,7 @@ export default class TheoryPlugin extends Plugin {
 			await this.compileButton.refresh();
 			this.overlay.sync();
 			await this.noteStatus.sync();
+			this.ruleCounts.sync();
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
@@ -185,6 +188,13 @@ export default class TheoryPlugin extends Plugin {
 		// Fires when a note's front matter changes, e.g. after the realized box is clicked.
 		this.registerEvent(this.app.metadataCache.on("changed", syncStatusSoon));
 		this.registerDomEvent(window, "focus", syncStatusSoon);
+
+		// The rule count follows the text as the engineer types (HDR-11).
+		const syncRuleCounts = () => this.ruleCounts.sync();
+		this.registerEvent(this.app.workspace.on("layout-change", syncRuleCounts));
+		this.registerEvent(this.app.workspace.on("file-open", syncRuleCounts));
+		this.registerEvent(this.app.workspace.on("editor-change", debounce(syncRuleCounts, 300, true)));
+		this.registerEvent(this.app.vault.on("modify", debounce(syncRuleCounts, 300, true)));
 
 		this.registerEditorExtension(this.overlay.editorExtension());
 		const syncOverlay = () => this.overlay.sync();
@@ -260,6 +270,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileButton.detach();
 		this.overlay.removeAll();
 		this.noteStatus.removeAll();
+		this.ruleCounts.removeAll();
 		this.hiddenFolders.detach();
 		this.entryFiles.detach();
 		this.compileRun?.cancel();
