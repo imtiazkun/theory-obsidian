@@ -1,6 +1,6 @@
 {
   "name": "theory-md",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Obsidian plugin that keeps a human-written theoretical model of your software and compiles it into code with Claude Code",
   "scripts": {
     "dev": "node esbuild.config.mjs",

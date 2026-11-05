@@ -3,15 +3,20 @@ import { basename } from "path";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { hasOrigin } from "./github";
 import { findProjectRepos, pickFolder } from "./project";
-import { PULL_INTERVALS } from "./pull";
+import { PULL_INTERVALS, originUrl, remoteUrlProblem, saveOrigin } from "./pull";
 import type TheoryPlugin from "./main";
+import {
+	GIT_MISSING,
+	IDENTITY_COMMANDS,
+	type SavedAuthor,
+	gitIdentity,
+	isVaultSetUp,
+	missingIdentity,
+	savedAuthorOffer,
+	useSavedAuthor,
+} from "./vault";
 
-export interface AuthorSettings {
-	fullName: string;
-	email: string;
-}
-
-export interface TheorySettings extends AuthorSettings {
+export interface TheorySettings extends SavedAuthor {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
@@ -57,12 +62,6 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	pullCodeRepos: true,
 };
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-export function isValidEmail(email: string): boolean {
-	return EMAIL_PATTERN.test(email);
-}
-
 /** The Compile heading's description, naming the agent that compiles (AGT-28). */
 export function compileDescription(agent: CompileAgent): string {
 	return agent === "acp"
@@ -91,45 +90,9 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Author")
-			.setDesc("Used to sign the revisions you make in this vault.")
+			.setDesc("The name and email git signs this vault's commits with: the vault's own git config, else the global one.")
 			.setHeading();
-
-		new Setting(containerEl)
-			.setName("Full name")
-			.setDesc("Your name as it should appear in signatures.")
-			.addText((text) =>
-				text
-					.setPlaceholder("Jane Doe")
-					.setValue(this.plugin.settings.fullName)
-					.onChange(async (value) => {
-						this.plugin.settings.fullName = value.trim();
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		const emailSetting = new Setting(containerEl)
-			.setName("Email address")
-			.setDesc("Contact address shown next to your name.");
-		emailSetting.addText((text) => {
-			text.inputEl.type = "email";
-			text
-				.setPlaceholder("jane@example.com")
-				.setValue(this.plugin.settings.email)
-				.onChange(async (value) => {
-					const email = value.trim();
-					const valid = email === "" || isValidEmail(email);
-					text.inputEl.toggleClass("theory-invalid", !valid);
-					emailSetting.setDesc(
-						valid
-							? "Contact address shown next to your name."
-							: "This doesn't look like a valid email address.",
-					);
-					if (valid) {
-						this.plugin.settings.email = email;
-						await this.plugin.saveSettings();
-					}
-				});
-		});
+		this.displayAuthor(containerEl.createDiv({ cls: "theory-author" }));
 
 		new Setting(containerEl).setName("Vault").setHeading();
 
@@ -207,24 +170,73 @@ export class TheorySettingTab extends PluginSettingTab {
 		else this.displayClaudeCode(containerEl);
 	}
 
-	/** Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-28). */
+	/** The identity git signs with, read from git each time and never edited here (CFG-34 to CFG-37). */
+	private async displayAuthor(containerEl: HTMLElement) {
+		containerEl.empty();
+		const basePath = this.plugin.getVaultPath();
+		const identity = await gitIdentity(basePath);
+		if (identity.kind === "no-git") {
+			containerEl.createDiv({ cls: "setting-item-description theory-author-problem", text: GIT_MISSING });
+			return;
+		}
+		// What git has is shown as plain text, never as a field (CFG-34, CFG-36).
+		if (identity.name) new Setting(containerEl).setName("Name").setDesc(identity.name);
+		if (identity.email) new Setting(containerEl).setName("Email").setDesc(identity.email);
+		const missing = missingIdentity(identity);
+		if (missing.length === 0) return;
+
+		for (const key of missing) {
+			containerEl.createDiv({
+				cls: "setting-item-description theory-author-problem",
+				text: `Git has no ${key} to sign your commits with. Set it in a terminal:`,
+			});
+			const command = IDENTITY_COMMANDS[key];
+			const row = containerEl.createDiv({ cls: "theory-author-command" });
+			row.createEl("code", { text: command });
+			const copy = row.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Copy" } });
+			setIcon(copy, "copy");
+			copy.addEventListener("click", async () => {
+				await navigator.clipboard.writeText(command);
+				new Notice("Copied.");
+			});
+		}
+		const actions = new Setting(containerEl).addButton((button) =>
+			button.setButtonText("Check again").onClick(() => this.displayAuthor(containerEl)),
+		);
+		const offer = savedAuthorOffer(identity, this.plugin.settings);
+		if (offer && isVaultSetUp(basePath)) {
+			actions.addButton((button) =>
+				button
+					.setButtonText(`Use ${offer.name} <${offer.email}> for this vault`)
+					.setCta()
+					.onClick(async () => {
+						try {
+							await useSavedAuthor(basePath, offer);
+						} catch (error) {
+							new Notice(`Couldn't save the author: ${error instanceof Error ? error.message : String(error)}`, 10000);
+						}
+						this.displayAuthor(containerEl);
+					}),
+			);
+		}
+	}
+
+	/** Remote, Pull automatically, Check every and Also pull code repositories (CFG-25 to CFG-33). */
 	private displayPull(containerEl: HTMLElement) {
 		new Setting(containerEl)
 			.setName("Pull")
 			.setDesc("Keeps the vault and the code up to date with their remotes. Pulls only ever fast-forward.")
 			.setHeading();
 		const noRemote = containerEl.createDiv({ cls: "setting-item-description theory-pull-no-remote" });
+		noRemote.setText("This vault has no remote, so its notes are never pulled. Add one below.");
 		noRemote.hide();
-		if (this.plugin.isVaultSetUp()) {
-			hasOrigin(this.plugin.getVaultPath()).then((origin) => {
-				if (origin) return;
-				noRemote.setText("This vault has no remote, so its notes are never pulled.");
-				noRemote.show();
-			});
+		const setUp = this.plugin.isVaultSetUp();
+		if (setUp) {
+			hasOrigin(this.plugin.getVaultPath()).then((origin) => noRemote.toggle(!origin));
 		} else {
-			noRemote.setText("This vault has no remote, so its notes are never pulled.");
 			noRemote.show();
 		}
+		this.displayRemote(containerEl, setUp, noRemote);
 
 		new Setting(containerEl)
 			.setName("Pull automatically")
@@ -258,6 +270,81 @@ export class TheorySettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 			);
+	}
+
+	/**
+	 * The vault's `origin`, which lives in its git config rather than the plugin's data (CFG-29 to CFG-33).
+	 * An existing `origin` is shown as plain text and only changed in git; Save only ever adds one.
+	 */
+	private displayRemote(containerEl: HTMLElement, setUp: boolean, noRemote: HTMLElement) {
+		const setting = new Setting(containerEl).setName("Remote");
+		setting.settingEl.addClass("theory-remote-setting");
+		if (!setUp) {
+			this.displayRemoteField(setting, false, noRemote);
+			return;
+		}
+		originUrl(this.plugin.getVaultPath()).then((url) => {
+			if (url === null) {
+				this.displayRemoteField(setting, true, noRemote);
+				return;
+			}
+			const desc = createFragment((fragment) => {
+				fragment.createDiv({ cls: "theory-remote-current", text: url });
+				const hint = fragment.createDiv();
+				hint.appendText("To change it, run ");
+				hint.createEl("code", { text: "git remote set-url origin <url>" });
+				hint.appendText(" in the vault.");
+			});
+			setting.setDesc(desc);
+		});
+	}
+
+	/** The empty field and Save button for a vault without an `origin` (CFG-29, CFG-30). */
+	private displayRemoteField(setting: Setting, setUp: boolean, noRemote: HTMLElement) {
+		let value = "";
+		const save = async () => {
+			if (!setUp) return;
+			const problem = remoteUrlProblem(value);
+			if (problem) {
+				new Notice(problem);
+				return;
+			}
+			let saved: "added" | "exists";
+			try {
+				saved = await saveOrigin(this.plugin.getVaultPath(), value);
+			} catch (error) {
+				new Notice(`Couldn't save the remote: ${error instanceof Error ? error.message : String(error)}`, 10000);
+				return;
+			}
+			if (saved === "exists") {
+				// Added in git since the settings opened: show it rather than replace it.
+				this.display();
+				return;
+			}
+			noRemote.hide();
+			new Notice("Remote saved. Pulling…");
+			await this.plugin.puller.checkOrigin();
+			await this.plugin.pullNow();
+			this.display();
+		};
+		setting
+			.setDesc(setUp ? "The git URL the vault pulls from, its origin." : "Set up the vault first.")
+			.addText((text) => {
+				text.setPlaceholder("git@github.com:team/model.git").setDisabled(!setUp);
+				text.inputEl.addClass("theory-remote-url");
+				text.onChange((next) => (value = next.trim()));
+				text.inputEl.addEventListener("keydown", (event) => {
+					if (event.key === "Enter") save();
+				});
+			})
+			.addButton((button) => button.setButtonText("Save").setDisabled(!setUp).onClick(() => save()));
+	}
+
+	/** Scrolls to the Remote setting, for "Add a remote…" in the sync menu (PULL-20). */
+	revealRemote() {
+		const field = this.containerEl.querySelector<HTMLElement>(".theory-remote-setting");
+		field?.scrollIntoView({ block: "center" });
+		field?.querySelector<HTMLInputElement>("input")?.focus();
 	}
 
 	/** Model and thinking level as text, matched against the agent's choices at compile (AGT-6, AGT-23). */

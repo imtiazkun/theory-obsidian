@@ -62,7 +62,7 @@ Say which version was installed, into which vault, and that these steps are thei
 
 - **Trust the plugin.** If Obsidian asks whether to trust the vault's plugins, or Community plugins is in Restricted mode, they turn that off. theory.md then loads.
 - **Setup vault runs by itself** on that first load: it makes the vault a git repository with `Index.md`, `Instructions.md`, `_templates/` and a first commit signed with their name. A vault that already uses git is left as it is.
-- **Name and email.** If the script warned that git has no `user.name` or `user.email`, they enter them under Settings → theory.md and run **theory.md: Setup vault** from the command palette.
+- **Name and email.** If the script warned that git has no `user.name` or `user.email`, they set them with `git config --global user.name "Their Name"` and `git config --global user.email "them@example.com"`, then run **theory.md: Setup vault** from the command palette. theory.md signs commits with the name and email git uses.
 - **Claude Code.** Compile needs the [Claude Code CLI](https://claude.com/claude-code), signed in. If the script warned that it isn't on PATH, say so. **Create PR** also needs the [GitHub CLI](https://cli.github.com) signed in (`gh auth status`).
 - **Allowed commands.** Under Settings → theory.md → Compile, they add the commands Claude may run in their project, like `Bash(npm run *)`.
 

@@ -58,8 +58,8 @@ describe("install.sh", () => {
 			expect(readFileSync(join(pluginDir(target), file), "utf8")).toBe(readFileSync(join(from, file), "utf8"));
 		}
 		expect(enabled(target)).toEqual(["theory-md"]);
-		// The author comes from the git config test/setup.ts gives every test.
-		expect(data(target)).toEqual({ fullName: "Test Author", email: "test@example.com", projectFolder: project, setupOnLoad: true });
+		// No author is saved: commits are signed with the name and email git uses (CFG-34).
+		expect(data(target)).toEqual({ projectFolder: project, setupOnLoad: true });
 		// Notes and git are the plugin's business, never the script's.
 		expect(existsSync(join(target, ".git"))).toBe(false);
 		expect(existsSync(join(target, "Index.md"))).toBe(false);

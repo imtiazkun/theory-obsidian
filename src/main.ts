@@ -19,7 +19,10 @@ import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
-import { EntryFiles, HiddenFolders } from "./explorer";
+import { RuleCounts } from "./rule-count-header";
+import { ChangeDots, EntryFiles, HiddenFolders } from "./explorer";
+import { Comments } from "./comments-ui";
+import { COMMENTS_VIEW_TYPE, CommentsView } from "./comments-view";
 import { CREATE_PR_VIEW_TYPE, CreatePullRequestView } from "./create-pr-view";
 import { pullRequestState } from "./github";
 import { ExpandRun, startExpand } from "./expand";
@@ -28,22 +31,28 @@ import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNotice } from "./pull";
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
-import { starterFiles } from "./starter";
+import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
 import {
+	IdentityError,
 	MissingStarters,
 	addMissingStarterFiles,
-	authorName,
 	changedFiles,
 	commit,
-	git,
+	gitIdentity,
 	isVaultSetUp,
 	missingStarters,
+	requireIdentity,
 	setUpVault,
 } from "./vault";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** "{prefix}: {reason}", except for a git identity problem, which is shown as it is (CMT-11). */
+function failure(prefix: string, error: unknown): string {
+	return error instanceof IdentityError ? error.message : `${prefix}: ${errorMessage(error)}`;
 }
 
 const MAX_REPORTS = 20;
@@ -56,8 +65,11 @@ export default class TheoryPlugin extends Plugin {
 	private compileButton = new CompileButton(this);
 	overlay = new FailureOverlay(this);
 	private noteStatus = new NoteStatus(this);
+	private ruleCounts = new RuleCounts(this);
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
+	private changeDots = new ChangeDots(this);
+	comments = new Comments(this);
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
@@ -91,6 +103,7 @@ export default class TheoryPlugin extends Plugin {
 		pulled: (outcome, reason) => this.pulled(outcome, reason),
 	});
 	private pullTimer: number | null = null;
+	private settingTab: TheorySettingTab | null = null;
 	// Set by scripts/install.sh on a first install: run Setup vault once, on the first load.
 	private setupOnLoad = false;
 
@@ -98,7 +111,8 @@ export default class TheoryPlugin extends Plugin {
 		// Obsidian opened from the Dock doesn't read the shell's startup files, so take the login shell's PATH.
 		await loadToolPath();
 		await this.loadSettings();
-		this.addSettingTab(new TheorySettingTab(this.app, this));
+		this.settingTab = new TheorySettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.addCommand({
 			id: "setup-vault",
@@ -139,6 +153,17 @@ export default class TheoryPlugin extends Plugin {
 			name: "Pull now",
 			callback: () => this.pullNow(),
 		});
+		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsView(leaf, this));
+		this.addCommand({
+			id: "comment-on-selection",
+			name: "Comment on selection",
+			callback: () => this.comments.commentOnSelection(),
+		});
+		this.addCommand({
+			id: "show-comments",
+			name: "Show comments",
+			callback: () => this.showComments(null),
+		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
@@ -149,14 +174,20 @@ export default class TheoryPlugin extends Plugin {
 			if (launching) await this.openIndex();
 			await this.showHistoryView(false);
 			await this.showCompileHistoryView();
+			await this.showCommentsView();
+			await this.comments.refresh();
 			await this.commitButtons.sync();
 			this.compileButton.attach();
 			await this.compileButton.refresh();
 			this.overlay.sync();
 			await this.noteStatus.sync();
+			this.ruleCounts.sync();
 			this.hiddenFolders.attach();
 			this.entryFiles.sync();
+			await this.changeDots.sync();
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
+			// The sync status shows "No remote" or "Not pulled yet" even when no pull runs (PULL-9).
+			await this.puller.checkOrigin();
 			if (launching) this.puller.pull("launch");
 			this.restartPullTimer();
 		});
@@ -168,6 +199,15 @@ export default class TheoryPlugin extends Plugin {
 			this.registerEvent(this.app.vault.on(event as "create", syncEntryFiles));
 		}
 
+		// The change dots refresh when a file changes and when the window gets focus (UI-29).
+		const syncDotsSoon = debounce(() => this.changeDots.sync(), 800, true);
+		for (const event of ["modify", "create", "delete", "rename"] as const) {
+			this.registerEvent(this.app.vault.on(event as "modify", syncDotsSoon));
+		}
+		this.registerDomEvent(window, "focus", syncDotsSoon);
+		// A new or redrawn explorer gets the dots it already knows.
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.changeDots.render()));
+
 		const syncStatus = () => this.noteStatus.sync();
 		const syncStatusSoon = debounce(syncStatus, 800, true);
 		this.registerEvent(this.app.workspace.on("layout-change", syncStatus));
@@ -175,6 +215,29 @@ export default class TheoryPlugin extends Plugin {
 		// Fires when a note's front matter changes, e.g. after the realized box is clicked.
 		this.registerEvent(this.app.metadataCache.on("changed", syncStatusSoon));
 		this.registerDomEvent(window, "focus", syncStatusSoon);
+
+		// The rule count follows the text as the engineer types (HDR-11).
+		const syncRuleCounts = () => this.ruleCounts.sync();
+		this.registerEvent(this.app.workspace.on("layout-change", syncRuleCounts));
+		this.registerEvent(this.app.workspace.on("file-open", syncRuleCounts));
+		this.registerEvent(this.app.workspace.on("editor-change", debounce(syncRuleCounts, 300, true)));
+		this.registerEvent(this.app.vault.on("modify", debounce(syncRuleCounts, 300, true)));
+
+		// Comments: the button over a selection, the underlines, and the comment file following its note (CMNT-3, CMNT-15, CMNT-24).
+		this.registerDomEvent(document, "selectionchange", debounce(() => this.comments.selectionChanged(), 150, true));
+		this.registerEditorExtension(this.comments.editorExtension());
+		this.registerMarkdownPostProcessor(this.comments.postProcessor());
+		this.registerEvent(this.app.workspace.on("file-open", () => this.comments.refresh()));
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (file instanceof TFile) this.comments.renamed(file, oldPath);
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (file instanceof TFile) this.comments.deleted(file);
+			}),
+		);
 
 		this.registerEditorExtension(this.overlay.editorExtension());
 		const syncOverlay = () => this.overlay.sync();
@@ -223,15 +286,10 @@ export default class TheoryPlugin extends Plugin {
 		await this.puller.pull("now");
 	}
 
-	/** The email the engineer's own revisions are signed with: the settings', else git's. */
+	/** The email the engineer's own revisions are signed with: the one git uses (CFG-34). */
 	private async ownEmail(): Promise<string> {
-		if (this.settings.email) return this.settings.email;
-		try {
-			const { stdout } = await git(this.getVaultPath(), ["config", "--get", "user.email"]);
-			return stdout.trim();
-		} catch {
-			return "";
-		}
+		const identity = await gitIdentity(this.getVaultPath());
+		return identity.kind === "found" ? identity.email : "";
 	}
 
 	/** After a pull: names what changed in the vault (PULL-8) and redraws what shows git state. Code pulls stay silent. */
@@ -240,6 +298,8 @@ export default class TheoryPlugin extends Plugin {
 			new Notice(pulledNotice(outcome.vault), 8000);
 			this.refreshGitState();
 			this.overlay.sync();
+			// A pull may bring new comments (CMNT-23).
+			this.comments.refresh();
 		} else if (reason === "now" && outcome.vault?.kind === "offline") {
 			new Notice(`Couldn't pull: ${outcome.vault.message}`, 10000);
 		}
@@ -255,8 +315,11 @@ export default class TheoryPlugin extends Plugin {
 		this.compileButton.detach();
 		this.overlay.removeAll();
 		this.noteStatus.removeAll();
+		this.ruleCounts.removeAll();
 		this.hiddenFolders.detach();
 		this.entryFiles.detach();
+		this.changeDots.detach();
+		this.comments.removeAll();
 		this.compileRun?.cancel();
 		for (const run of this.expandRuns.values()) run.cancel();
 		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
@@ -362,9 +425,9 @@ export default class TheoryPlugin extends Plugin {
 				const count = uncommitted.length;
 				new Notice(`${count} uncommitted ${count === 1 ? "file isn't" : "files aren't"} part of this compile.`);
 			}
-			author = await authorName(vaultPath, this.settings);
+			author = (await requireIdentity(vaultPath)).name;
 		} catch (error) {
-			new Notice(`Compile failed: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Compile failed", error), 10000);
 			return;
 		}
 
@@ -425,6 +488,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileButton.refresh();
 		this.overlay.sync();
 		this.noteStatus.sync();
+		this.changeDots.sync();
 		const questions = report.questions.length;
 		const extra = questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
 		if (report.status === "succeeded") new Notice(`Compile finished.${extra}`);
@@ -452,11 +516,13 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/** Opens theory.md's tab in Obsidian settings. */
-	openSettings() {
+	/** Opens the plugin's settings, at Remote for "Add a remote…" (PULL-20). */
+	openSettings(at?: "remote") {
 		// `setting` isn't in Obsidian's public types, but it's the only way to open a plugin's tab.
 		const setting = (this.app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
 		setting.open();
 		setting.openTabById(this.manifest.id);
+		if (at === "remote") window.setTimeout(() => this.settingTab?.revealRemote(), 50);
 	}
 
 	/** Opens the compile report in a main tab, reusing it if it's already open. */
@@ -541,9 +607,10 @@ export default class TheoryPlugin extends Plugin {
 				return;
 			}
 			const others = changed.filter((path) => path !== file.path);
-			new CommitModal(this.app, this, file, others).open();
+			const signer = await requireIdentity(this.getVaultPath());
+			new CommitModal(this.app, this, file, others, signer).open();
 		} catch (error) {
-			new Notice(`Couldn't read changes: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Couldn't read changes", error), 10000);
 		}
 	}
 
@@ -555,21 +622,22 @@ export default class TheoryPlugin extends Plugin {
 				new Notice("No changes to commit.");
 				return;
 			}
-			new CommitModal(this.app, this, null, changed).open();
+			const signer = await requireIdentity(this.getVaultPath());
+			new CommitModal(this.app, this, null, changed, signer).open();
 		} catch (error) {
-			new Notice(`Couldn't read changes: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Couldn't read changes", error), 10000);
 		}
 	}
 
 	/** Returns true when the commit was made. */
 	async commitChanges(message: string, paths: string[] | "all"): Promise<boolean> {
 		try {
-			const hash = await commit(this.getVaultPath(), this.settings, message, paths);
+			const hash = await commit(this.getVaultPath(), message, paths);
 			new Notice(`Committed ${hash}`);
 			this.refreshGitState();
 			return true;
 		} catch (error) {
-			new Notice(`Commit failed: ${errorMessage(error)}`, 10000);
+			new Notice(failure("Commit failed", error), 10000);
 			return false;
 		}
 	}
@@ -585,36 +653,48 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/** Opens the vault's root Index.md, reusing its tab if it's already open. */
-	async openIndex() {
+	openIndex() {
+		return this.openRootNote("index.md");
+	}
+
+	/** Opens the note `name` at the vault root, matched ignoring case, reusing its tab if it's already open. */
+	private async openRootNote(name: string) {
 		const { vault, workspace } = this.app;
-		const index = vault
+		const note = vault
 			.getRoot()
-			.children.find((child) => child instanceof TFile && child.name.toLowerCase() === "index.md");
-		if (!(index instanceof TFile)) return;
+			.children.find((child) => child instanceof TFile && child.name.toLowerCase() === name);
+		if (!(note instanceof TFile)) return;
 
 		const existing = workspace
 			.getLeavesOfType("markdown")
-			.find((leaf) => leaf.view instanceof MarkdownView && leaf.view.file === index);
+			.find((leaf) => leaf.view instanceof MarkdownView && leaf.view.file === note);
 		if (existing) {
 			workspace.setActiveLeaf(existing, { focus: true });
 		} else {
-			await workspace.getLeaf(false).openFile(index);
+			await workspace.getLeaf(false).openFile(note);
 		}
 	}
 
-	/** Opens Index.md, waiting for Obsidian to notice it when setup has only just written it. */
-	private openIndexWhenReady() {
-		const isIndex = (file: TAbstractFile) => file.parent?.isRoot() === true && file.name.toLowerCase() === "index.md";
-		if (this.app.vault.getRoot().children.some(isIndex)) {
-			this.openIndex();
+	/**
+	 * Opens the root note `name` (lower case), waiting for Obsidian to notice it when setup has only just
+	 * written it or renamed it there.
+	 */
+	private openRootNoteWhenReady(name: string) {
+		const isNote = (file: TAbstractFile) => file.parent?.isRoot() === true && file.name.toLowerCase() === name;
+		if (this.app.vault.getRoot().children.some(isNote)) {
+			this.openRootNote(name);
 			return;
 		}
-		const ref = this.app.vault.on("create", (file) => {
-			if (!isIndex(file)) return;
-			this.app.vault.offref(ref);
-			this.openIndex();
-		});
-		this.registerEvent(ref);
+		const onFile = (file: TAbstractFile) => {
+			if (!isNote(file)) return;
+			this.app.vault.offref(created);
+			this.app.vault.offref(renamed);
+			this.openRootNote(name);
+		};
+		const created = this.app.vault.on("create", onFile);
+		const renamed = this.app.vault.on("rename", onFile);
+		this.registerEvent(created);
+		this.registerEvent(renamed);
 	}
 
 	/** Adds the commit history tab to the right sidebar if it isn't there yet. */
@@ -639,10 +719,38 @@ export default class TheoryPlugin extends Plugin {
 		await right.setViewState({ type: COMPILE_HISTORY_VIEW_TYPE, active: false });
 	}
 
+	/** Adds the Comments tab to the right sidebar, beside commit history and compile history (UI-23). */
+	private async showCommentsView() {
+		const { workspace } = this.app;
+		if (workspace.getLeavesOfType(COMMENTS_VIEW_TYPE).length > 0) return;
+		const right = workspace.getRightLeaf(false);
+		if (!right) return;
+		await right.setViewState({ type: COMMENTS_VIEW_TYPE, active: false });
+	}
+
+	/** Opens the Comments view, at one thread when `threadId` is given (CMNT-24). */
+	async showComments(threadId: string | null) {
+		await this.showCommentsView();
+		const leaf = this.app.workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)[0];
+		if (!leaf) return;
+		await this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof CommentsView) {
+			if (threadId) await leaf.view.showThread(threadId);
+			else await leaf.view.refresh();
+		}
+	}
+
+	refreshCommentsViews() {
+		for (const leaf of this.app.workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)) {
+			if (leaf.view instanceof CommentsView) leaf.view.refresh();
+		}
+	}
+
 	/** Updates everything that shows git state after the repository changes. */
 	refreshGitState() {
 		this.puller.recount();
 		this.commitButtons.sync();
+		this.changeDots.sync();
 		this.compileButton.refresh();
 		this.noteStatus.sync();
 		for (const leaf of this.app.workspace.getLeavesOfType(HISTORY_VIEW_TYPE)) {
@@ -697,10 +805,11 @@ export default class TheoryPlugin extends Plugin {
 				new Notice("This vault is already set up.");
 				return true;
 			}
-			await setUpVault(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			const welcomed = await setUpVault(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			new Notice("Vault set up as a git repository with an initial commit.");
-			this.openIndexWhenReady();
+			// The welcome note says what to do first (SET-10).
+			this.openRootNoteWhenReady(welcomed ? WELCOME_PATH : "index.md");
 			return true;
 		} catch (error) {
 			new Notice(`Setup vault failed: ${errorMessage(error)}`, 10000);
@@ -734,7 +843,7 @@ export default class TheoryPlugin extends Plugin {
 	/** Writes the missing starter files and commits only them. */
 	async addMissingStarterFiles(): Promise<void> {
 		try {
-			const added = await addMissingStarterFiles(this.getVaultPath(), this.settings, starterFiles(this.app.vault.getName()));
+			const added = await addMissingStarterFiles(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			new Notice(`Added ${added} missing files.`);
 		} catch (error) {

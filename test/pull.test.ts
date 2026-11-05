@@ -14,7 +14,11 @@ import {
 	pullRepos,
 	pullVault,
 	pulledNotice,
+	originUrl,
+	remoteUrlProblem,
 	repoPullState,
+	saveOrigin,
+	syncMenu,
 	syncStatus,
 } from "../src/pull";
 import { git } from "../src/vault";
@@ -47,12 +51,14 @@ async function anaPushes(ana: string, files: Record<string, string>, message = "
 const read = (path: string) => readFileSync(path, "utf8");
 
 describe("vault pull", () => {
-	it("never pulls a vault without an origin, and hides the sync status", async () => {
+	it("never pulls a vault without an origin, and says No remote", async () => {
 		const vault = join(tempFolder(), "vault");
 		await initRepo(vault);
 		const pull = await pullVault(vault, "");
 		expect(pull).toEqual({ kind: "no-origin" });
-		expect(syncStatus({ running: true, vault: pull, lastSynced: null }, Date.now())).toBeNull();
+		expect(syncStatus({ running: false, vault: pull, lastSynced: null, origin: null, lastPulled: null }, Date.now())?.label).toBe(
+			"No remote",
+		);
 	});
 
 	it("changes nothing when the remote has nothing new, and counts revisions not pushed", async () => {
@@ -63,7 +69,7 @@ describe("vault pull", () => {
 		const pull = await pullVault(vault, "");
 		expect(pull).toEqual({ kind: "synced", ahead: 1 });
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
-		expect(syncStatus({ running: false, vault: pull, lastSynced: Date.now() }, Date.now())?.label).toBe(
+		expect(syncStatus({ running: false, vault: pull, lastSynced: Date.now(), origin: true, lastPulled: null }, Date.now())?.label).toBe(
 			"Synced less than a minute ago · 1 not pushed",
 		);
 	});
@@ -112,7 +118,7 @@ describe("vault pull", () => {
 		expect(pull).toEqual({ kind: "waiting", count: 1, files: ["Compile.md"] });
 		expect(read(join(vault, "Compile.md"))).toBe("my unfinished edit\n");
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
-		const status = syncStatus({ running: false, vault: pull, lastSynced: Date.now() }, Date.now());
+		const status = syncStatus({ running: false, vault: pull, lastSynced: Date.now(), origin: true, lastPulled: null }, Date.now());
 		expect(status?.label).toBe("1 waiting");
 		expect(status?.tooltip).toContain("Compile.md");
 	});
@@ -133,7 +139,7 @@ describe("vault pull", () => {
 		const pull = await pullVault(vault, "");
 		expect(pull).toEqual({ kind: "diverged" });
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
-		const status = syncStatus({ running: false, vault: pull, lastSynced: null }, Date.now());
+		const status = syncStatus({ running: false, vault: pull, lastSynced: null, origin: true, lastPulled: null }, Date.now());
 		expect(status?.label).toBe("Sync needed");
 		expect(status?.tooltip).toBe("Your revisions and the remote's both moved. Pull with rebase in git, then pull again.");
 	});
@@ -146,7 +152,7 @@ describe("vault pull", () => {
 		expect(pull.kind).toBe("offline");
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
 		const lastSynced = Date.now() - 6 * 60_000;
-		const status = syncStatus({ running: false, vault: pull, lastSynced }, Date.now());
+		const status = syncStatus({ running: false, vault: pull, lastSynced, origin: true, lastPulled: null }, Date.now());
 		expect(status?.label).toBe("Offline, 6 min ago");
 		expect(status?.tooltip).toBe((pull as { message: string }).message);
 	});
@@ -161,12 +167,12 @@ describe("sync status", () => {
 	it("never says Up to date", () => {
 		const now = Date.now();
 		const states: SyncState[] = [
-			{ running: true, vault: null, lastSynced: null },
-			{ running: false, vault: { kind: "synced", ahead: 0 }, lastSynced: now },
-			{ running: false, vault: { kind: "pulled", ahead: 0, count: 1, authors: [], notes: [] }, lastSynced: now },
-			{ running: false, vault: { kind: "waiting", count: 2, files: ["a.md"] }, lastSynced: now },
-			{ running: false, vault: { kind: "diverged" }, lastSynced: now },
-			{ running: false, vault: { kind: "offline", message: "no" }, lastSynced: now },
+			{ running: true, vault: null, lastSynced: null, origin: true, lastPulled: null },
+			{ running: false, vault: { kind: "synced", ahead: 0 }, lastSynced: now, origin: true, lastPulled: null },
+			{ running: false, vault: { kind: "pulled", ahead: 0, count: 1, authors: [], notes: [] }, lastSynced: now, origin: true, lastPulled: null },
+			{ running: false, vault: { kind: "waiting", count: 2, files: ["a.md"] }, lastSynced: now, origin: true, lastPulled: null },
+			{ running: false, vault: { kind: "diverged" }, lastSynced: now, origin: true, lastPulled: null },
+			{ running: false, vault: { kind: "offline", message: "no" }, lastSynced: now, origin: true, lastPulled: null },
 		];
 		const labels = states.map((state) => syncStatus(state, now)?.label);
 		expect(labels).toEqual([
@@ -178,6 +184,106 @@ describe("sync status", () => {
 			"Offline, less than a minute ago",
 		]);
 		for (const label of labels) expect(label).not.toContain("Up to date");
+	});
+});
+
+describe("sync status before a pull", () => {
+	const empty: SyncState = { running: false, origin: null, vault: null, lastSynced: null, lastPulled: null };
+
+	it("says No remote without an origin, even before any pull", () => {
+		const status = syncStatus({ ...empty, origin: false }, Date.now());
+		expect(status?.label).toBe("No remote");
+		expect(status?.tooltip).toContain("Click to add one");
+	});
+
+	it("says Not pulled yet when the vault has an origin but hasn't pulled", () => {
+		expect(syncStatus({ ...empty, origin: true }, Date.now())?.label).toBe("Not pulled yet");
+	});
+
+	it("is hidden until the vault has been looked at", () => {
+		expect(syncStatus(empty, Date.now())).toBeNull();
+	});
+});
+
+describe("sync menu", () => {
+	const now = 10_000_000;
+	const base: SyncState = { running: false, origin: true, vault: null, lastSynced: null, lastPulled: null };
+
+	it("says when the remote was checked and when revisions were last pulled", () => {
+		const menu = syncMenu(
+			{ ...base, vault: { kind: "synced", ahead: 0 }, lastSynced: now - 2 * 60_000, lastPulled: { at: now - 60 * 60_000, count: 3 } },
+			now,
+		);
+		expect(menu.lines).toEqual(["Checked the remote 2 min ago", "Last pulled 3 revisions 1 h ago"]);
+		expect(menu.pull).toEqual({ label: "Pull now", enabled: true });
+		expect(menu.settings).toBe("Pull settings…");
+	});
+
+	it("says when nothing was checked or pulled yet", () => {
+		expect(syncMenu(base, now).lines).toEqual(["Not checked yet", "Nothing pulled since Obsidian opened"]);
+		expect(syncMenu({ ...base, lastPulled: { at: now, count: 1 } }, now).lines[1]).toBe("Last pulled 1 revision less than a minute ago");
+	});
+
+	it("can't pull again while a pull runs", () => {
+		expect(syncMenu({ ...base, running: true }, now).pull).toEqual({ label: "Pulling…", enabled: false });
+	});
+
+	it("offers to add a remote, and no Pull now, without an origin", () => {
+		for (const state of [{ ...base, origin: false }, { ...base, vault: { kind: "no-origin" } as VaultPull }]) {
+			const menu = syncMenu(state, now);
+			expect(menu.lines).toEqual(["This vault has no remote."]);
+			expect(menu.pull).toBeNull();
+			expect(menu.settings).toBe("Add a remote…");
+		}
+	});
+});
+
+describe("remote", () => {
+	it("accepts ssh, https and file URLs", () => {
+		for (const url of ["git@github.com:team/model.git", "https://github.com/team/model.git", "ssh://git@host:22/model.git", "https://ana@github.com/team/model.git", "/srv/model.git"]) {
+			expect(remoteUrlProblem(url)).toBeNull();
+		}
+	});
+
+	it("refuses an empty URL, spaces and anything git would read as an option", () => {
+		for (const url of ["", "git@github.com:team/my model.git", "--upload-pack=touch x"]) {
+			expect(remoteUrlProblem(url)).toBe("Enter the remote's URL.");
+		}
+	});
+
+	it("refuses a password or token in the URL", () => {
+		for (const url of ["https://ana:secret@github.com/team/model.git", "https://ghp_abc123@github.com/team/model.git", "https://github_pat_x@github.com/a/b.git"]) {
+			expect(remoteUrlProblem(url)).toBe("Don't put a password or token in the remote. Git asks your credential helper instead.");
+		}
+	});
+
+	it("adds an origin and never replaces one", async () => {
+		const vault = join(tempFolder(), "vault");
+		await initRepo(vault);
+		expect(await originUrl(vault)).toBeNull();
+		expect(await saveOrigin(vault, "git@github.com:team/model.git")).toBe("added");
+		expect(await originUrl(vault)).toBe("git@github.com:team/model.git");
+		expect(await saveOrigin(vault, "https://github.com/team/other.git")).toBe("exists");
+		expect(await originUrl(vault)).toBe("git@github.com:team/model.git");
+		expect(await saveOrigin(vault, "git@github.com:team/model.git")).toBe("exists");
+	});
+
+	it("throws git's message and changes nothing when git refuses", async () => {
+		const folder = tempFolder();
+		await expect(saveOrigin(folder, "git@github.com:team/model.git")).rejects.toThrow(/not a git repository/i);
+	});
+
+	it("never fetches or pushes when the remote is saved", async () => {
+		const { origin, ana } = await vaultWithOrigin();
+		await anaPushes(ana, { "Compile.md": "ana\n" });
+		const vault = join(tempFolder(), "vault");
+		await initRepo(vault, { "Mine.md": "mine\n" });
+		const head = await out(vault, ["rev-parse", "HEAD"]);
+		const remoteHead = await out(origin, ["rev-parse", "main"]);
+		expect(await saveOrigin(vault, origin)).toBe("added");
+		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await out(vault, ["for-each-ref", "refs/remotes"])).toBe("");
+		expect(await out(origin, ["rev-parse", "main"])).toBe(remoteHead);
 	});
 });
 
@@ -376,6 +482,55 @@ describe("Puller", () => {
 		await puller.pull("now");
 		await puller.pull("compile");
 		expect(runs).toEqual(["now", "compile"]);
+	});
+
+	it("remembers when revisions were last pulled, and says No remote without an origin", async () => {
+		const { vault, ana } = await vaultWithOrigin();
+		await anaPushes(ana, { "Compile.md": "ana\n" });
+		let path = vault;
+		const puller = new Puller({
+			vaultPath: () => path,
+			projectFolder: () => "",
+			automatic: () => true,
+			pullCode: () => false,
+			ownEmail: async () => "",
+			compiling: () => false,
+			changed: () => {},
+			pulled: () => {},
+			now: () => 5_000,
+		});
+		await puller.checkOrigin();
+		expect(puller.state.origin).toBe(true);
+		await puller.pull("now");
+		expect(puller.state.lastPulled).toEqual({ at: 5_000, count: 1 });
+		expect(puller.state.lastSynced).toBe(5_000);
+
+		path = join(tempFolder(), "alone");
+		await initRepo(path);
+		await puller.checkOrigin();
+		expect(puller.state.origin).toBe(false);
+		expect(syncStatus(puller.state, 5_000)?.label).toBe("No remote");
+	});
+
+	it("forgets No remote once the vault gets an origin", async () => {
+		const { origin } = await vaultWithOrigin();
+		const vault = join(tempFolder(), "vault");
+		await initRepo(vault);
+		const puller = new Puller({
+			vaultPath: () => vault,
+			projectFolder: () => "",
+			automatic: () => true,
+			pullCode: () => false,
+			ownEmail: async () => "",
+			compiling: () => false,
+			changed: () => {},
+			pulled: () => {},
+		});
+		await puller.pull("now");
+		expect(puller.state.vault).toEqual({ kind: "no-origin" });
+		await saveOrigin(vault, origin);
+		await puller.checkOrigin();
+		expect(syncStatus(puller.state, Date.now())?.label).toBe("Not pulled yet");
 	});
 
 	it("runs the compile's own pull after one that is already running", async () => {

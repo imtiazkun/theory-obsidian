@@ -10,7 +10,7 @@ import { CompileBranch, PreparedBranch, dirtyRepos, finishBranches, prepareBranc
 import type { PullRequest } from "./github";
 import { findProjectRepos } from "./project";
 import { toolPath } from "./tool-path";
-import { git } from "./vault";
+import { git, isInDotFolder } from "./vault";
 
 /** Tag in the vault repository that marks the last compiled commit. */
 export const COMPILED_TAG = "theory/compiled";
@@ -19,10 +19,14 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 // Larger diffs are cut; Claude can still read every file in the snapshot.
 const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
-// Git pathspecs for vault files that are never sent to Claude: hidden folders (name starts
-// with `_`, at any depth), Obsidian's config folder, and the human-only Instructions.md.
+/** Git pathspec for files in dot folders, like `.obsidian/` and `.comments/`, at any depth. They are never theory. */
+export const DOT_FOLDERS = ":(exclude,glob)**/.*/**";
+// Git pathspecs for vault files that are never sent to Claude: dot folders (INV-13), hidden folders and
+// hidden notes (name starts with `_`, at any depth), and the human-only Instructions.md.
 export const NOT_SENT = [
+	DOT_FOLDERS,
 	":(exclude,glob)**/_*/**",
+	":(exclude,glob)**/_*",
 	":(exclude).obsidian/",
 	":(exclude,icase)instructions.md",
 	":(exclude,icase)instruction.md",
@@ -141,13 +145,16 @@ export interface CompileReport {
 	pullRequests?: PullRequest[];
 }
 
-/** How many committed revisions are waiting to be compiled. */
+/**
+ * How many committed revisions are waiting to be compiled. A revision that changes only files in dot
+ * folders, like a comment, is never pending.
+ */
 export async function pendingRevisionCount(vaultPath: string): Promise<number> {
 	const head = await headCommit(vaultPath).catch(() => null);
 	if (!head) return 0;
 	const from = await tagCommit(vaultPath);
 	if (from === head) return 0;
-	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head]);
+	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head, "--", DOT_FOLDERS]);
 	return Number(stdout.trim()) || 0;
 }
 
@@ -239,9 +246,10 @@ async function headCommit(vaultPath: string): Promise<string> {
 
 const FIELD = "\x1f";
 
-async function revisionsBetween(vaultPath: string, from: string | null, to: string): Promise<Revision[]> {
+export async function revisionsBetween(vaultPath: string, from: string | null, to: string): Promise<Revision[]> {
 	const format = ["%H", "%an", "%aI", "%s"].join(FIELD);
-	const { stdout } = await git(vaultPath, ["log", "--reverse", `--format=${format}`, from ? `${from}..${to}` : to]);
+	// Revisions that change only dot folders are never pending, so they aren't listed either.
+	const { stdout } = await git(vaultPath, ["log", "--reverse", `--format=${format}`, from ? `${from}..${to}` : to, "--", DOT_FOLDERS]);
 	return stdout
 		.split("\n")
 		.filter((line) => line !== "")
@@ -251,7 +259,7 @@ async function revisionsBetween(vaultPath: string, from: string | null, to: stri
 		});
 }
 
-async function modelDiff(vaultPath: string, from: string | null, to: string): Promise<string> {
+export async function modelDiff(vaultPath: string, from: string | null, to: string): Promise<string> {
 	const { stdout } = await git(vaultPath, ["diff", "--stat", "--patch", from ?? EMPTY_TREE, to, "--", ...NOT_SENT]);
 	if (stdout.length <= MAX_DIFF_CHARS) return stdout;
 	return stdout.slice(0, MAX_DIFF_CHARS) + "\n\n[Diff cut short. Read the changed files in the model directory.]\n";
@@ -263,13 +271,17 @@ async function changedNotes(vaultPath: string, from: string | null, to: string):
 	return stdout.split("\0").filter((path) => path.toLowerCase().endsWith(".md"));
 }
 
-/** Changed paths in the vault working tree, so edits made during a compile can be spotted. */
-async function workingTreeState(vaultPath: string): Promise<Map<string, string>> {
+/**
+ * Changed paths in the vault working tree, so edits made during a compile can be spotted. Dot folders
+ * are left out, since an engineer may comment while a compile runs (INV-6).
+ */
+export async function workingTreeState(vaultPath: string): Promise<Map<string, string>> {
 	const { stdout } = await git(vaultPath, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 	const state = new Map<string, string>();
 	for (const entry of stdout.split("\0")) {
 		if (entry === "") continue;
 		const path = entry.slice(3);
+		if (isInDotFolder(path)) continue;
 		const full = join(vaultPath, path);
 		// The modified time tells apart a file that was already dirty from one edited again.
 		state.set(path, existsSync(full) ? String(statSync(full).mtimeMs) : "deleted");
@@ -580,7 +592,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 
 	const head = await headCommit(vaultPath);
 	const from = await tagCommit(vaultPath);
-	if (from === head) throw new NothingToCompileError("Every committed revision is already compiled.");
+	if (from === head || (await pendingRevisionCount(vaultPath)) === 0) {
+		throw new NothingToCompileError("Every committed revision is already compiled.");
+	}
 	// The engineer's unfinished work must never end up on a compile branch.
 	const dirty = await dirtyRepos(projectFolder);
 	if (dirty.length > 0) {
