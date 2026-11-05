@@ -19,6 +19,7 @@ import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
+import { RuleAuthorsOverlay } from "./rule-authors-view";
 import { RuleCounts } from "./rule-count-header";
 import { ChangeDots, EntryFiles, HiddenFolders } from "./explorer";
 import { Comments } from "./comments-ui";
@@ -66,6 +67,7 @@ export default class TheoryPlugin extends Plugin {
 	overlay = new FailureOverlay(this);
 	private noteStatus = new NoteStatus(this);
 	private ruleCounts = new RuleCounts(this);
+	ruleAuthors = new RuleAuthorsOverlay(this);
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
@@ -222,6 +224,10 @@ export default class TheoryPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("file-open", syncRuleCounts));
 		this.registerEvent(this.app.workspace.on("editor-change", debounce(syncRuleCounts, 300, true)));
 		this.registerEvent(this.app.vault.on("modify", debounce(syncRuleCounts, 300, true)));
+
+		// Who last changed each rule, worked out again when a note opens and shortly after typing stops (HDR-19).
+		this.registerEditorExtension(this.ruleAuthors.editorExtension());
+		this.registerEvent(this.app.workspace.on("file-open", () => this.ruleAuthors.sync()));
 
 		// Comments: the button over a selection, the underlines, and the comment file following its note (CMNT-3, CMNT-15, CMNT-24).
 		this.registerDomEvent(document, "selectionchange", debounce(() => this.comments.selectionChanged(), 150, true));
@@ -749,6 +755,7 @@ export default class TheoryPlugin extends Plugin {
 	/** Updates everything that shows git state after the repository changes. */
 	refreshGitState() {
 		this.puller.recount();
+		this.ruleAuthors.sync();
 		this.commitButtons.sync();
 		this.changeDots.sync();
 		this.compileButton.refresh();

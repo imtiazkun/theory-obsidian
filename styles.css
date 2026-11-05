@@ -974,6 +974,17 @@ body button.theory-expand-fab[aria-disabled="true"] {
 	color: var(--text-warning);
 }
 
+/* Who last changed each rule, after its first line (HDR-14). */
+.theory-rule-author {
+	margin-left: var(--size-4-3);
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	font-weight: normal;
+	font-style: normal;
+	white-space: nowrap;
+	user-select: none;
+}
+
 /* The file explorer's change dots (UI-24 to UI-26). */
 .theory-change-dot {
 	flex: none;
