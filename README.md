@@ -2,6 +2,8 @@
 
 theory.md is an Obsidian plugin for keeping a **theoretical model** of the software a team builds. Only humans write the model. The AI reads it and changes the code to match.
 
+The theory behind it, and the method this plugin implements, is written up at [github.com/imtiazkun/theory.md](https://github.com/imtiazkun/theory.md).
+
 ## Why
 
 Margaret-Anne Storey's post [How Generative and Agentic AI Shift Concern from Technical Debt to Cognitive Debt](https://margaretstorey.com/blog/2026/02/09/cognitive-debt/) (Feb 2026) argues that when AI writes the code, the bigger risk is no longer messy code. The bigger risk is **cognitive debt**: the team stops understanding what the system does and why. Her short version: "Technical debt lives in the code; cognitive debt lives in developers' minds."
