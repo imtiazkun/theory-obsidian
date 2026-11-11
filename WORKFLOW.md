@@ -45,6 +45,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/commit.ts` | The per-note commit button in each note's header |
 | `src/commit-view.ts`, `src/commit-diff.ts` | The Commit page: new changes with checkboxes, diffs, rule changes and the message box, and past commits read-only. `commit-diff.ts` reads the diffs from git and works out the rules each note adds, changes and removes |
 | `src/push.ts` | Pushes the vault's `main` to `origin` after every commit and on Push now, never forced, never with tags, with prompts off |
+| `src/hooks.ts` | Hooks: the engineer's own shell commands tied to `comment`, `commit`, `push`, `compile-start`, `compile-end` or `permission-request`. Run after the event and never awaited, in the vault folder with `toolPath()`, the event as JSON on stdin (event, vault, author, time, details), stopped after 10 seconds; a failure shows "Hook for {event} failed: {reason}". Kept in plugin data, never in the vault. Each has a Test button in the settings that sends a sample event |
 | `src/compile.ts` | The compile pipeline: marker, diff, snapshot, prompt, Claude subprocess, report, checks |
 | `src/acp.ts` | The ACP agent runner: JSON-RPC over stdio, permission cards, file reads and refused writes, model and thinking-level choices, the answer from the last JSON block, cancel |
 | `src/anchor.ts` | Anchor and problem types, `findAnchor` (find a quote or heading in a note) and `checkProblems` (check Claude's anchors) |

@@ -2,6 +2,7 @@ import { Extension, Range, StateEffect } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, PluginValue, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { MarkdownPostProcessorContext, MarkdownView, Notice, TFile, editorInfoField, setIcon } from "obsidian";
 import { projectRepos } from "./branches";
+import { commentDetails } from "./hooks";
 import {
 	type CommentAction,
 	type CommentAnchor,
@@ -82,8 +83,11 @@ export class Comments {
 		try {
 			const result = await this.serial(() => saveComment(this.vaultPath(), notePath, this.modelFolders(), action, author));
 			if (result.notCommitted) new Notice(`Comment saved but not committed: ${result.notCommitted}`, 10000);
-			// Comments that commit themselves push like any commit (CMT-31).
-			else void this.plugin.push();
+			else {
+				this.plugin.hooks.fire("comment", commentDetails(notePath, action, result.file));
+				// Comments that commit themselves push like any commit (CMT-31).
+				void this.plugin.push();
+			}
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : String(error), 10000);
 			return false;
