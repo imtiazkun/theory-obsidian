@@ -88,6 +88,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
+| Hooks: your own shell commands run after a comment, a commit, a push, a compile starting or ending, or a permission request, with the event as JSON on stdin, like posting to Slack | Done |
 | Server: shared remote, team-wide marker and lock | Planned |
 
 ## Install
@@ -182,6 +183,7 @@ If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are
 | Remote | The vault's `origin`, like `git@github.com:team/model.git`. When the vault has one, it is shown as plain text; change it with `git remote set-url origin <url>` in the vault. Without one, an empty field and Save add it, then pull. Save never replaces or removes a remote. It lives in the vault's git config, not the plugin's settings, and a password or token in the URL is refused. |
 | Pull automatically | On by default. Pulls the vault's `main` from `origin` when Obsidian opens, when its window gets focus and every *Check every* minutes (1, 5, 15 or 30; 5 by default). Pulls only fast-forward, never touch a file with uncommitted changes and never ask for a password. **Pull now** and the pull before a compile run even when it's off. |
 | Show rule authors | On by default. Grey text after each rule's first line in the editor: who last changed the rule and when, from git, or "Not committed yet". Display only; it is never written into the note or sent to an agent. Turning it off hides it at once in every open note. |
+| Hooks | A list of shell commands, each tied to one event: `comment`, `commit`, `push`, `compile-start`, `compile-end` or `permission-request`. A hook runs after its event, in the vault folder with the login PATH, and gets the event as JSON on stdin: `event`, `vault`, `author`, `time` and `details` (the note and comment text, the commit hash and subject, the push status, the compile status, summary and number of questions, or the permission request). It never stops or delays what triggered it, is stopped after 10 seconds, and shows "Hook for {event} failed: {reason}" when it fails. **Test** sends it a sample event. Hooks live in the plugin's data, never in the vault, so they can hold secrets like a webhook URL. |
 | Also pull code repositories | On by default. Each pull also fetches the project folder's repositories and fast-forwards those not on a compile branch, with no uncommitted changes and nothing of their own. |
 
 ## Compile rules

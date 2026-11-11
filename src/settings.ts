@@ -2,6 +2,7 @@ import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { hasOrigin } from "./github";
+import { HOOK_EVENTS, HOOK_EVENT_NAMES, type Hook, type HookEvent } from "./hooks";
 import { findProjectRepos, pickFolder } from "./project";
 import { PULL_INTERVALS, originUrl, remoteUrlProblem, saveOrigin } from "./pull";
 import type TheoryPlugin from "./main";
@@ -43,6 +44,8 @@ export interface TheorySettings extends SavedAuthor {
 	pullInterval: number;
 	/** Each pull also pulls the code repositories (CFG-27). */
 	pullCodeRepos: boolean;
+	/** The engineer's own commands run on events (HOOK-1). In plugin data only, never in the vault (HOOK-8). */
+	hooks: Hook[];
 }
 
 export const DEFAULT_SETTINGS: TheorySettings = {
@@ -63,6 +66,7 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	pullAutomatically: true,
 	pullInterval: 5,
 	pullCodeRepos: true,
+	hooks: [],
 };
 
 /** The Compile heading's description, naming the agent that compiles (AGT-28). */
@@ -183,6 +187,68 @@ export class TheorySettingTab extends PluginSettingTab {
 		// Settings never start the agent, not even to read its model list (AGT-25).
 		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
 		else this.displayClaudeCode(containerEl);
+
+		new Setting(containerEl)
+			.setName("Hooks")
+			.setDesc(
+				"Your own shell commands, run after an event with the event as JSON on stdin, in the vault folder. Kept in plugin data, never in the vault, so they can hold secrets like a webhook URL.",
+			)
+			.setHeading();
+		this.displayHooks(containerEl.createDiv({ cls: "theory-hooks" }));
+	}
+
+	/** The list of hooks, each with its event, its command and a Test button (HOOK-1, HOOK-9). */
+	private displayHooks(containerEl: HTMLElement) {
+		containerEl.empty();
+		const hooks = this.plugin.settings.hooks;
+		hooks.forEach((hook, index) => {
+			new Setting(containerEl)
+				.addDropdown((dropdown) => {
+					for (const event of HOOK_EVENTS) dropdown.addOption(event, `${event}: ${HOOK_EVENT_NAMES[event]}`);
+					dropdown.setValue(hook.event).onChange(async (value) => {
+						hook.event = value as HookEvent;
+						await this.plugin.saveSettings();
+					});
+				})
+				.addText((text) =>
+					text
+						.setPlaceholder("curl -s -X POST -d @- https://…")
+						.setValue(hook.command)
+						.onChange(async (value) => {
+							hook.command = value;
+							await this.plugin.saveSettings();
+						}),
+				)
+				.addButton((button) =>
+					button.setButtonText("Test").onClick(async () => {
+						if (!hook.command.trim()) {
+							new Notice("Enter the hook's command first.");
+							return;
+						}
+						button.setDisabled(true);
+						const result = await this.plugin.hooks.test(hook);
+						button.setDisabled(false);
+						if (result.ok) new Notice(`Hook for ${hook.event} ran.`);
+					}),
+				)
+				.addExtraButton((button) =>
+					button
+						.setIcon("trash")
+						.setTooltip("Remove hook")
+						.onClick(async () => {
+							hooks.splice(index, 1);
+							await this.plugin.saveSettings();
+							this.displayHooks(containerEl);
+						}),
+				);
+		});
+		new Setting(containerEl).addButton((button) =>
+			button.setButtonText("Add hook").onClick(async () => {
+				hooks.push({ event: "commit", command: "" });
+				await this.plugin.saveSettings();
+				this.displayHooks(containerEl);
+			}),
+		);
 	}
 
 	/** The identity git signs with, read from git each time and never edited here (CFG-34 to CFG-37). */

@@ -36,6 +36,7 @@ import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNot
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
+import { Hooks, commitDetails, compileEndDetails, headCommitDetails, permissionDetails, pushDetails, savedHooks } from "./hooks";
 import {
 	IdentityError,
 	MissingStarters,
@@ -74,6 +75,17 @@ export default class TheoryPlugin extends Plugin {
 	private entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
 	comments = new Comments(this);
+	/** The engineer's own commands, run after events and never awaited (HOOK-4). */
+	hooks = new Hooks({
+		hooks: () => this.settings.hooks,
+		vaultPath: () => this.getVaultPath(),
+		vaultName: () => this.app.vault.getName(),
+		author: async () => {
+			const identity = await gitIdentity(this.getVaultPath());
+			return identity.kind === "found" ? identity.name : "";
+		},
+		failed: (notice) => new Notice(notice, 10000),
+	});
 	// Single user for now, so the compile lock only has to hold within this app.
 	private compileRun: CompileRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
@@ -461,6 +473,7 @@ export default class TheoryPlugin extends Plugin {
 					author,
 					reports: this.reports,
 					onPermissionRequest: (request) => {
+						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
 						new Notice(`${who} is asking to use ${request.tool}. Answer in the compile report.`);
 						this.showReportView();
@@ -481,6 +494,7 @@ export default class TheoryPlugin extends Plugin {
 
 		this.compileRun = run;
 		this.compileStarting = false;
+		this.hooks.fire("compile-start", { status: "running", revisions: run.report.revisions.length });
 		this.reports = [run.report, ...this.reports].slice(0, MAX_REPORTS);
 		this.statusBar?.setText("Compiling…");
 		this.statusBar?.show();
@@ -492,6 +506,7 @@ export default class TheoryPlugin extends Plugin {
 
 		const report = await run.done;
 		this.compileRun = null;
+		this.hooks.fire("compile-end", compileEndDetails(report));
 		this.statusBar?.hide();
 		await this.saveSettings();
 		this.pullRequestsChanged();
@@ -659,10 +674,17 @@ export default class TheoryPlugin extends Plugin {
 		const run = async (): Promise<PushResult> => {
 			this.puller.state.pushing = true;
 			this.compileButton.render();
+			let result: PushResult;
 			try {
-				return await pushVault(this.getVaultPath());
+				result = await pushVault(this.getVaultPath());
 			} catch (error) {
-				return { kind: "failed", message: errorMessage(error) };
+				result = { kind: "failed", message: errorMessage(error) };
+			}
+			try {
+				// Without a remote nothing was pushed, so no push event.
+				const details = pushDetails(result);
+				if (details) this.hooks.fire("push", details);
+				return result;
 			} finally {
 				this.puller.state.pushing = false;
 				await this.puller.recount();
@@ -690,6 +712,7 @@ export default class TheoryPlugin extends Plugin {
 			return false;
 		}
 		this.refreshGitState();
+		this.hooks.fire("commit", commitDetails(hash, message));
 		// The page closes at once; the notice comes when the push ends. A failed push never undoes the commit (CMT-34).
 		void this.push().then((pushed) => {
 			new Notice(commitNotice(hash, pushed), pushed.kind === "pushed" || pushed.kind === "no-origin" ? 4000 : 10000);
@@ -818,6 +841,7 @@ export default class TheoryPlugin extends Plugin {
 	async loadSettings() {
 		const { reports, codeRepoPath, repos, setupOnLoad, ...settings } = (await this.loadData()) ?? {};
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+		this.settings.hooks = savedHooks(this.settings.hooks);
 		this.setupOnLoad = setupOnLoad === true;
 		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
 		// Earlier versions called the project folder the code repository, and briefly kept a list of repos.
@@ -864,6 +888,7 @@ export default class TheoryPlugin extends Plugin {
 			}
 			const welcomed = await setUpVault(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
+			this.fireCommitHookForHead();
 			new Notice("Vault set up as a git repository with an initial commit.");
 			// The welcome note says what to do first (SET-10).
 			this.openRootNoteWhenReady(welcomed ? WELCOME_PATH : "index.md");
@@ -892,6 +917,13 @@ export default class TheoryPlugin extends Plugin {
 		}
 	}
 
+	/** Runs the commit hooks for the vault's newest commit, made outside the Commit page. */
+	private fireCommitHookForHead() {
+		void headCommitDetails(this.getVaultPath())
+			.then((details) => this.hooks.fire("commit", details))
+			.catch(() => {});
+	}
+
 	/** The starter files and `.gitignore` lines this vault is missing. Worked out each time, never stored. */
 	missingStarters(): Promise<MissingStarters> {
 		return missingStarters(this.getVaultPath(), starterFiles(this.app.vault.getName()));
@@ -903,7 +935,10 @@ export default class TheoryPlugin extends Plugin {
 			const added = await addMissingStarterFiles(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
 			// Every commit pushes (CMT-30).
-			if (added > 0) void this.push();
+			if (added > 0) {
+				this.fireCommitHookForHead();
+				void this.push();
+			}
 			new Notice(`Added ${added} missing files.`);
 		} catch (error) {
 			new Notice(`Couldn't add the missing files: ${errorMessage(error)}`, 10000);
