@@ -357,15 +357,27 @@ export async function fileHistory(basePath: string, filePath: string): Promise<C
 }
 
 /**
+ * The files `git ls-files <flags>` lists for `paths` that `pathspecs` also allow. The two are listed
+ * apart and then matched, because git 2.54 (Apple Git-157) lists nothing when file paths and exclude
+ * pathspecs are given together and a folder in the path is 7 or more characters long.
+ */
+async function listedIn(basePath: string, flags: string[], paths: string[], pathspecs: string[]): Promise<string[]> {
+	const { stdout: asked } = await git(basePath, ["ls-files", "-z", ...flags, "--", ...paths]);
+	const files = asked.split("\0").filter(Boolean);
+	if (files.length === 0 || pathspecs.length === 0) return files;
+	const { stdout: allowedOut } = await git(basePath, ["ls-files", "-z", ...flags, "--", ".", ...pathspecs]);
+	const allowed = new Set(allowedOut.split("\0").filter(Boolean));
+	return files.filter((file) => allowed.has(file));
+}
+
+/**
  * The uncommitted changes to `paths` as a diff, limited to `pathspecs`. Tracked files are diffed
  * against HEAD; new files are shown whole.
  */
 export async function uncommittedDiff(basePath: string, paths: string[], pathspecs: string[]): Promise<string> {
 	if (paths.length === 0) return "";
-	const { stdout: listed } = await git(basePath, ["ls-files", "-z", "--", ...paths, ...pathspecs]);
-	const tracked = listed.split("\0").filter(Boolean);
-	const { stdout: others } = await git(basePath, ["ls-files", "-z", "--others", "--exclude-standard", "--", ...paths, ...pathspecs]);
-	const untracked = others.split("\0").filter(Boolean);
+	const tracked = await listedIn(basePath, [], paths, pathspecs);
+	const untracked = await listedIn(basePath, ["--others", "--exclude-standard"], paths, pathspecs);
 
 	const parts: string[] = [];
 	if (tracked.length > 0) {
