@@ -253,22 +253,36 @@ export async function addMissingStarterFiles(basePath: string, starterFiles: Sta
 	return paths.length;
 }
 
-interface Change {
+/** How a file changed, as the Commit page shows it (CMT-6). */
+export type ChangeKind = "modified" | "new" | "deleted" | "renamed";
+
+export interface Change {
 	path: string;
 	/** Git's two-letter porcelain status, e.g. " M", "??" or "D ". */
 	status: string;
+	kind: ChangeKind;
+	/** The path before a rename. */
+	oldPath?: string;
 }
 
-/** Uncommitted changes outside dot folders, including new files. */
-async function changes(basePath: string): Promise<Change[]> {
+function changeKind(status: string): ChangeKind {
+	if (status === "??" || status.includes("A")) return "new";
+	if (status.includes("R") || status.includes("C")) return "renamed";
+	if (status.includes("D")) return "deleted";
+	return "modified";
+}
+
+/** Uncommitted changes outside dot folders, including new files, with how each changed. */
+export async function changes(basePath: string): Promise<Change[]> {
 	const { stdout } = await git(basePath, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 	const entries = stdout.split("\0").filter((entry) => entry !== "");
 	const found: Change[] = [];
 	for (let i = 0; i < entries.length; i++) {
 		const status = entries[i].slice(0, 2);
-		found.push({ path: entries[i].slice(3), status });
+		const change: Change = { path: entries[i].slice(3), status, kind: changeKind(status) };
 		// Renames are followed by their original path, which isn't a separate change.
-		if (status.includes("R") || status.includes("C")) i++;
+		if (status.includes("R") || status.includes("C")) change.oldPath = entries[++i];
+		found.push(change);
 	}
 	// Obsidian's config stays out even in vaults that track it from before; comments commit by themselves.
 	return found.filter((change) => !isInDotFolder(change.path));
@@ -280,8 +294,8 @@ export async function changedFiles(basePath: string): Promise<string[]> {
 }
 
 /**
- * Commits `paths` (relative to the vault), or every change when `paths` is "all".
- * Returns the new commit's short hash.
+ * Commits exactly `paths` (relative to the vault), or every change when `paths` is "all" (CMT-12).
+ * Something else already staged never slips in. Returns the new commit's short hash.
  */
 export async function commit(basePath: string, message: string, paths: string[] | "all"): Promise<string> {
 	const identity = await identityArgs(basePath);
@@ -293,9 +307,14 @@ export async function commit(basePath: string, message: string, paths: string[] 
 		if (paths.length > 0) await git(basePath, ["add", "-A", "--", ...paths]);
 		await git(basePath, [...identity, "commit", "-m", message]);
 	} else {
-		await git(basePath, ["add", "-A", "--", ...paths]);
+		const known = new Map((await changes(basePath).catch(() => [] as Change[])).map((change) => [change.path, change]));
+		// A deletion that is already staged has nothing left to add, and git refuses its path.
+		const toAdd = paths.filter((path) => known.get(path)?.status !== "D ");
+		// A staged rename commits both its sides.
+		const toCommit = [...paths, ...paths.flatMap((path) => known.get(path)?.oldPath ?? [])];
+		if (toAdd.length > 0) await git(basePath, ["add", "-A", "--", ...toAdd]);
 		// Naming the paths commits only them, even if other files are staged.
-		await git(basePath, [...identity, "commit", "-m", message, "--", ...paths]);
+		await git(basePath, [...identity, "commit", "-m", message, "--", ...toCommit]);
 	}
 	const { stdout } = await git(basePath, ["rev-parse", "--short", "HEAD"]);
 	return stdout.trim();
@@ -307,35 +326,34 @@ export interface Commit {
 	email: string;
 	date: Date;
 	subject: string;
+	/** The note's path in this commit, which differs from today's after a rename. */
+	path: string;
 }
 
 // Unit separator, so subjects containing tabs or pipes can't break parsing.
 const FIELD = "\x1f";
 
-/** Commits that touched `filePath` (relative to the vault), newest first. */
+/** Commits that touched `filePath` (relative to the vault), newest first. Follows renames. */
 export async function fileHistory(basePath: string, filePath: string): Promise<Commit[]> {
-	const format = ["%H", "%an", "%ae", "%aI", "%s"].join(FIELD);
+	const format = ["", "%H", "%an", "%ae", "%aI", "%s"].join(FIELD);
 	let stdout: string;
 	try {
-		({ stdout } = await git(basePath, [
-			"log",
-			"--follow",
-			`--format=${format}`,
-			"--",
-			filePath,
-		]));
+		({ stdout } = await git(basePath, ["-c", "core.quotePath=false", "log", "--follow", "--name-only", `--format=${format}`, "--", filePath]));
 	} catch (error) {
 		// A repository with no commits yet has no history to show.
 		if (String(error).includes("does not have any commits")) return [];
 		throw error;
 	}
-	return stdout
-		.split("\n")
-		.filter((line) => line !== "")
-		.map((line) => {
-			const [hash, author, email, date, subject] = line.split(FIELD);
-			return { hash, author, email, date: new Date(date), subject };
-		});
+	const commits: Commit[] = [];
+	for (const line of stdout.split("\n")) {
+		if (line.startsWith(FIELD)) {
+			const [, hash, author, email, date, subject] = line.split(FIELD);
+			commits.push({ hash, author, email, date: new Date(date), subject, path: filePath });
+		} else if (line !== "" && commits.length > 0) {
+			commits[commits.length - 1].path = line;
+		}
+	}
+	return commits;
 }
 
 /**

@@ -112,29 +112,112 @@
 	box-shadow: 0 0 0 2px var(--background-primary);
 }
 
-/* Commit modal */
-.theory-commit-file {
-	display: inline-flex;
+/* Commit page (CMT-17 to CMT-29) */
+.theory-commit-page {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-4);
+	padding: var(--size-4-4) var(--size-4-6);
+}
+
+.theory-commit-top {
+	position: sticky;
+	top: calc(-1 * var(--size-4-4));
+	z-index: 1;
+	padding: var(--size-4-2) 0;
+	background-color: var(--background-primary);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.theory-commit-past-message {
+	white-space: pre-wrap;
+	user-select: text;
+	margin-bottom: var(--size-4-2);
+}
+
+.theory-commit-files {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-4);
+}
+
+.theory-commit-empty {
+	color: var(--text-muted);
+}
+
+.theory-commit-diff-file {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	overflow: hidden;
+}
+
+.theory-commit-diff-head {
+	display: flex;
 	align-items: center;
-	gap: var(--size-4-1);
-	max-width: 100%;
-	margin-bottom: var(--size-4-3);
-	padding: var(--size-2-1) var(--size-4-2);
-	border-radius: var(--radius-s);
+	gap: var(--size-4-2);
+	padding: var(--size-4-2) var(--size-4-3);
 	background-color: var(--background-secondary);
+}
+
+.theory-commit-diff-path {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.theory-commit-diff-kind {
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.theory-commit-diff-rename,
+.theory-commit-diff-rules {
+	padding: var(--size-2-2) var(--size-4-3);
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
 	overflow-wrap: anywhere;
 }
 
-.theory-commit-file-icon {
-	display: flex;
-	flex-shrink: 0;
+.theory-commit-diff-rules {
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
 }
 
-.theory-commit-file-icon svg {
-	width: var(--icon-xs);
-	height: var(--icon-xs);
+.theory-commit-diff-body {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	user-select: text;
+	overflow-x: auto;
+}
+
+.theory-commit-diff-line {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	padding: 0 var(--size-4-3);
+}
+
+.theory-commit-diff-line.is-add {
+	background-color: rgba(var(--color-green-rgb), 0.15);
+}
+
+.theory-commit-diff-line.is-del {
+	background-color: rgba(var(--color-red-rgb), 0.15);
+}
+
+.theory-commit-diff-fold {
+	padding: var(--size-2-1) var(--size-4-3);
+	color: var(--text-faint);
+	background-color: var(--background-secondary-alt);
+	font-family: var(--font-interface);
+}
+
+.theory-history-item.is-clickable {
+	cursor: pointer;
+}
+
+.theory-history-item.is-clickable:hover {
+	background-color: var(--background-modifier-hover);
 }
 
 .theory-commit-message-box {
@@ -189,11 +272,6 @@
 	50% {
 		color: var(--interactive-accent);
 	}
-}
-
-.theory-commit .setting-item {
-	border-top: none;
-	padding: var(--size-4-3) 0 0;
 }
 
 .theory-commit-footer {
@@ -1047,6 +1125,33 @@ body button.theory-expand-fab[aria-disabled="true"] {
 
 .theory-comments-empty {
 	color: var(--text-muted);
+}
+
+.theory-comments-broken {
+	padding: var(--size-4-2) 0;
+	color: var(--text-warning);
+	overflow-wrap: anywhere;
+}
+
+/* Each note's threads, under the note's path (CMNT-17). */
+.theory-comments-group {
+	padding-top: var(--size-4-2);
+}
+
+.theory-comments-note {
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+	cursor: pointer;
+}
+
+.theory-comments-note:hover {
+	text-decoration: underline;
+}
+
+.theory-comment-quote {
+	cursor: pointer;
 }
 
 .theory-comment-thread {

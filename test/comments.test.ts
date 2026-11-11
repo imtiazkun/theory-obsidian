@@ -7,11 +7,15 @@ import {
 	commentFilePath,
 	deleteComments,
 	frontMatterEnd,
+	groupThreads,
+	listCommentFiles,
 	moveComments,
+	notePathOf,
 	orderThreads,
 	parseComments,
 	readCommentFile,
 	saveComment,
+	unreadableMessage,
 } from "../src/comments";
 import { changedFiles } from "../src/vault";
 import { initRepo, out, tempFolder, write } from "./helpers";
@@ -138,7 +142,7 @@ describe("comments", () => {
 		expect(await readCommentFile(vault, ".comments/Index.json")).toEqual({ kind: "broken" });
 		await expect(
 			saveComment(vault, "Index.md", FOLDERS, { kind: "comment", anchor: { quote: "hello" }, text: "Hi" }, ANA, AT),
-		).rejects.toThrow("The comments on this note can't be read: .comments/Index.json.");
+		).rejects.toThrow("The comments on Index can't be read: .comments/Index.json.");
 		expect(readFileSync(join(vault, ".comments/Index.json"), "utf8")).toBe("{ not json");
 		expect(await out(vault, ["rev-parse", "HEAD"])).toBe(head);
 		expect(parseComments('{"version":2,"note":"Index.md","threads":[]}')).toBeNull();
@@ -203,5 +207,70 @@ describe("comments", () => {
 			["gone", false],
 		]);
 		expect(resolved.map((t) => t.id)).toEqual(["r"]);
+	});
+
+	it("name the note in the message for a file they can't read (CMNT-12)", () => {
+		expect(unreadableMessage("obsidian-plugin/Compile.md", "obsidian-plugin/.comments/Compile.json")).toBe(
+			"The comments on obsidian-plugin/Compile can't be read: obsidian-plugin/.comments/Compile.json.",
+		);
+	});
+});
+
+describe("the Comments view over every note (CMNT-16, CMNT-17, CMNT-19)", () => {
+	const comment = (at: string) => ({ id: at, author: ANA, at, text: "Hi" });
+	const thread = (id: string, quote: string, at: string, resolved = false) => ({
+		id,
+		anchor: { quote },
+		comments: [comment(at)],
+		resolved: resolved ? { by: ANA, at } : null,
+	});
+	const file = (note: string, threads: ReturnType<typeof thread>[]): CommentFile => ({ version: 1, note, threads });
+
+	it("finds every comment file in the vault, in model folders and at the root, and the note each belongs to", async () => {
+		const vault = tempFolder();
+		write(vault, {
+			".comments/Index.json": "{}",
+			"obsidian-plugin/.comments/Compile.json": "{}",
+			"obsidian-plugin/.comments/flows/Login.json": "{}",
+			"obsidian-plugin/Compile.md": "text",
+			"other/.comments/Stray.json": "{}",
+		});
+
+		const found = await listCommentFiles(vault, FOLDERS);
+
+		expect(found.sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+			{ note: "Index.md", path: ".comments/Index.json" },
+			{ note: "obsidian-plugin/Compile.md", path: "obsidian-plugin/.comments/Compile.json" },
+			{ note: "obsidian-plugin/flows/Login.md", path: "obsidian-plugin/.comments/flows/Login.json" },
+		]);
+		expect(notePathOf(commentFilePath("obsidian-plugin/flows/Login.md", FOLDERS), FOLDERS)).toBe("obsidian-plugin/flows/Login.md");
+		expect(notePathOf(commentFilePath("Index.md", FOLDERS), FOLDERS)).toBe("Index.md");
+	});
+
+	it("groups open threads by note, newest comment first, each group by its path without .md, threads in quote order", () => {
+		const { open, resolved } = groupThreads([
+			{ note: "Index.md", file: file("Index.md", [thread("i", "hello", "2026-11-01T00:00:00Z")]), text: "hello" },
+			{
+				note: "obsidian-plugin/Compile.md",
+				file: file("obsidian-plugin/Compile.md", [
+					thread("b", "second", "2026-11-02T00:00:00Z"),
+					thread("a", "first", "2026-11-03T00:00:00Z"),
+					thread("r", "first", "2026-11-09T00:00:00Z", true),
+				]),
+				text: "first second",
+			},
+		]);
+
+		expect(open.map((g) => [g.label, g.threads.map((t) => t.thread.id)])).toEqual([
+			["obsidian-plugin/Compile", ["a", "b"]],
+			["Index", ["i"]],
+		]);
+		expect(resolved.map((g) => [g.label, g.threads.map((t) => t.thread.id)])).toEqual([["obsidian-plugin/Compile", ["r"]]]);
+	});
+
+	it("shows a note's threads even when the note is gone, as changed text, and nothing for a vault without comments", () => {
+		const { open } = groupThreads([{ note: "Gone.md", file: file("Gone.md", [thread("g", "old", "2026-11-01T00:00:00Z")]), text: null }]);
+		expect(open[0].threads[0].at).toBeNull();
+		expect(groupThreads([{ note: "A.md", file: file("A.md", []), text: "" }])).toEqual({ open: [], resolved: [] });
 	});
 });
