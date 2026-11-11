@@ -15,30 +15,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, so the tag can be checked against main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 26
           cache: npm
 
+      # REL-1, REL-3, REL-4, REL-8: the tag is the version, and every version file agrees with it.
       - name: Check the tag matches the version files
         run: |
           tag="${GITHUB_REF_NAME}"
+          [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag $tag isn't a version like 0.2.0"; exit 1; }
           manifest=$(node -p 'require("./manifest.json").version')
           pkg=$(node -p 'require("./package.json").version')
+          lock=$(node -p 'require("./package-lock.json").version')
+          lockRoot=$(node -p 'require("./package-lock.json").packages[""].version')
+          minApp=$(node -p 'require("./manifest.json").minAppVersion')
           min=$(node -p "require('./versions.json')['$tag'] ?? ''")
           [ "$tag" = "$manifest" ] || { echo "::error::Tag $tag doesn't match manifest.json version $manifest"; exit 1; }
           [ "$tag" = "$pkg" ] || { echo "::error::Tag $tag doesn't match package.json version $pkg"; exit 1; }
+          [ "$tag" = "$lock" ] && [ "$tag" = "$lockRoot" ] || { echo "::error::Tag $tag doesn't match package-lock.json version $lock / $lockRoot"; exit 1; }
           [ -n "$min" ] || { echo "::error::versions.json has no entry for $tag"; exit 1; }
+          [ "$min" = "$minApp" ] || { echo "::error::versions.json says $tag needs Obsidian $min, but manifest.json's minAppVersion is $minApp"; exit 1; }
+
+      # REL-7: a release holds only work merged into main.
+      - name: Check the tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::Tag $GITHUB_REF_NAME points at a commit that isn't on main"; exit 1; }
 
       - run: npm ci
       - run: npm test
       - run: npm run build
 
-      # scripts/install.sh checks the download against these.
+      # REL-10: scripts/install.sh checks the download against these.
       - name: Write the checksums
         run: cd dist && sha256sum main.js manifest.json styles.css > checksums.txt
 
+      # REL-11, REL-12: the notes list the pull requests merged since the last release, and
+      # `gh release create` refuses a tag that already has a release, so a release is never replaced.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}

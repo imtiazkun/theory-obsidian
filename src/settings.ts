@@ -35,6 +35,8 @@ export interface TheorySettings extends SavedAuthor {
 	/** Passed to Claude Code as `--effort`, unless it's "" (Claude Code default). */
 	effort: CompileEffort;
 	showCompileButton: boolean;
+	/** Shows who last changed each rule in the editor (CFG-38). */
+	showRuleAuthors: boolean;
 	/** Pull on launch, on focus and on the timer (CFG-25). */
 	pullAutomatically: boolean;
 	/** Minutes between timer pulls (CFG-26). */
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	model: "",
 	effort: "",
 	showCompileButton: true,
+	showRuleAuthors: true,
 	pullAutomatically: true,
 	pullInterval: 5,
 	pullCodeRepos: true,
@@ -114,6 +117,18 @@ export class TheorySettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.showCompileButton).onChange(async (value) => {
 					this.plugin.settings.showCompileButton = value;
 					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Show rule authors")
+			.setDesc("Grey text after each rule's first line, saying who last changed it and when.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.showRuleAuthors).onChange(async (value) => {
+					this.plugin.settings.showRuleAuthors = value;
+					await this.plugin.saveSettings();
+					// Applies at once to every open note (CFG-38).
+					this.plugin.ruleAuthors.sync();
 				}),
 			);
 

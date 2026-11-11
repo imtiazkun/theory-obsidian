@@ -20,11 +20,21 @@ const RULE = /^(?:[-*+][ \t]+|\d+[.)][ \t]+)?\*\*([A-Z]+)-(\d+)\.?\*\*/;
 const LIST_ITEM = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/;
 const FENCE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 
+/** One rule a note declares: its ID and the lines it spans, counted from 0 over the whole text. */
+export interface RuleSpan {
+	prefix: string;
+	number: number;
+	/** The rule's first line. */
+	line: number;
+	/** The rule's last line: where its paragraph or list item ends (HDR-15). */
+	endLine: number;
+}
+
 /**
- * Counts the rules a note declares: paragraphs and list items that start with a bold ID. Front matter,
+ * Finds the rules a note declares: paragraphs and list items that start with a bold ID. Front matter,
  * fenced code and indented code never count (HDR-10).
  */
-export function countRules(text: string): RuleCount {
+export function findRules(text: string): RuleSpan[] {
 	const lines = text.split(/\r?\n/);
 	let start = 0;
 	if (lines[0]?.trim() === "---") {
@@ -32,7 +42,9 @@ export function countRules(text: string): RuleCount {
 		if (end > 0) start = end + 1;
 	}
 
-	const ids: { prefix: string; number: number }[] = [];
+	const rules: RuleSpan[] = [];
+	// The rule whose paragraph or list item is still going on.
+	let open: RuleSpan | null = null;
 	let fence: string | null = null;
 	// True at the first line of a paragraph: after a blank line, a heading, a fence or the start.
 	let paragraphStart = true;
@@ -47,10 +59,12 @@ export function countRules(text: string): RuleCount {
 		}
 		if (opened) {
 			fence = opened[1];
+			open = null;
 			continue;
 		}
 		if (line.trim() === "") {
 			paragraphStart = true;
+			open = null;
 			continue;
 		}
 		const indented = /^(?: {4}|\t)/.test(line);
@@ -62,15 +76,28 @@ export function countRules(text: string): RuleCount {
 
 		if (/^#{1,6}([ \t]|$)/.test(line)) {
 			paragraphStart = true;
+			open = null;
 			continue;
 		}
+		// A new list item ends the paragraph or list item before it.
+		if (listItem) open = null;
 		if (paragraphStart || listItem) {
 			const match = RULE.exec(line.trimStart());
-			if (match) ids.push({ prefix: match[1], number: Number(match[2]) });
+			if (match) {
+				open = { prefix: match[1], number: Number(match[2]), line: i, endLine: i };
+				rules.push(open);
+			}
+		} else if (open) {
+			open.endLine = i;
 		}
 		paragraphStart = false;
 	}
+	return rules;
+}
 
+/** Counts the rules a note declares (HDR-9, HDR-10). */
+export function countRules(text: string): RuleCount {
+	const ids = findRules(text);
 	const prefixes = new Map<string, RulePrefix>();
 	const seen = new Map<string, number>();
 	for (const { prefix, number } of ids) {

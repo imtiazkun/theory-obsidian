@@ -82,6 +82,8 @@ export class Comments {
 		try {
 			const result = await this.serial(() => saveComment(this.vaultPath(), notePath, this.modelFolders(), action, author));
 			if (result.notCommitted) new Notice(`Comment saved but not committed: ${result.notCommitted}`, 10000);
+			// Comments that commit themselves push like any commit (CMT-31).
+			else void this.plugin.push();
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : String(error), 10000);
 			return false;
@@ -96,7 +98,10 @@ export class Comments {
 		if (file.extension !== "md" || !oldPath.toLowerCase().endsWith(".md")) return;
 		this.serial(() => moveComments(this.vaultPath(), oldPath, file.path, this.modelFolders()))
 			.then(async (moved) => {
-				if (moved) await this.refresh();
+				if (moved) {
+					void this.plugin.push();
+					await this.refresh();
+				}
 			})
 			.catch((error) => new Notice(`Couldn't move the comments: ${error instanceof Error ? error.message : String(error)}`, 10000));
 	}
@@ -106,7 +111,10 @@ export class Comments {
 		if (file.extension !== "md") return;
 		this.serial(() => deleteComments(this.vaultPath(), file.path, this.modelFolders()))
 			.then(async (deleted) => {
-				if (deleted) await this.refresh();
+				if (deleted) {
+					void this.plugin.push();
+					await this.refresh();
+				}
 			})
 			.catch((error) => new Notice(`Couldn't delete the comments: ${error instanceof Error ? error.message : String(error)}`, 10000));
 	}

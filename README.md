@@ -62,8 +62,9 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
 | Author: commits are signed with the name and email git uses (the vault's git config, else the global one). The settings show them as plain text, explain how to set what is missing, and can write a name and email saved by an older version into the vault's git config | Done |
 | Commit button in each note's header, marked when the note has changes | Done |
-| Commit modal: message, with an option to include all changed files | Done |
-| Generate the commit message with Claude (sparkle button in the commit modal) | Done |
+| Commit page: every changed file with a checkbox and its diff, the rules each note adds, changes and removes, and a message that says why. Every commit pushes the vault to `origin` | Done |
+| Past commits: clicking a commit in commit history shows it read-only with its diff | Done |
+| Generate the commit message with Claude (sparkle button on the Commit page) | Done |
 | Commit history view in the right sidebar | Done |
 | Compile history view in the right sidebar: when, who and tokens spent | Done |
 | Open `Index.md` on launch | Done |
@@ -76,8 +77,9 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Read-only snapshot, deny rules and the post-compile check | Done |
 | Failure overlay: highlights and a banner on the notes a failed compile points to | Done |
 | Realized box and compile state in each note's header | Done |
-| Comments: select text in a note and click the comment button, or run Comment on selection. Comments are signed with your git identity, saved in the model folder's `.comments/` and committed on their own, never sent to Claude. The Comments view in the right sidebar shows the active note's threads, with replies, resolve and reopen; quoted text is underlined in the note | Done |
+| Comments: select text in a note and click the comment button, or run Comment on selection. Comments are signed with your git identity, saved in the model folder's `.comments/` and committed on their own, never sent to Claude. The Comments view in the right sidebar shows the threads on every note, grouped by note, with replies, resolve and reopen; clicking a quote opens the note at it; quoted text is underlined in the note | Done |
 | Change dots in the file explorer: orange for uncommitted changes, the accent colour for committed changes waiting for a compile, on folders too | Done |
+| Rule authors in the editor: grey text after each rule's first line saying who last changed it and when, or "Not committed yet" (Show rule authors setting) | Done |
 | Rule count in each note's header: "12 rules", with each prefix's count and range in its tooltip, and the warning colour when an ID is declared twice | Done |
 | Hidden folders: folders starting with `_` (like `_templates`) are grey and listed last in the file explorer. They are committed but never sent to Claude | Done |
 | Compile branches: every compile commits on `theory/compile-{revision}`, at most one open per repository; empty ones are deleted | Done |
@@ -179,13 +181,14 @@ If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are
 | Allowed commands | Claude Code only. Claude Code permission rules, separated by spaces. Defaults to `Bash(git *)`. Writes to the model are always denied, whatever this says. |
 | Remote | The vault's `origin`, like `git@github.com:team/model.git`. When the vault has one, it is shown as plain text; change it with `git remote set-url origin <url>` in the vault. Without one, an empty field and Save add it, then pull. Save never replaces or removes a remote. It lives in the vault's git config, not the plugin's settings, and a password or token in the URL is refused. |
 | Pull automatically | On by default. Pulls the vault's `main` from `origin` when Obsidian opens, when its window gets focus and every *Check every* minutes (1, 5, 15 or 30; 5 by default). Pulls only fast-forward, never touch a file with uncommitted changes and never ask for a password. **Pull now** and the pull before a compile run even when it's off. |
+| Show rule authors | On by default. Grey text after each rule's first line in the editor: who last changed the rule and when, from git, or "Not committed yet". Display only; it is never written into the note or sent to an agent. Turning it off hides it at once in every open note. |
 | Also pull code repositories | On by default. Each pull also fetches the project folder's repositories and fast-forwards those not on a compile branch, with no uncommitted changes and nothing of their own. |
 
 ## Compile rules
 
 - **What gets compiled.** Only committed revisions. Uncommitted edits are left out, and theory.md says how many when you click Compile.
 - **Last compile marker.** theory.md records the last compile in two places. In the vault repo, it moves the `theory/compiled` git tag to the compiled commit, so nothing is written into the notes. Once there is a server, the tag will be pushed so every engineer sees the same marker. In the code repositories, the commit message of each compile names the vault commit it was built from.
-- **Compile branches.** Before Claude runs, theory.md checks out a compile branch in every repository: the open one, or a new `theory/compile-{revision}` from the branch you're on. Claude commits there. A new branch that got no commits is deleted afterwards. Compile refuses to start while a repository has uncommitted changes, and it never pushes: **Create PR** in the report does.
+- **Compile branches.** Before Claude runs, theory.md checks out a compile branch in every repository: the open one, or a new `theory/compile-{revision}` from the branch you're on, fast-forwarded to its upstream first. Compile refuses to start when that base and its upstream both have new commits, or when the open branch lacks commits from its base: merge them in yourself. Claude commits there. A new branch that got no commits is deleted afterwards. Compile refuses to start while a repository has uncommitted changes, and it never pushes: **Create PR** in the report does.
 - **One compile at a time.** While a compile runs, clicking Compile again only tells you one is already running. For now the lock lives inside the app. With a server it will move to the shared remote, so a second engineer waits too.
 - **Failures.** The marker moves forward even when a compile fails. It doesn't move when you cancel, or when Compile can't start (no project folder, CLI not found). The failure is logged in the compile report, and the next compile only takes revisions committed after it. Re-applying a failed revision is a human decision.
 - **Questions back from Claude.** When the model is unclear or contradicts itself, Claude lists its questions in a compile report that theory.md shows in Obsidian. Each question links to the notes it refers to, and its **Reply** button opens the note at the rule that needs updating, else at its heading, else at the top of the note. Reports are kept in the plugin's own data file (`.obsidian/plugins/theory-md/data.json`, which git ignores), not in the model, so the model stays human-only. The last 20 are kept. Engineers answer by editing the model and compiling again.

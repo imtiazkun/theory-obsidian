@@ -499,6 +499,16 @@ function totalTokens(usage: unknown): number | undefined {
 	return counts.length > 0 ? counts.reduce((sum, n) => sum + n, 0) : undefined;
 }
 
+/** The summary when Claude Code fails to sign in (CMP-54). */
+export const SIGN_IN_SUMMARY = "Claude Code isn't signed in. Run claude in a terminal, then /login.";
+
+/** True when Claude Code's answer or error output says it couldn't sign in (CMP-54). */
+export function signInFailed(output: string): boolean {
+	return /not logged in|please run \/login|invalid api key|oauth token (?:has )?expired|authentication_error|failed to authenticate/i.test(
+		output,
+	);
+}
+
 /** The agent's answer in the shape of REPORT_SCHEMA (CMP-15). */
 export interface StructuredAnswer {
 	status: "succeeded" | "failed";
@@ -803,6 +813,14 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 								: `Couldn't find the Claude Code CLI ("${options.claudeCommand}"). Set its path in theory.md settings.`,
 					),
 				);
+				report.problems.unshift(...modelProblems(await checkModel()));
+				return report;
+			}
+
+			// Claude Code that can't sign in never read the revisions, so the compile couldn't start (CMP-54).
+			if (agent !== "acp" && !result?.structured && signInFailed(`${result?.text ?? ""}\n${stderr}`)) {
+				report.status = "failed";
+				report.summary = SIGN_IN_SUMMARY;
 				report.problems.unshift(...modelProblems(await checkModel()));
 				return report;
 			}

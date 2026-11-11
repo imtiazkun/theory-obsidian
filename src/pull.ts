@@ -290,6 +290,8 @@ export interface SyncState {
 	lastSynced: number | null;
 	/** The last pull that brought revisions. */
 	lastPulled: { at: number; count: number } | null;
+	/** True while a push runs (CMT-30, PULL-19). */
+	pushing?: boolean;
 }
 
 export function duration(ms: number): string {
@@ -342,13 +344,21 @@ export interface SyncMenu {
 	lines: string[];
 	/** Pull now's label, and whether it can be clicked. Null without a remote. */
 	pull: { label: string; enabled: boolean } | null;
+	/** Push now, when the vault has revisions that aren't pushed (PULL-19). Null otherwise. */
+	push: { label: string; enabled: boolean } | null;
 	/** The item that opens the settings. */
 	settings: "Pull settings…" | "Add a remote…";
 }
 
+/** How many of the vault's revisions the remote doesn't have, as the last fetch or push left it. */
+export function notPushed(state: SyncState): number {
+	const vault = state.vault;
+	return vault?.kind === "synced" || vault?.kind === "pulled" ? vault.ahead : 0;
+}
+
 export function syncMenu(state: SyncState, now: number): SyncMenu {
 	if (state.origin === false || state.vault?.kind === "no-origin") {
-		return { lines: ["This vault has no remote."], pull: null, settings: "Add a remote…" };
+		return { lines: ["This vault has no remote."], pull: null, push: null, settings: "Add a remote…" };
 	}
 	const checked = state.lastSynced === null ? "Not checked yet" : `Checked the remote ${duration(now - state.lastSynced)} ago`;
 	const last = state.lastPulled;
@@ -359,6 +369,7 @@ export function syncMenu(state: SyncState, now: number): SyncMenu {
 	return {
 		lines: [checked, pulled],
 		pull: state.running ? { label: "Pulling…", enabled: false } : { label: "Pull now", enabled: true },
+		push: notPushed(state) > 0 ? (state.pushing ? { label: "Pushing…", enabled: false } : { label: "Push now", enabled: true }) : null,
 		settings: "Pull settings…",
 	};
 }

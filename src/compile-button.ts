@@ -255,6 +255,16 @@ export class CompileButton {
 					.onClick(() => this.plugin.pullNow()),
 			);
 		}
+		const push = contents.push;
+		if (push) {
+			menu.addItem((item) =>
+				item
+					.setTitle(push.label)
+					.setIcon("upload")
+					.setDisabled(!push.enabled)
+					.onClick(() => this.plugin.pushNow()),
+			);
+		}
 		const addRemote = contents.settings === "Add a remote…";
 		menu.addItem((item) =>
 			item
@@ -348,8 +358,8 @@ export class CompileButton {
 
 	private onCommitClick() {
 		const active = this.activeChangedFile();
-		if (active) this.plugin.openCommitModal(active);
-		else if (this.state.changed.length > 0) this.plugin.openCommitAllModal();
+		if (active) this.plugin.openCommitPage(active);
+		else if (this.state.changed.length > 0) this.plugin.openCommitPage("all");
 		else new Notice("No changes to commit");
 	}
 

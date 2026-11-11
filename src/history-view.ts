@@ -109,6 +109,9 @@ export class CommitHistoryView extends ItemView {
 			meta.createSpan({ text: timeAgo(commit.date) });
 			meta.createSpan({ text: " · " });
 			meta.createSpan({ cls: "theory-history-hash", text: commit.hash.slice(0, 7) });
+			// Opens the commit on the Commit page, read-only, with its diff (UI-31).
+			item.addClass("is-clickable");
+			item.addEventListener("click", () => this.plugin.openPastCommit(commit.hash, commit.path));
 		}
 	}
 
@@ -120,7 +123,7 @@ export class CommitHistoryView extends ItemView {
 			status.createSpan({ text: "Uncommitted changes" });
 			status
 				.createEl("button", { cls: "mod-cta theory-history-commit", text: "Commit…" })
-				.addEventListener("click", () => this.plugin.openCommitModal(file));
+				.addEventListener("click", () => this.plugin.openCommitPage(file));
 		}
 	}
 

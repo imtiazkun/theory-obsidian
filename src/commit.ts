@@ -1,118 +1,10 @@
-import { App, MarkdownView, Modal, Setting, TFile, getIconIds, setIcon } from "obsidian";
+import { MarkdownView, getIconIds } from "obsidian";
 import type TheoryPlugin from "./main";
-import { type Identity, hasUncommittedChanges } from "./vault";
+import { hasUncommittedChanges } from "./vault";
 
 export function commitIcon(): string {
 	// Newer Lucide versions renamed "git-commit" to "git-commit-horizontal".
 	return getIconIds().includes("lucide-git-commit-horizontal") ? "git-commit-horizontal" : "git-commit";
-}
-
-export class CommitModal extends Modal {
-	private includeAll = false;
-
-	constructor(
-		app: App,
-		private plugin: TheoryPlugin,
-		/** The note to commit, or null to commit every changed file. */
-		private file: TFile | null,
-		private otherChanges: string[],
-		/** Who signs, as git reports it (CMT-9). */
-		private signer: Identity,
-	) {
-		super(app);
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		this.setTitle("Commit changes");
-		contentEl.addClass("theory-commit");
-
-		const { file } = this;
-		const count = this.otherChanges.length;
-		const chip = contentEl.createDiv({ cls: "theory-commit-file" });
-		setIcon(chip.createSpan({ cls: "theory-commit-file-icon" }), file ? "file-text" : "files");
-		chip.createSpan({ text: file ? file.path : `${count} changed ${count === 1 ? "file" : "files"}` });
-		if (!file) chip.setAttr("title", this.otherChanges.join("\n"));
-
-		const messageBox = contentEl.createDiv({ cls: "theory-commit-message-box" });
-		const message = messageBox.createEl("textarea", {
-			cls: "theory-commit-message",
-			attr: { rows: "3", placeholder: "Describe what changed", "aria-label": "Commit message" },
-		});
-		message.value = file ? `Update ${file.basename}` : "Update model";
-
-		const generate = messageBox.createEl("button", {
-			cls: "clickable-icon theory-commit-generate",
-			attr: { "aria-label": "Generate the message with Claude" },
-		});
-		setIcon(generate, "sparkles");
-		generate.addEventListener("click", async () => {
-			if (generate.disabled) return;
-			generate.disabled = true;
-			generate.addClass("is-generating");
-			const paths = this.includeAll || !file ? [...(file ? [file.path] : []), ...this.otherChanges] : [file.path];
-			const generated = await this.plugin.generateCommitMessage(paths);
-			generate.disabled = false;
-			generate.removeClass("is-generating");
-			if (generated === null) return;
-			message.value = generated;
-			updateSubmit();
-			message.focus();
-		});
-
-		if (file && count > 0) {
-			new Setting(contentEl)
-				.setName("Include all changed files")
-				.setDesc(`${count} other ${count === 1 ? "file has" : "files have"} uncommitted changes.`)
-				.addToggle((toggle) =>
-					toggle.setValue(this.includeAll).onChange((value) => (this.includeAll = value)),
-				);
-		}
-
-		const footer = contentEl.createDiv({ cls: "theory-commit-footer" });
-		footer.createDiv({ cls: "theory-commit-author", text: `Signed as ${this.signer.name} <${this.signer.email}>` });
-
-		const buttons = footer.createDiv({ cls: "modal-button-container" });
-		buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
-		const submit = buttons.createEl("button", {
-			cls: "mod-cta",
-			text: "Commit",
-			attr: { "aria-label": "Commit (⌘/Ctrl + Enter)" },
-		});
-
-		const updateSubmit = () => (submit.disabled = message.value.trim() === "");
-		message.addEventListener("input", updateSubmit);
-		message.addEventListener("keydown", (event) => {
-			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-				event.preventDefault();
-				submit.click();
-			}
-		});
-
-		submit.addEventListener("click", async () => {
-			if (submit.disabled) return;
-			submit.disabled = true;
-			submit.setText("Committing…");
-			const done = await this.plugin.commitChanges(
-				message.value.trim(),
-				this.includeAll || !file ? "all" : [file.path],
-			);
-			if (done) {
-				this.close();
-			} else {
-				submit.setText("Commit");
-				updateSubmit();
-			}
-		});
-
-		updateSubmit();
-		message.focus();
-		message.select();
-	}
-
-	onClose() {
-		this.contentEl.empty();
-	}
 }
 
 /** Keeps a commit button in the header of every open note, marked when the note has changes. */
@@ -138,7 +30,7 @@ export class CommitButtons {
 
 			let button = this.buttons.get(view);
 			if (!button) {
-				button = view.addAction(commitIcon(), "Commit changes", () => this.plugin.openCommitModal(view.file));
+				button = view.addAction(commitIcon(), "Commit changes", () => this.plugin.openCommitPage(view.file));
 				button.addClass("theory-commit-button");
 				this.buttons.set(view, button);
 			}

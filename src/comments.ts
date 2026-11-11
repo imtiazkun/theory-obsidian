@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { existsSync } from "fs";
-import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { findAnchor } from "./anchor";
 import { commit, git, type Identity } from "./vault";
@@ -102,9 +102,95 @@ export async function readCommentFile(vaultPath: string, path: string): Promise<
 	return file ? { kind: "ok", file } : { kind: "broken" };
 }
 
+/** A note's path without `.md`, as the Comments view names it: `obsidian-plugin/Compile` (CMNT-17). */
+export function noteLabel(notePath: string): string {
+	return notePath.replace(/\.md$/i, "");
+}
+
 /** What the Comments view says when a note's comment file can't be read (CMNT-12). */
-export function unreadableMessage(path: string): string {
-	return `The comments on this note can't be read: ${path}.`;
+export function unreadableMessage(notePath: string, path: string): string {
+	return `The comments on ${noteLabel(notePath)} can't be read: ${path}.`;
+}
+
+/** The note a comment file belongs to: the reverse of `commentFilePath` (CMNT-9). */
+export function notePathOf(commentPath: string, modelFolders: string[]): string | null {
+	if (!commentPath.toLowerCase().endsWith(".json")) return null;
+	const md = commentPath.replace(/\.json$/i, ".md");
+	if (md.startsWith(`${COMMENTS_FOLDER}/`)) return md.slice(COMMENTS_FOLDER.length + 1);
+	const slash = md.indexOf("/");
+	const folder = md.slice(0, slash);
+	if (slash !== -1 && modelFolders.includes(folder) && md.startsWith(`${folder}/${COMMENTS_FOLDER}/`)) {
+		return `${folder}/${md.slice(folder.length + COMMENTS_FOLDER.length + 2)}`;
+	}
+	return null;
+}
+
+async function jsonFiles(vaultPath: string, folder: string): Promise<string[]> {
+	const entries = await readdir(join(vaultPath, folder), { withFileTypes: true }).catch(() => []);
+	const found: string[] = [];
+	for (const entry of entries) {
+		const path = `${folder}/${entry.name}`;
+		if (entry.isDirectory()) found.push(...(await jsonFiles(vaultPath, path)));
+		else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) found.push(path);
+	}
+	return found;
+}
+
+/** Every comment file in the vault, with the note it belongs to (CMNT-9, CMNT-16). */
+export async function listCommentFiles(vaultPath: string, modelFolders: string[]): Promise<{ note: string; path: string }[]> {
+	const folders = [COMMENTS_FOLDER, ...modelFolders.map((folder) => `${folder}/${COMMENTS_FOLDER}`)];
+	const files: { note: string; path: string }[] = [];
+	for (const folder of folders) {
+		for (const path of await jsonFiles(vaultPath, folder)) {
+			const note = notePathOf(path, modelFolders);
+			if (note) files.push({ note, path });
+		}
+	}
+	return files;
+}
+
+/** One note's threads in the Comments view, under the note's path (CMNT-17). */
+export interface ThreadGroup {
+	note: string;
+	label: string;
+	threads: PlacedThread[];
+}
+
+function newest(threads: PlacedThread[]): string {
+	return threads
+		.flatMap(({ thread }) => thread.comments.map((c) => c.at))
+		.reduce((a, b) => (new Date(b).getTime() > new Date(a).getTime() ? b : a), "1970-01-01T00:00:00Z");
+}
+
+function grouped(groups: ThreadGroup[]): ThreadGroup[] {
+	return groups
+		.filter((group) => group.threads.length > 0)
+		.map((group) => ({ group, at: new Date(newest(group.threads)).getTime() }))
+		.sort((a, b) => b.at - a.at || a.group.label.localeCompare(b.group.label))
+		.map(({ group }) => group);
+}
+
+/**
+ * Every note's threads, grouped by note, the note with the newest comment first (CMNT-17). Open threads
+ * follow the order their quotes appear in the note; resolved ones are grouped the same way (CMNT-19).
+ * `text` is null when the note isn't in the vault, so every quote counts as changed.
+ */
+export function groupThreads(notes: { note: string; file: CommentFile; text: string | null }[]): {
+	open: ThreadGroup[];
+	resolved: ThreadGroup[];
+} {
+	const open: ThreadGroup[] = [];
+	const resolved: ThreadGroup[] = [];
+	for (const { note, file, text } of notes) {
+		const ordered = orderThreads(file, text ?? "");
+		open.push({ note, label: noteLabel(note), threads: ordered.open });
+		resolved.push({
+			note,
+			label: noteLabel(note),
+			threads: ordered.resolved.map((thread) => ({ thread, at: text === null ? null : quotePosition(text, thread.anchor.quote) })),
+		});
+	}
+	return { open: grouped(open), resolved: grouped(resolved) };
 }
 
 function newId(taken: Set<string>): string {
@@ -179,7 +265,7 @@ export async function saveComment(
 ): Promise<CommentResult> {
 	const path = commentFilePath(notePath, modelFolders);
 	const read = await readCommentFile(vaultPath, path);
-	if (read.kind === "broken") throw new Error(unreadableMessage(path));
+	if (read.kind === "broken") throw new Error(unreadableMessage(notePath, path));
 	const current: CommentFile = read.kind === "ok" ? read.file : { version: 1, note: notePath, threads: [] };
 	const file = applyAction(current, action, author, now);
 	await mkdir(dirname(join(vaultPath, path)), { recursive: true });

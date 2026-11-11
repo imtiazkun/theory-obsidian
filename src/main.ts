@@ -1,5 +1,7 @@
 import { FileSystemAdapter, MarkdownView, Notice, Plugin, TAbstractFile, TFile, debounce } from "obsidian";
-import { CommitButtons, CommitModal } from "./commit";
+import { CommitButtons } from "./commit";
+import { COMMIT_VIEW_TYPE, CommitView, PAST_COMMIT_VIEW_TYPE, PastCommitView } from "./commit-view";
+import { type PushResult, commitNotice, pushNotice, pushVault } from "./push";
 import { generateCommitMessage } from "./commit-message";
 import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
@@ -19,6 +21,7 @@ import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
 import { NoteStatus } from "./note-status";
+import { RuleAuthorsOverlay } from "./rule-authors-view";
 import { RuleCounts } from "./rule-count-header";
 import { ChangeDots, EntryFiles, HiddenFolders } from "./explorer";
 import { Comments } from "./comments-ui";
@@ -66,6 +69,7 @@ export default class TheoryPlugin extends Plugin {
 	overlay = new FailureOverlay(this);
 	private noteStatus = new NoteStatus(this);
 	private ruleCounts = new RuleCounts(this);
+	ruleAuthors = new RuleAuthorsOverlay(this);
 	private hiddenFolders = new HiddenFolders(this);
 	private entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
@@ -126,6 +130,8 @@ export default class TheoryPlugin extends Plugin {
 			name: "Show commit history",
 			callback: () => this.showHistoryView(true),
 		});
+		this.registerView(COMMIT_VIEW_TYPE, (leaf) => new CommitView(leaf, this));
+		this.registerView(PAST_COMMIT_VIEW_TYPE, (leaf) => new PastCommitView(leaf, this));
 		this.registerView(COMPILE_HISTORY_VIEW_TYPE, (leaf) => new CompileHistoryView(leaf, this));
 		this.registerView(REPORT_VIEW_TYPE, (leaf) => new CompileReportView(leaf, this));
 		this.addCommand({
@@ -223,6 +229,10 @@ export default class TheoryPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("editor-change", debounce(syncRuleCounts, 300, true)));
 		this.registerEvent(this.app.vault.on("modify", debounce(syncRuleCounts, 300, true)));
 
+		// Who last changed each rule, worked out again when a note opens and shortly after typing stops (HDR-19).
+		this.registerEditorExtension(this.ruleAuthors.editorExtension());
+		this.registerEvent(this.app.workspace.on("file-open", () => this.ruleAuthors.sync()));
+
 		// Comments: the button over a selection, the underlines, and the comment file following its note (CMNT-3, CMNT-15, CMNT-24).
 		this.registerDomEvent(document, "selectionchange", debounce(() => this.comments.selectionChanged(), 150, true));
 		this.registerEditorExtension(this.comments.editorExtension());
@@ -248,7 +258,7 @@ export default class TheoryPlugin extends Plugin {
 		this.addCommand({
 			id: "commit-current-note",
 			name: "Commit current note",
-			callback: () => this.openCommitModal(this.app.workspace.getActiveFile()),
+			callback: () => this.openCommitPage(this.app.workspace.getActiveFile()),
 		});
 		const syncButtons = () => this.commitButtons.sync();
 		const syncButtonsSoon = debounce(syncButtons, 1000, true);
@@ -595,51 +605,97 @@ export default class TheoryPlugin extends Plugin {
 		}
 	}
 
-	async openCommitModal(file: TFile | null) {
-		if (!file) {
+	/**
+	 * Opens the Commit page in a tab (CMT-17). A note ticks only that note; "all" ticks every changed file
+	 * (CMT-19). Only one page for new changes is open at a time: another commit brings it to the front (CMT-18).
+	 */
+	async openCommitPage(from: TFile | null | "all") {
+		if (from === null) {
 			new Notice("Open a note to commit it.");
 			return;
 		}
 		try {
 			const changed = await changedFiles(this.getVaultPath());
-			if (!changed.includes(file.path)) {
+			if (from === "all" && changed.length === 0) {
+				new Notice("No changes to commit");
+				return;
+			}
+			if (from !== "all" && !changed.includes(from.path)) {
 				new Notice("No changes to commit in this note.");
 				return;
 			}
-			const others = changed.filter((path) => path !== file.path);
-			const signer = await requireIdentity(this.getVaultPath());
-			new CommitModal(this.app, this, file, others, signer).open();
+			// Without a name and email git can't sign, so nothing opens (CMT-11).
+			await requireIdentity(this.getVaultPath());
 		} catch (error) {
 			new Notice(failure("Couldn't read changes", error), 10000);
+			return;
 		}
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(COMMIT_VIEW_TYPE)[0];
+		if (existing) {
+			await workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = workspace.getLeaf("tab");
+		const ticked = from === "all" ? "all" : from.path;
+		await leaf.setViewState({ type: COMMIT_VIEW_TYPE, active: true });
+		if (leaf.view instanceof CommitView) await leaf.view.start(ticked);
+		await workspace.revealLeaf(leaf);
 	}
 
-	/** Opens the commit modal for every changed file in the vault. */
-	async openCommitAllModal() {
-		try {
-			const changed = await changedFiles(this.getVaultPath());
-			if (changed.length === 0) {
-				new Notice("No changes to commit.");
-				return;
+	/** Opens a past commit on the read-only Commit page, reusing its tab (CMT-25, CMT-29, UI-31). */
+	async openPastCommit(hash: string, path: string) {
+		const { workspace } = this.app;
+		const leaf = workspace.getLeavesOfType(PAST_COMMIT_VIEW_TYPE)[0] ?? workspace.getLeaf("tab");
+		await leaf.setViewState({ type: PAST_COMMIT_VIEW_TYPE, active: true, state: { hash, path } });
+		await workspace.revealLeaf(leaf);
+	}
+
+	// One push at a time, so a commit's push and Push now never race.
+	private pushQueue: Promise<unknown> = Promise.resolve();
+
+	/** Pushes the vault's `main` to `origin` (CMT-30 to CMT-33), then refreshes the sync status. */
+	push(): Promise<PushResult> {
+		const run = async (): Promise<PushResult> => {
+			this.puller.state.pushing = true;
+			this.compileButton.render();
+			try {
+				return await pushVault(this.getVaultPath());
+			} catch (error) {
+				return { kind: "failed", message: errorMessage(error) };
+			} finally {
+				this.puller.state.pushing = false;
+				await this.puller.recount();
+				this.compileButton.render();
 			}
-			const signer = await requireIdentity(this.getVaultPath());
-			new CommitModal(this.app, this, null, changed, signer).open();
-		} catch (error) {
-			new Notice(failure("Couldn't read changes", error), 10000);
-		}
+		};
+		const next = this.pushQueue.then(run, run);
+		this.pushQueue = next.catch(() => {});
+		return next;
 	}
 
-	/** Returns true when the commit was made. */
-	async commitChanges(message: string, paths: string[] | "all"): Promise<boolean> {
+	/** Push now in the sync menu: pushes every revision that isn't pushed yet (CMT-37, PULL-19). */
+	async pushNow() {
+		const result = await this.push();
+		new Notice(pushNotice(result), result.kind === "pushed" ? 4000 : 10000);
+	}
+
+	/** Commits exactly `paths` and pushes (CMT-12, CMT-30). Returns true when the commit was made. */
+	async commitChanges(message: string, paths: string[]): Promise<boolean> {
+		let hash: string;
 		try {
-			const hash = await commit(this.getVaultPath(), message, paths);
-			new Notice(`Committed ${hash}`);
-			this.refreshGitState();
-			return true;
+			hash = await commit(this.getVaultPath(), message, paths);
 		} catch (error) {
 			new Notice(failure("Commit failed", error), 10000);
 			return false;
 		}
+		this.refreshGitState();
+		// The page closes at once; the notice comes when the push ends. A failed push never undoes the commit (CMT-34).
+		void this.push().then((pushed) => {
+			new Notice(commitNotice(hash, pushed), pushed.kind === "pushed" || pushed.kind === "no-origin" ? 4000 : 10000);
+			this.refreshGitState();
+		});
+		return true;
 	}
 
 	/** Asks Claude for a commit message describing the changes to `paths`. Returns null when it couldn't. */
@@ -749,6 +805,7 @@ export default class TheoryPlugin extends Plugin {
 	/** Updates everything that shows git state after the repository changes. */
 	refreshGitState() {
 		this.puller.recount();
+		this.ruleAuthors.sync();
 		this.commitButtons.sync();
 		this.changeDots.sync();
 		this.compileButton.refresh();
@@ -845,6 +902,8 @@ export default class TheoryPlugin extends Plugin {
 		try {
 			const added = await addMissingStarterFiles(this.getVaultPath(), starterFiles(this.app.vault.getName()));
 			this.refreshGitState();
+			// Every commit pushes (CMT-30).
+			if (added > 0) void this.push();
 			new Notice(`Added ${added} missing files.`);
 		} catch (error) {
 			new Notice(`Couldn't add the missing files: ${errorMessage(error)}`, 10000);
