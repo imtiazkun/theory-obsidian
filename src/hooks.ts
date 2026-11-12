@@ -11,7 +11,7 @@ export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 /** What each event means, for the settings. */
 export const HOOK_EVENT_NAMES: Record<HookEvent, string> = {
-	comment: "Comment committed",
+	comment: "Comment posted",
 	commit: "Revision committed",
 	push: "Push finished",
 	"compile-start": "Compile started",
@@ -179,7 +179,7 @@ export class Hooks {
 export function sampleDetails(event: HookEvent): Record<string, unknown> {
 	switch (event) {
 		case "comment":
-			return { action: "comment", note: "Example.md", text: "This is a sample comment." };
+			return { action: "comment", note: "Example.md", text: "This is a sample comment.", committed: true };
 		case "commit":
 			return { hash: "0000000", subject: "Sample revision" };
 		case "push":
@@ -193,9 +193,12 @@ export function sampleDetails(event: HookEvent): Record<string, unknown> {
 	}
 }
 
-/** The details of a `comment` event: the note, what was done and the comment's text (HOOK-3). */
-export function commentDetails(notePath: string, action: CommentAction, file: CommentFile): Record<string, unknown> {
-	const details: Record<string, unknown> = { action: action.kind, note: notePath };
+/**
+ * The details of a `comment` event: the note, what was done, the comment's text and whether its commit
+ * worked (HOOK-2, HOOK-3). The event fires once the comment is saved, committed or not.
+ */
+export function commentDetails(notePath: string, action: CommentAction, file: CommentFile, committed: boolean): Record<string, unknown> {
+	const details: Record<string, unknown> = { action: action.kind, note: notePath, committed };
 	if (action.kind === "comment" || action.kind === "reply") {
 		details.text = action.text;
 		if (action.kind === "reply") details.thread = action.threadId;

@@ -122,20 +122,23 @@ describe("hook details (HOOK-3)", () => {
 	} as never;
 
 	it("give the note and comment text", () => {
-		expect(commentDetails("A.md", { kind: "comment", anchor: { quote: "q" } as never, text: "Hi" }, file)).toEqual({
+		expect(commentDetails("A.md", { kind: "comment", anchor: { quote: "q" } as never, text: "Hi" }, file, true)).toEqual({
 			action: "comment",
 			note: "A.md",
+			committed: true,
 			text: "Hi",
 		});
-		expect(commentDetails("A.md", { kind: "reply", threadId: "t1", text: "Yes" }, file)).toEqual({
+		expect(commentDetails("A.md", { kind: "reply", threadId: "t1", text: "Yes" }, file, true)).toEqual({
 			action: "reply",
 			note: "A.md",
+			committed: true,
 			text: "Yes",
 			thread: "t1",
 		});
-		expect(commentDetails("A.md", { kind: "resolve", threadId: "t1" }, file)).toEqual({
+		expect(commentDetails("A.md", { kind: "resolve", threadId: "t1" }, file, false)).toEqual({
 			action: "resolve",
 			note: "A.md",
+			committed: false,
 			text: "Why?",
 			thread: "t1",
 		});

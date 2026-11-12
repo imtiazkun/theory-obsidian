@@ -82,9 +82,10 @@ export class Comments {
 		}
 		try {
 			const result = await this.serial(() => saveComment(this.vaultPath(), notePath, this.modelFolders(), action, author));
+			// The comment is saved, so its hook fires even when its own commit failed (HOOK-2, CMNT-13).
+			this.plugin.hooks.fire("comment", commentDetails(notePath, action, result.file, !result.notCommitted));
 			if (result.notCommitted) new Notice(`Comment saved but not committed: ${result.notCommitted}`, 10000);
 			else {
-				this.plugin.hooks.fire("comment", commentDetails(notePath, action, result.file));
 				// Comments that commit themselves push like any commit (CMT-31).
 				void this.plugin.push();
 			}
