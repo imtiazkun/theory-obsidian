@@ -1,30 +1,17 @@
 import { basename } from "path";
-import type { CompileReport } from "./compile";
-import { PullRequest, branchPullRequest, isFromBranch } from "./github";
 import { findProjectRepos } from "./project";
+import { NO_PROMPT_ENV } from "./pull";
 import { git } from "./vault";
 
-/** Every compile branch is named this, followed by the short hash of the latest revision compiled. */
-export const COMPILE_BRANCH_PREFIX = "theory/compile-";
+/**
+ * Every branch a build makes starts with this: issue branches `theory/{number}-{short name}` and epic branches
+ * `theory/epic-{number}-{short name}` (BLD-10, BLD-11). Together they are the compile branches (see Concepts).
+ */
+export const COMPILE_BRANCH_PREFIX = "theory/";
 
 export interface BranchCommit {
 	hash: string;
 	subject: string;
-}
-
-/** What one compile did to one repository's compile branch. */
-export interface CompileBranch {
-	/** Absolute path of the code repository. */
-	repoPath: string;
-	/** The repository's name in the project folder. */
-	repo: string;
-	branch: string;
-	/** The branch the compile branch came from, and where its pull request goes. */
-	base: string;
-	/** Commits this compile added, oldest first. */
-	commits: BranchCommit[];
-	/** False when this compile created the branch, it got no commits, and so it was deleted. */
-	kept: boolean;
 }
 
 export interface CodeRepo {
@@ -55,10 +42,10 @@ export async function uncommittedCount(repoPath: string): Promise<number> {
 	return stdout.split("\n").filter((line) => line.trim() !== "").length;
 }
 
-/** Names of the repositories in the project folder that have uncommitted changes. */
-export async function dirtyRepos(projectFolder: string): Promise<string[]> {
+/** Names of the repositories that have uncommitted changes, from the project folder or the given list. */
+export async function dirtyRepos(projectFolder: string, repos: CodeRepo[] = projectRepos(projectFolder)): Promise<string[]> {
 	const dirty: string[] = [];
-	for (const repo of projectRepos(projectFolder)) {
+	for (const repo of repos) {
 		const { stdout } = await git(repo.path, ["status", "--porcelain"]);
 		if (stdout.trim() !== "") dirty.push(repo.name);
 	}
@@ -69,7 +56,7 @@ export function isCompileBranch(branch: string | null): boolean {
 	return branch?.startsWith(COMPILE_BRANCH_PREFIX) === true;
 }
 
-async function refExists(repoPath: string, ref: string): Promise<boolean> {
+export async function refExists(repoPath: string, ref: string): Promise<boolean> {
 	try {
 		await git(repoPath, ["rev-parse", "--verify", "--quiet", ref]);
 		return true;
@@ -78,39 +65,91 @@ async function refExists(repoPath: string, ref: string): Promise<boolean> {
 	}
 }
 
-function branchExists(repoPath: string, branch: string): Promise<boolean> {
+export function branchExists(repoPath: string, branch: string): Promise<boolean> {
 	return refExists(repoPath, `refs/heads/${branch}`);
 }
 
-/** The base a compile recorded for this branch, newest report first. */
-export function recordedBase(reports: CompileReport[], repoPath: string, branch: string): string | null {
-	for (const report of reports) {
-		const record = report.branches?.find((b) => b.repoPath === repoPath && b.branch === branch);
-		if (record) return record.base;
-	}
-	return null;
+/** True when the branch exists here or on `origin`, as git last fetched it. */
+async function nameTaken(repoPath: string, branch: string): Promise<boolean> {
+	return (await branchExists(repoPath, branch)) || (await refExists(repoPath, `refs/remotes/origin/${branch}`));
 }
 
 /**
- * The pull request opened for this branch from any report, newest first. A pull request recorded for an older
- * branch of the same name doesn't count: the last commit its report added must be on this branch.
+ * `name`, or `name-2`, `name-3` and so on: the first that no repository in `repoPaths` has, here or on `origin`.
+ * A branch is never reused or overwritten (BLD-12), and an epic branch gets one name in every repository (BLD-11).
  */
-export async function recordedPullRequest(reports: CompileReport[], repoPath: string, branch: string): Promise<PullRequest | null> {
-	for (const report of reports) {
-		const pr = report.pullRequests?.find((p) => p.repoPath === repoPath && p.branch === branch);
-		if (!pr) continue;
-		const record = report.branches?.find((b) => b.repoPath === repoPath && b.branch === branch);
-		if (await isFromBranch(repoPath, branch, record?.commits.at(-1)?.hash, pr.state)) return pr;
+export async function uniqueBranchName(repoPaths: string[], name: string): Promise<string> {
+	for (let n = 1; ; n++) {
+		const candidate = n === 1 ? name : `${name}-${n}`;
+		let taken = false;
+		for (const repoPath of repoPaths) if (await nameTaken(repoPath, candidate)) taken = true;
+		if (!taken) return candidate;
 	}
-	return null;
+}
+
+/** The branch's upstream, like `origin/main`, or null when it has none or it was never fetched. */
+export async function upstreamOf(repoPath: string, branch: string): Promise<string | null> {
+	const { stdout } = await git(repoPath, ["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`]);
+	const upstream = stdout.trim();
+	return upstream && (await refExists(repoPath, upstream)) ? upstream : null;
+}
+
+/**
+ * The repository's default branch: the one `origin/HEAD` points at, else `main`, else `master`, else the branch
+ * checked out. Null when there is none, e.g. a repository without commits.
+ */
+export async function defaultBranch(repoPath: string): Promise<string | null> {
+	try {
+		const { stdout } = await git(repoPath, ["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
+		const name = stdout.trim().replace(/^origin\//, "");
+		if (name && (await branchExists(repoPath, name))) return name;
+	} catch {
+		// origin/HEAD isn't set, e.g. a remote added by hand.
+	}
+	for (const name of ["main", "master"]) if (await branchExists(repoPath, name)) return name;
+	return currentBranch(repoPath);
+}
+
+export async function headOf(repoPath: string, ref: string): Promise<string> {
+	return (await git(repoPath, ["rev-parse", "--verify", ref])).stdout.trim();
+}
+
+export function gitError(error: unknown): string {
+	return (error as { stderr?: string }).stderr?.trim() || (error instanceof Error ? error.message : String(error));
+}
+
+async function countRange(repoPath: string, range: string): Promise<number> {
+	return Number((await git(repoPath, ["rev-list", "--count", range])).stdout.trim());
+}
+
+/** Thrown when a branch and its upstream both have new commits, so only a person can bring them together. */
+export class DivergedError extends Error {}
+
+/**
+ * Brings a local branch up to `upstream`, as git last fetched it. A branch that is only behind is fast-forwarded,
+ * checked out or not. Throws DivergedError when it has commits of its own too. Never merges or rebases.
+ */
+export async function fastForwardTo(repoPath: string, branch: string, upstream: string | null) {
+	if (!upstream || !(await refExists(repoPath, upstream))) return;
+	const local = `refs/heads/${branch}`;
+	if ((await countRange(repoPath, `${local}..${upstream}`)) === 0) return;
+	if ((await countRange(repoPath, `${upstream}..${local}`)) > 0) throw new DivergedError(`${branch} and ${upstream} both have new commits.`);
+	if ((await currentBranch(repoPath)) === branch) {
+		// Git refuses rather than overwrite anything in the working tree.
+		await git(repoPath, ["merge", "--ff-only", "--quiet", upstream]);
+	} else {
+		// Not checked out, so only its ref moves, and only from where it was.
+		await git(repoPath, ["update-ref", local, await headOf(repoPath, upstream), await headOf(repoPath, local)]);
+	}
 }
 
 /** True when every commit on `branch` is already in `base`, or in its upstream as git last fetched it. */
-async function isMerged(repoPath: string, branch: string, base: string): Promise<boolean> {
-	for (const ref of [base, await upstreamOf(repoPath, base)]) {
-		if (!ref) continue;
+export async function isMerged(repoPath: string, branch: string, base: string): Promise<boolean> {
+	const ref = (await branchExists(repoPath, branch)) ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
+	for (const target of [`refs/heads/${base}`, await upstreamOf(repoPath, base).catch(() => null), `refs/remotes/origin/${base}`]) {
+		if (!target || !(await refExists(repoPath, target))) continue;
 		try {
-			await git(repoPath, ["merge-base", "--is-ancestor", `refs/heads/${branch}`, ref]);
+			await git(repoPath, ["merge-base", "--is-ancestor", ref, target]);
 			return true;
 		} catch {
 			// Not merged into this one.
@@ -119,177 +158,13 @@ async function isMerged(repoPath: string, branch: string, base: string): Promise
 	return false;
 }
 
-/**
- * A compile branch is open until it is merged into its base or its pull request is closed.
- * The pull request's state comes from GitHub, else from the reports. Offline, only the reports are asked.
- */
-export async function isOpenCompileBranch(
-	repoPath: string,
-	branch: string,
-	base: string,
-	reports: CompileReport[],
-	online = true,
-): Promise<boolean> {
-	if (!(await branchExists(repoPath, branch))) return false;
-	if (await isMerged(repoPath, branch, base)) return false;
-	const pr = (online ? await branchPullRequest(repoPath, branch) : null) ?? (await recordedPullRequest(reports, repoPath, branch));
-	return pr?.state !== "closed" && pr?.state !== "merged";
-}
-
-/** The repository's open compile branch with its base, or null. There is at most one. */
-export async function openCompileBranch(
-	repoPath: string,
-	reports: CompileReport[],
-	online = true,
-): Promise<{ branch: string; base: string } | null> {
-	const { stdout } = await git(repoPath, [
-		"for-each-ref",
-		"--sort=-committerdate",
-		"--format=%(refname:short)",
-		`refs/heads/${COMPILE_BRANCH_PREFIX}*`,
-	]);
-	const current = await currentBranch(repoPath);
-	for (const branch of stdout.split("\n").map((b) => b.trim()).filter(Boolean)) {
-		// A branch no report knows came from the branch the repository is on, unless that is a compile branch too.
-		const base = recordedBase(reports, repoPath, branch) ?? (current && !isCompileBranch(current) ? current : "main");
-		if (await isOpenCompileBranch(repoPath, branch, base, reports, online)) return { branch, base };
-	}
-	return null;
-}
-
-/** A compile branch checked out for a running compile. */
-export interface PreparedBranch extends CodeRepo {
-	branch: string;
-	base: string;
-	/** True when this compile created the branch. */
-	created: boolean;
-	/** The branch's commit before Claude ran. */
-	startHead: string;
-	/** The branch checked out before the compile. */
-	previous: string;
-}
-
-async function headOf(repoPath: string, ref: string): Promise<string> {
-	return (await git(repoPath, ["rev-parse", "--verify", ref])).stdout.trim();
-}
-
-function gitError(error: unknown): string {
-	return (error as { stderr?: string }).stderr?.trim() || (error instanceof Error ? error.message : String(error));
-}
-
-/**
- * Checks out a compile branch in every repository before Claude runs: the open one when there
- * is one, else a new `theory/compile-{revision}` from the branch checked out now, brought up to its
- * upstream first. Undoes what it did and throws when one repository fails, so the compile doesn't start.
- */
-export async function prepareBranches(projectFolder: string, head: string, reports: CompileReport[]): Promise<PreparedBranch[]> {
-	const prepared: PreparedBranch[] = [];
+/** Pushes the branch to `origin` and sets it as its upstream. Never forced (BLD-25). */
+export async function pushBranch(repoPath: string, branch: string) {
 	try {
-		for (const repo of projectRepos(projectFolder)) {
-			const current = await currentBranch(repo.path);
-			if (!current) throw new Error(`${repo.name} isn't on a branch. Check out a branch first.`);
-			const open = await openCompileBranch(repo.path, reports);
-			if (open) {
-				await requireBaseMerged(repo, open.branch, open.base);
-				if (current !== open.branch) await git(repo.path, ["checkout", open.branch]);
-				prepared.push({ ...repo, ...open, created: false, startHead: await headOf(repo.path, "HEAD"), previous: current });
-				continue;
-			}
-			// A compile that starts on a finished compile branch goes back to that branch's base.
-			const base = isCompileBranch(current) ? (recordedBase(reports, repo.path, current) ?? "main") : current;
-			const branch = `${COMPILE_BRANCH_PREFIX}${head.slice(0, 7)}`;
-			if (await branchExists(repo.path, branch)) {
-				throw new Error(`${repo.name} already has a branch named ${branch}. Rename or delete it first.`);
-			}
-			await updateBase(repo, base, current);
-			await git(repo.path, ["checkout", "-b", branch, base]);
-			prepared.push({ ...repo, branch, base, created: true, startHead: await headOf(repo.path, "HEAD"), previous: current });
-		}
+		await git(repoPath, ["push", "--quiet", "-u", "origin", `refs/heads/${branch}:refs/heads/${branch}`], NO_PROMPT_ENV);
 	} catch (error) {
-		await undoBranches(prepared);
 		throw new Error(gitError(error));
 	}
-	return prepared;
-}
-
-/** The base's upstream, like `origin/main`, or null when it has none. */
-async function upstreamOf(repoPath: string, base: string): Promise<string | null> {
-	const { stdout } = await git(repoPath, ["for-each-ref", "--format=%(upstream:short)", `refs/heads/${base}`]);
-	const upstream = stdout.trim();
-	// An upstream that was never fetched can't say whether the base is behind.
-	return upstream && (await refExists(repoPath, upstream)) ? upstream : null;
-}
-
-async function countRange(repoPath: string, range: string): Promise<number> {
-	return Number((await git(repoPath, ["rev-list", "--count", range])).stdout.trim());
-}
-
-/**
- * Brings the base of a new compile branch up to its upstream, as git last fetched it (CMP-50, CMP-53).
- * A base that is only behind is fast-forwarded, checked out or not. Throws when it has commits of its own too (CMP-51).
- */
-async function updateBase(repo: CodeRepo, base: string, current: string) {
-	const upstream = await upstreamOf(repo.path, base);
-	if (!upstream) return;
-	const local = `refs/heads/${base}`;
-	if ((await countRange(repo.path, `${local}..${upstream}`)) === 0) return;
-	if ((await countRange(repo.path, `${upstream}..${local}`)) > 0) {
-		throw new Error(`${base} in ${repo.name} and ${upstream} both have new commits. Pull with rebase in git, then compile again.`);
-	}
-	if (current === base) {
-		// Git refuses rather than overwrite anything in the working tree.
-		await git(repo.path, ["merge", "--ff-only", "--quiet", upstream]);
-	} else {
-		// The base isn't checked out, so only its ref moves, and only from where it was.
-		await git(repo.path, ["update-ref", local, await headOf(repo.path, upstream), await headOf(repo.path, local)]);
-	}
-}
-
-/**
- * Throws when the base of an open compile branch has commits the branch lacks (CMP-52), locally or on its
- * upstream as git last fetched it (CMP-53). Never merges: a merge can conflict, and only a person may resolve that.
- */
-async function requireBaseMerged(repo: CodeRepo, branch: string, base: string) {
-	const upstream = await upstreamOf(repo.path, base);
-	for (const ref of [`refs/heads/${base}`, upstream]) {
-		if (!ref || !(await refExists(repo.path, ref))) continue;
-		if ((await countRange(repo.path, `refs/heads/${branch}..${ref}`)) > 0) {
-			throw new Error(`${branch} in ${repo.name} is missing commits from ${base}. Merge ${base} into it, then compile again.`);
-		}
-	}
-}
-
-/** Puts every repository back on the branch it was on and deletes the branches this compile created. */
-export async function undoBranches(prepared: PreparedBranch[]) {
-	for (const p of prepared) {
-		await git(p.path, ["checkout", p.previous]).catch(() => {});
-		if (p.created) await git(p.path, ["branch", "-D", p.branch]).catch(() => {});
-	}
-}
-
-/**
- * Runs once Claude has finished, whatever the outcome. A branch this compile created that got no
- * commits is deleted and its repository goes back to its base. A branch with commits stays checked
- * out, so the engineer can try the result.
- */
-export async function finishBranches(prepared: PreparedBranch[]): Promise<CompileBranch[]> {
-	const records: CompileBranch[] = [];
-	for (const p of prepared) {
-		// Empty when the branch is gone, e.g. Claude deleted it.
-		const commits = await commitsIn(p.path, `${p.startHead}..refs/heads/${p.branch}`);
-		let kept = true;
-		if (p.created && commits.length === 0) {
-			try {
-				await git(p.path, ["checkout", p.base]);
-				await git(p.path, ["branch", "-D", p.branch]);
-				kept = false;
-			} catch {
-				// Left as it is; the engineer sees the branch in the repository.
-			}
-		}
-		records.push({ repoPath: p.path, repo: p.name, branch: p.branch, base: p.base, commits, kept });
-	}
-	return records;
 }
 
 /** Commits in a `git log` range, oldest first, or none when the range can't be read. */
@@ -308,8 +183,7 @@ async function commitsIn(repoPath: string, range: string): Promise<BranchCommit[
 	}
 }
 
-/** Commits on the compile branch that aren't in its base, oldest first. */
+/** Commits on the branch that aren't in its base, oldest first. */
 export function branchCommits(repoPath: string, branch: string, base: string): Promise<BranchCommit[]> {
 	return commitsIn(repoPath, `${base}..refs/heads/${branch}`);
 }
-

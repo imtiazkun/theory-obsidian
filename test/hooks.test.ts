@@ -7,6 +7,8 @@ import {
 	commentDetails,
 	commitDetails,
 	compileEndDetails,
+	buildEndDetails,
+	buildStartDetails,
 	headCommitDetails,
 	hookFailedNotice,
 	hooksFor,
@@ -16,6 +18,7 @@ import {
 	type HookPayload,
 } from "../src/hooks";
 import type { CompileReport } from "../src/compile";
+import type { IssueRecord } from "../src/plan";
 import { PUSH_REJECTED } from "../src/push";
 import { commitFiles, initRepo, tempFolder } from "./helpers";
 
@@ -161,8 +164,47 @@ describe("hook details (HOOK-3)", () => {
 		expect(pushDetails({ kind: "no-origin" })).toBeNull();
 	});
 
-	it("give the compile status, summary and number of questions", () => {
+	it("give the compile status, summary, number of questions and the issues it created", () => {
 		const report = { status: "cancelled", summary: "Stopped", questions: [{}, {}] } as unknown as CompileReport;
-		expect(compileEndDetails(report)).toEqual({ status: "cancelled", summary: "Stopped", questions: 2 });
+		expect(compileEndDetails(report)).toEqual({ status: "cancelled", summary: "Stopped", questions: 2, issues: [], epic: null });
+		const issue = (kind: "epic" | "issue", number: number | undefined, title: string) =>
+			({ kind, repo: "app", repoPath: "/p/app", title, body: "", rules: [], shortName: "x", number, url: number ? `u${number}` : undefined }) as IssueRecord;
+		const planned = {
+			status: "succeeded",
+			summary: "Planned",
+			questions: [],
+			issues: [issue("epic", 1, "Epic"), issue("issue", 2, "One"), issue("issue", undefined, "Not created")],
+		} as unknown as CompileReport;
+		expect(compileEndDetails(planned)).toEqual({
+			status: "succeeded",
+			summary: "Planned",
+			questions: 0,
+			issues: [{ repo: "app", number: 2, title: "One", url: "u2" }],
+			epic: { repo: "app", number: 1, title: "Epic", url: "u1" },
+		});
+	});
+
+	it("give the issues to build, and how a build ended with each issue's state, its pull requests and the epic branch", () => {
+		const issues = [
+			{ kind: "epic", repo: "app", title: "Epic", number: 1, url: "u1" },
+			{ kind: "issue", repo: "app", title: "One", number: 2, url: "u2", build: "waiting" },
+		] as IssueRecord[];
+		const report = { issues } as unknown as CompileReport;
+		expect(buildStartDetails(report)).toEqual({
+			issues: [{ repo: "app", number: 2, title: "One", url: "u2" }],
+			epic: { repo: "app", number: 1, title: "Epic", url: "u1" },
+		});
+		issues[1].build = "built";
+		report.build = { status: "finished", startedAt: "", epicBranches: [{ repo: "app", repoPath: "/p", branch: "theory/epic-1-x", base: "main" }] };
+		report.pullRequests = [
+			{ repoPath: "/p", repo: "app", branch: "theory/2-x", base: "theory/epic-1-x", url: "pr3", state: "merged" },
+			{ repoPath: "/p", repo: "app", branch: "theory/epic-1-x", base: "main", url: "pr4", state: "open" },
+		];
+		expect(buildEndDetails(report)).toEqual({
+			ended: "finished",
+			issues: [{ repo: "app", number: 2, title: "One", url: "u2", state: "built" }],
+			pullRequests: ["pr3"],
+			epicBranch: "theory/epic-1-x",
+		});
 	});
 });

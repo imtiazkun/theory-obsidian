@@ -36,7 +36,19 @@ import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNot
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
-import { Hooks, commitDetails, compileEndDetails, headCommitDetails, permissionDetails, pushDetails, savedHooks } from "./hooks";
+import {
+	Hooks,
+	buildEndDetails,
+	buildStartDetails,
+	commitDetails,
+	compileEndDetails,
+	headCommitDetails,
+	permissionDetails,
+	pushDetails,
+	savedHooks,
+} from "./hooks";
+import { BuildChoice, BuildRun, buildableReport, interruptedBuild, startBuild } from "./build";
+import { readyText } from "./plan";
 import {
 	IdentityError,
 	MissingStarters,
@@ -86,8 +98,9 @@ export default class TheoryPlugin extends Plugin {
 		},
 		failed: (notice) => new Notice(notice, 10000),
 	});
-	// Single user for now, so the compile lock only has to hold within this app.
+	// Single user for now, so the compile lock only has to hold within this app. It covers builds too (CMP-3).
 	private compileRun: CompileRun | null = null;
+	private buildRun: BuildRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
 	private compileStarting = false;
 	// At most one Expand per repository at a time, keyed by its name.
@@ -150,6 +163,11 @@ export default class TheoryPlugin extends Plugin {
 			id: "compile",
 			name: "Compile",
 			callback: () => this.compile(),
+		});
+		this.addCommand({
+			id: "build",
+			name: "Build",
+			callback: () => this.build(),
 		});
 		this.addCommand({
 			id: "show-compile-report",
@@ -343,6 +361,9 @@ export default class TheoryPlugin extends Plugin {
 		this.changeDots.detach();
 		this.comments.removeAll();
 		this.compileRun?.cancel();
+		this.buildRun?.cancel();
+		// Nobody can answer a question once the plugin is off: the build keeps the branch.
+		this.buildRun?.choose("keep");
 		for (const run of this.expandRuns.values()) run.cancel();
 		if (this.pullTimer !== null) window.clearInterval(this.pullTimer);
 	}
@@ -402,14 +423,24 @@ export default class TheoryPlugin extends Plugin {
 		}, 0);
 	}
 
+	/** True while a compile or a build runs, or is starting. Only one may run at a time (CMP-3). */
 	isCompiling(): boolean {
-		return this.compileRun !== null || this.compileStarting;
+		return this.compileRun !== null || this.buildRun !== null || this.compileStarting;
+	}
+
+	isBuilding(): boolean {
+		return this.buildRun !== null;
+	}
+
+	/** The report of the compile or build running now, or null. */
+	activeReportId(): string | null {
+		return this.buildRun?.report.id ?? this.compileRun?.report.id ?? null;
 	}
 
 	/** Compiles every revision committed since the last compile. */
 	async compile() {
 		if (this.isCompiling()) {
-			new Notice("A compile is already running.");
+			new Notice("A compile or build is already running.");
 			await this.showReportView();
 			return;
 		}
@@ -453,8 +484,19 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const { projectFolder, claudeCommand, agent, agentCommand, agentModel, agentThinkingLevel, permissionMode, allowedTools, model, effort } =
-			this.settings;
+		const {
+			projectFolder,
+			claudeCommand,
+			agent,
+			agentCommand,
+			agentModel,
+			agentThinkingLevel,
+			permissionMode,
+			allowedTools,
+			model,
+			effort,
+			githubProject,
+		} = this.settings;
 		let run: CompileRun;
 		try {
 			run = await startCompile(
@@ -471,7 +513,7 @@ export default class TheoryPlugin extends Plugin {
 					model,
 					effort,
 					author,
-					reports: this.reports,
+					githubProject,
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
@@ -516,24 +558,142 @@ export default class TheoryPlugin extends Plugin {
 		this.changeDots.sync();
 		const questions = report.questions.length;
 		const extra = questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
-		if (report.status === "succeeded") new Notice(`Compile finished.${extra}`);
+		if (report.status === "succeeded") new Notice(`Compile finished. ${readyText(report.issues ?? [])}${extra}`);
 		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${extra}`, 10000);
 	}
 
+	/** Cancel in the report: stops the running compile or build (CMP-24, BLD-23). */
 	cancelCompile() {
 		this.compileRun?.cancel();
+		this.buildRun?.cancel();
 	}
 
-	/** Permission requests from the running compile that are waiting for an answer. */
+	/** Retry after creating an issue failed (CMP-68). */
+	retryIssues() {
+		this.compileRun?.retryIssues();
+	}
+
+	/** Discard after creating an issue failed (CMP-68). */
+	discardIssues() {
+		this.compileRun?.discardIssues();
+	}
+
+	/** Answers the question the running build waits on: Retry, Skip, Stop, or keep or delete the branch. */
+	chooseInBuild(choice: BuildChoice) {
+		this.buildRun?.choose(choice);
+	}
+
+	/**
+	 * Builds the issues of one compile, from its report's Build button (`reportId`), or the newest compile that
+	 * created issues for the command "Build" (BLD-1).
+	 */
+	async build(reportId?: string) {
+		if (this.isCompiling()) {
+			new Notice("A compile or build is already running.");
+			await this.showReportView();
+			return;
+		}
+		const report = reportId ? this.reports.find((r) => r.id === reportId) : buildableReport(this.reports);
+		if (!report?.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) {
+			new Notice("No compile has created issues to build yet. Compile first.");
+			return;
+		}
+		this.compileStarting = true;
+		try {
+			await this.runBuild(report);
+		} finally {
+			this.compileStarting = false;
+			this.buildRun = null;
+			this.compileButton.refresh();
+			this.refreshReportViews();
+			this.puller.compileEnded();
+		}
+	}
+
+	private async runBuild(report: CompileReport) {
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+			// The newest model and code, as before a compile (BLD-4).
+			const pull = await this.puller.pull("compile");
+			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? [], "build");
+			if (gate.error) {
+				new Notice(`Build failed: ${gate.error}`, 10000);
+				return;
+			}
+			if (gate.offline) new Notice("Couldn't reach the remote, so this build uses the local vault and code.", 8000);
+		} catch (error) {
+			new Notice(failure("Build failed", error), 10000);
+			return;
+		}
+		const { projectFolder, claudeCommand, agent, agentCommand, agentModel, agentThinkingLevel, permissionMode, allowedTools, model, effort, githubProject } =
+			this.settings;
+		let run: BuildRun;
+		try {
+			run = await startBuild(
+				{
+					vaultPath,
+					projectFolder,
+					claudeCommand,
+					agent,
+					agentCommand,
+					agentModel,
+					agentThinkingLevel,
+					permissionMode,
+					allowedTools,
+					model,
+					effort,
+					githubProject,
+					onPermissionRequest: (request) => {
+						this.hooks.fire("permission-request", permissionDetails(request));
+						const who = request.sessionOnly ? "The agent" : "Claude";
+						new Notice(`${who} is asking to use ${request.tool}. Answer in the compile report.`);
+						this.showReport(report.id);
+					},
+				},
+				report,
+				this.reports,
+				() => {
+					this.refreshReportViews();
+					this.compileButton.render();
+				},
+			);
+		} catch (error) {
+			new Notice(`Build failed: ${errorMessage(error)}`, 10000);
+			await this.saveSettings();
+			return;
+		}
+		this.buildRun = run;
+		this.compileStarting = false;
+		this.hooks.fire("build-start", buildStartDetails(report));
+		this.statusBar?.setText("Building…");
+		this.statusBar?.show();
+		this.compileButton.refresh();
+		await this.saveSettings();
+		await this.showReport(report.id);
+
+		await run.done;
+		this.buildRun = null;
+		this.hooks.fire("build-end", buildEndDetails(report));
+		this.statusBar?.hide();
+		await this.saveSettings();
+		this.pullRequestsChanged();
+		const status = report.build?.status;
+		if (status === "finished") new Notice(report.build?.message ?? "Build finished. See the compile report.");
+		else if (status === "stopped") new Notice("Build stopped. See the compile report.", 10000);
+	}
+
+	/** Permission requests from the running build that are waiting for an answer. A compile never asks (CMP-13). */
 	permissionRequests(): PermissionRequest[] {
-		return this.compileRun?.requests ?? [];
+		return this.buildRun?.requests() ?? this.compileRun?.requests ?? [];
 	}
 
 	/** Answers one permission request. Always allow on a Claude Code card also adds its rules to Allowed commands. */
 	async answerPermission(id: string, answer: PermissionAnswer) {
-		const request = this.compileRun?.requests.find((r) => r.id === id);
+		const request = this.permissionRequests().find((r) => r.id === id);
 		if (!request) return;
-		this.compileRun?.answer(id, answer);
+		if (this.buildRun) this.buildRun.answer(id, answer);
+		else this.compileRun?.answer(id, answer);
 		const rules = rulesToSave(request, answer);
 		if (rules.length === 0) return;
 		this.settings.allowedTools = withAllowedRules(this.settings.allowedTools, rules);
@@ -852,8 +1012,11 @@ export default class TheoryPlugin extends Plugin {
 			report.problems = report.problems.map((problem) =>
 				typeof problem === "string" ? plainProblem(problem) : problem,
 			);
+			// A build can't outlive the app either (BLD-24).
+			interruptedBuild(report);
 			// A compile can't outlive the app, so a report still running was cut short.
 			if (report.status !== "running") continue;
+			delete report.issueFailure;
 			report.status = "failed";
 			report.problems.unshift(plainProblem("Obsidian closed before this compile finished."));
 		}

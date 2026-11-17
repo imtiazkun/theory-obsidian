@@ -2,6 +2,7 @@ import { chmodSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { COMPILED_TAG, SIGN_IN_SUMMARY, signInFailed, startCompile } from "../src/compile";
+import { FakeGitHub } from "./fake-github";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
 
 /** A fake Claude Code that answers like one that isn't signed in, or like one that finished without a report. */
@@ -31,7 +32,8 @@ async function compileWith(result: string) {
 			model: "",
 			effort: "",
 			author: "Test Author",
-			reports: [],
+			githubProject: "https://github.com/orgs/team/projects/1",
+			github: new FakeGitHub(),
 		},
 		() => {},
 	);

@@ -2,7 +2,8 @@ import { existsSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { TFile, TFolder } from "obsidian";
-import { CodeRepo, currentBranch, openCompileBranch, recordedPullRequest, uncommittedCount } from "./branches";
+import { CodeRepo, currentBranch, uncommittedCount } from "./branches";
+import { openBuildBranch } from "./build";
 import { COMPILED_TAG, type CompileReport } from "./compile";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
@@ -82,11 +83,10 @@ export async function repoKpis(plugin: TheoryPlugin, repos: CodeRepo[]): Promise
 		const branch = await currentBranch(repo.path);
 		const uncommitted = await uncommittedCount(repo.path).catch(() => 0);
 
-		const last = reports.find((r) => r.branches?.some((b) => b.repoPath === repo.path && b.commits.length > 0)) ?? null;
-		const open = await openCompileBranch(repo.path, reports, false).catch(() => null);
-		const openBranch = open
-			? { branch: open.branch, pr: (await recordedPullRequest(reports, repo.path, open.branch))?.state ?? null }
-			: null;
+		// The newest compile that planned work for this repository.
+		const last = reports.find((r) => r.issues?.some((i) => i.repoPath === repo.path && i.number !== undefined)) ?? null;
+		const open = await openBuildBranch(repo.path, reports).catch(() => null);
+		const openBranch = open ? { branch: open.branch, pr: open.pr?.state ?? null } : null;
 
 		const folder = modelFolder(plugin, repo.name);
 		let model: RepoKpis["model"] = null;

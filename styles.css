@@ -1223,3 +1223,49 @@ body button.theory-expand-fab[aria-disabled="true"] {
 	text-underline-offset: 3px;
 	cursor: pointer;
 }
+
+/* The issues a compile created, and their build state (REP-40, BLD-3). */
+.theory-report-issue {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	padding: var(--size-2-2) 0;
+}
+
+.theory-report-issue.is-epic {
+	font-weight: var(--font-semibold);
+}
+
+.theory-pr-state.is-epic,
+.theory-pr-state.is-build-waiting,
+.theory-pr-state.is-build-skipped {
+	color: var(--text-muted);
+}
+
+.theory-pr-state.is-build-building {
+	color: var(--text-accent);
+}
+
+.theory-pr-state.is-build-built {
+	color: var(--text-success);
+}
+
+.theory-pr-state.is-build-failed {
+	color: var(--text-error);
+}
+
+.theory-report-build {
+	margin: var(--size-4-2) 0;
+}
+
+.theory-report-build-row {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+}
+
+.theory-report-build-status.is-stopped,
+.theory-report-build-status.is-cancelled {
+	color: var(--text-muted);
+}

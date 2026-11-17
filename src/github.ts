@@ -7,7 +7,7 @@ const run = promisify(execFile);
 
 export type PullRequestState = "draft" | "open" | "merged" | "closed";
 
-/** A pull request opened from Create PR for one repository's compile branch. */
+/** A pull request for one compile branch: opened by a build (BLD-14, BLD-16), or from Create PR for an epic branch. */
 export interface PullRequest {
 	/** Absolute path of the code repository. */
 	repoPath: string;
@@ -173,3 +173,111 @@ export async function pullRequestBody(repoPath: string, url: string): Promise<st
 	const { stdout } = await gh(repoPath, ["pr", "view", url, "--json", "body"]);
 	return String(JSON.parse(stdout).body ?? "");
 }
+
+/** A GitHub Project, from its URL like `https://github.com/orgs/team/projects/3` or `…/users/me/projects/3`. */
+export interface ProjectRef {
+	owner: string;
+	number: number;
+}
+
+/** The project's owner and number, or null when the URL isn't a GitHub Project's. */
+export function parseProjectUrl(url: string): ProjectRef | null {
+	const match = /^https?:\/\/github\.com\/(?:orgs|users)\/([^/\s]+)\/projects\/(\d+)\/?(?:[?#].*)?$/.exec(url.trim());
+	return match ? { owner: match[1], number: Number(match[2]) } : null;
+}
+
+/** An issue on GitHub. */
+export interface IssueRef {
+	number: number;
+	url: string;
+}
+
+/**
+ * Everything Compile and Build ask of GitHub. The plugin uses `ghGitHub`, which runs `gh`; tests pass a fake,
+ * because they must never reach GitHub (TEST-6). Every method throws with the reason when GitHub refuses.
+ */
+export interface GitHub {
+	/** Null when `gh` is installed and logged in, else the reason it can't be used. */
+	authProblem(cwd: string): Promise<string | null>;
+	/** `owner/name` of the repository's GitHub `origin`, or null when it has none. */
+	repoName(repoPath: string): Promise<string | null>;
+	/** Throws with the reason when the GitHub Project can't be reached. */
+	checkProject(projectUrl: string, cwd: string): Promise<void>;
+	/** Creates the label in the repository when it is missing. */
+	ensureLabel(repoPath: string, label: string): Promise<void>;
+	createIssue(repoPath: string, issue: { title: string; body: string; labels: string[] }): Promise<IssueRef>;
+	/** Links `sub` as a native sub-issue of the epic. */
+	addSubIssue(epicRepoPath: string, epicNumber: number, subRepoPath: string, subNumber: number): Promise<void>;
+	addToProject(projectUrl: string, issueUrl: string, cwd: string): Promise<void>;
+	closeIssue(repoPath: string, number: number, reason: "completed" | "not planned"): Promise<void>;
+	issueState(repoPath: string, number: number): Promise<"open" | "closed">;
+	/** Opens a pull request for a branch already pushed. Returns its web address. */
+	openPullRequest(repoPath: string, pr: { head: string; base: string; title: string; body: string }): Promise<string>;
+	/** Merges the pull request with a merge commit. */
+	mergePullRequest(repoPath: string, url: string): Promise<void>;
+	pullRequestState(repoPath: string, url: string): Promise<PullRequestState>;
+}
+
+function projectOf(url: string): ProjectRef {
+	const project = parseProjectUrl(url);
+	if (!project) throw new Error("It isn't a GitHub Project URL, like https://github.com/orgs/team/projects/1.");
+	return project;
+}
+
+/** The GitHub the plugin uses: every call runs `gh`. */
+export const ghGitHub: GitHub = {
+	async authProblem(cwd) {
+		return ghProblem(cwd);
+	},
+	async repoName(repoPath) {
+		const url = await githubOrigin(repoPath);
+		return url ? url.replace("https://github.com/", "") : null;
+	},
+	async checkProject(projectUrl, cwd) {
+		const { owner, number } = projectOf(projectUrl);
+		await gh(cwd, ["project", "view", String(number), "--owner", owner, "--format", "json"]);
+	},
+	async ensureLabel(repoPath, label) {
+		const { stdout } = await gh(repoPath, ["label", "list", "--search", label, "--json", "name", "--limit", "100"]);
+		const names = (JSON.parse(stdout) as { name: string }[]).map((l) => l.name.toLowerCase());
+		if (names.includes(label.toLowerCase())) return;
+		await gh(repoPath, ["label", "create", label, "--description", "A theory.md compile's epic"]);
+	},
+	async createIssue(repoPath, issue) {
+		const args = ["issue", "create", "--title", issue.title, "--body", issue.body];
+		for (const label of issue.labels) args.push("--label", label);
+		const { stdout } = await gh(repoPath, args);
+		const url = stdout.trim().split("\n").pop() ?? "";
+		const number = Number(/\/issues\/(\d+)$/.exec(url)?.[1]);
+		if (!number) throw new Error("gh didn't return the issue's address.");
+		return { number, url };
+	},
+	async addSubIssue(epicRepoPath, epicNumber, subRepoPath, subNumber) {
+		const sub = await ghGitHub.repoName(subRepoPath);
+		const epic = await ghGitHub.repoName(epicRepoPath);
+		if (!sub || !epic) throw new Error("The repository has no GitHub origin.");
+		const { stdout } = await gh(subRepoPath, ["api", `repos/${sub}/issues/${subNumber}`, "--jq", ".id"]);
+		await gh(epicRepoPath, ["api", "-X", "POST", `repos/${epic}/issues/${epicNumber}/sub_issues`, "-F", `sub_issue_id=${stdout.trim()}`]);
+	},
+	async addToProject(projectUrl, issueUrl, cwd) {
+		const { owner, number } = projectOf(projectUrl);
+		await gh(cwd, ["project", "item-add", String(number), "--owner", owner, "--url", issueUrl]);
+	},
+	async closeIssue(repoPath, number, reason) {
+		await gh(repoPath, ["issue", "close", String(number), "--reason", reason]);
+	},
+	async issueState(repoPath, number) {
+		const { stdout } = await gh(repoPath, ["issue", "view", String(number), "--json", "state"]);
+		return JSON.parse(stdout).state === "OPEN" ? "open" : "closed";
+	},
+	async openPullRequest(repoPath, pr) {
+		const { stdout } = await gh(repoPath, ["pr", "create", "--head", pr.head, "--base", pr.base, "--title", pr.title, "--body", pr.body]);
+		const url = stdout.trim().split("\n").pop() ?? "";
+		if (!/^https?:\/\//.test(url)) throw new Error("gh didn't return the pull request's address.");
+		return url;
+	},
+	async mergePullRequest(repoPath, url) {
+		await gh(repoPath, ["pr", "merge", url, "--merge"]);
+	},
+	pullRequestState,
+};

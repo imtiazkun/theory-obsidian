@@ -6,8 +6,10 @@ import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
-import { CompileBranch, PreparedBranch, dirtyRepos, finishBranches, prepareBranches, undoBranches } from "./branches";
-import type { PullRequest } from "./github";
+import { dirtyRepos, projectRepos } from "./branches";
+import type { BuildRecord } from "./build";
+import { type GitHub, type PullRequest, ghGitHub } from "./github";
+import { IssueRecord, PLAN_SCHEMA, createIssues, discardIssues, issueRecords, readPlan } from "./plan";
 import { findProjectRepos } from "./project";
 import { toolPath } from "./tool-path";
 import { git, isInDotFolder } from "./vault";
@@ -71,12 +73,10 @@ export interface PermissionRequest {
 	line: number;
 }
 
-export interface CompileOptions {
-	vaultPath: string;
-	/** Folder holding the project's code: one repository, or several side by side. Claude works here. */
-	projectFolder: string;
+/** The agent settings a compile and a build run with (CMP-13, BLD-19). */
+export interface AgentSettings {
 	claudeCommand: string;
-	/** Which agent compiles. Claude Code when unset. */
+	/** Which agent runs. Claude Code when unset. */
 	agent?: CompileAgent;
 	/** The command that starts the ACP agent, with its arguments. Used when `agent` is "acp". */
 	agentCommand?: string;
@@ -89,11 +89,19 @@ export interface CompileOptions {
 	allowedTools: string;
 	model: CompileModel;
 	effort: CompileEffort;
+}
+
+export interface CompileOptions extends AgentSettings {
+	vaultPath: string;
+	/** Folder holding the project's code: one repository, or several side by side. Claude reads it here. */
+	projectFolder: string;
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
-	/** Earlier reports, newest first. They hold each compile branch's base and pull request. */
-	reports: CompileReport[];
-	/** Called when Claude asks for a tool call the settings don't allow. */
+	/** The GitHub Project every issue is added to, as its URL (CFG-40). */
+	githubProject: string;
+	/** How the plugin reaches GitHub. `gh` when unset; tests pass a fake (TEST-6). */
+	github?: GitHub;
+	/** Called when the agent asks for a tool call. A compile denies every one without a card (CMP-13), so this never fires for it. */
 	onPermissionRequest?: (request: PermissionRequest) => void;
 }
 
@@ -124,6 +132,7 @@ export interface CompileReport {
 	toCommit: string;
 	revisions: Revision[];
 	summary: string;
+	/** Changes a build made to the code, from Claude's answer for each issue. A compile makes none. */
 	changes: string[];
 	questions: Question[];
 	problems: Problem[];
@@ -139,9 +148,13 @@ export interface CompileReport {
 	tokens?: number;
 	/** "acp" when an ACP agent compiled. Unset for Claude Code. An ACP agent reports no token count. */
 	agent?: CompileAgent;
-	/** Each repository's compile branch, its base and the commits this compile added. Set once Claude has finished. */
-	branches?: CompileBranch[];
-	/** Pull requests opened from this report with Create PR. */
+	/** The issues this compile planned, the epic first, as far as they were created (REP-40). */
+	issues?: IssueRecord[];
+	/** Set while creating an issue failed and the report waits for Retry or Discard (CMP-68). */
+	issueFailure?: string;
+	/** The build of this compile's issues, once one started (BLD-3). */
+	build?: BuildRecord;
+	/** Pull requests for this compile's work: those a build opened, and those opened with Create PR. */
 	pullRequests?: PullRequest[];
 }
 
@@ -180,51 +193,73 @@ const ANCHOR_SCHEMA = {
 	required: ["path"],
 };
 
-export const REPORT_SCHEMA = {
+const QUESTIONS_SCHEMA = {
+	type: "array",
+	items: {
+		type: "object",
+		properties: {
+			question: { type: "string" },
+			notes: {
+				type: "array",
+				items: { type: "string" },
+				description: "Model file paths the question is about, relative to the model directory.",
+			},
+			anchors: {
+				type: "array",
+				description: "Where in the model the rule that needs updating sits: the file, its heading and a short quote of the rule.",
+				items: ANCHOR_SCHEMA,
+			},
+		},
+		required: ["question", "notes"],
+	},
+};
+
+const PROBLEMS_SCHEMA = {
+	type: "array",
+	items: {
+		type: "object",
+		properties: {
+			problem: { type: "string" },
+			anchors: {
+				type: "array",
+				description: "Where in the model the problem comes from. Empty when it isn't about the model.",
+				items: ANCHOR_SCHEMA,
+			},
+		},
+		required: ["problem", "anchors"],
+	},
+};
+
+/** A compile's answer (CMP-15): the plan instead of changes, because a compile changes no code. */
+export const COMPILE_SCHEMA = {
 	type: "object",
 	properties: {
 		status: { type: "string", enum: ["succeeded", "failed"] },
-		summary: { type: "string", description: "What this compile did, in two or three sentences." },
+		summary: { type: "string", description: "What this compile planned, in two or three sentences." },
+		plan: PLAN_SCHEMA,
+		questions: QUESTIONS_SCHEMA,
+		problems: PROBLEMS_SCHEMA,
+	},
+	required: ["status", "summary", "plan", "questions", "problems"],
+};
+
+/** A build's answer for one issue. */
+export const BUILD_SCHEMA = {
+	type: "object",
+	properties: {
+		status: { type: "string", enum: ["succeeded", "failed"] },
+		summary: { type: "string", description: "What this build did, in two or three sentences. It opens the pull request's body." },
 		changes: { type: "array", items: { type: "string" }, description: "Each change made to the code." },
-		questions: {
-			type: "array",
-			items: {
-				type: "object",
-				properties: {
-					question: { type: "string" },
-					notes: {
-						type: "array",
-						items: { type: "string" },
-						description: "Model file paths the question is about, relative to the model directory.",
-					},
-					anchors: {
-						type: "array",
-						description:
-							"Where in the model the rule that needs updating sits: the file, its heading and a short quote of the rule.",
-						items: ANCHOR_SCHEMA,
-					},
-				},
-				required: ["question", "notes"],
-			},
-		},
-		problems: {
-			type: "array",
-			items: {
-				type: "object",
-				properties: {
-					problem: { type: "string" },
-					anchors: {
-						type: "array",
-						description: "Where in the model the problem comes from. Empty when it isn't about the model.",
-						items: ANCHOR_SCHEMA,
-					},
-				},
-				required: ["problem", "anchors"],
-			},
-		},
+		questions: QUESTIONS_SCHEMA,
+		problems: PROBLEMS_SCHEMA,
 	},
 	required: ["status", "summary", "changes", "questions", "problems"],
 };
+
+/** The fields an answer must have, else it counts as no structured answer (CMP-17, AGT-10). */
+export function requiredFields(schema: { required: string[] }): string[] {
+	return schema.required;
+}
 
 async function tagCommit(vaultPath: string): Promise<string | null> {
 	try {
@@ -344,63 +379,66 @@ async function modelInstructions(snapshot: string, repo: string): Promise<{ path
 	return text === null ? null : { path: `${repo}/${name}`, text };
 }
 
-function buildPrompt(params: {
+/** The git repositories in the project folder, as the prompt names them. */
+function repoListText(projectFolder: string): string {
+	const found = findProjectRepos(projectFolder);
+	return found.kind === "root"
+		? `The project folder is a single git repository, named ${basename(projectFolder)}.`
+		: found.kind === "children"
+			? `Git repositories in the project folder:\n${found.repos.map((repo) => `- ${relative(projectFolder, repo)}`).join("\n")}`
+			: "The project folder has no git repositories yet.";
+}
+
+function revisionListText(revisions: Revision[]): string {
+	return revisions.map((r) => `- ${r.hash.slice(0, 7)} ${r.date} ${r.author}: ${r.subject}`).join("\n");
+}
+
+/** The prompt of a compile: the rules of CMP-12 and what CMP-10 says Claude receives. */
+export function compilePrompt(params: {
 	snapshot: string;
 	projectFolder: string;
 	head: string;
 	from: string | null;
 	revisions: Revision[];
 	diff: string;
-	branches: PreparedBranch[];
 	instructions: { repo: string; path: string; text: string }[];
 }): string {
-	const { snapshot, projectFolder, head, from, revisions, diff, branches, instructions } = params;
-	const found = findProjectRepos(projectFolder);
-	const branchOf = (path: string) => {
-		const branch = branches.find((b) => b.path === path)?.branch;
-		return branch ? ` (checked out on branch ${branch})` : "";
-	};
-	const repoList =
-		found.kind === "root"
-			? `The project folder is a single git repository${branchOf(projectFolder)}.`
-			: found.kind === "children"
-				? `Git repositories in the project folder:\n${found.repos.map((repo) => `- ${relative(projectFolder, repo)}${branchOf(repo)}`).join("\n")}`
-				: "The project folder has no git repositories yet.";
+	const { snapshot, projectFolder, head, from, revisions, diff, instructions } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
-	const revisionList = revisions
-		.map((r) => `- ${r.hash.slice(0, 7)} ${r.date} ${r.author}: ${r.subject}`)
-		.join("\n");
-	return `You are compiling a theoretical model into software.
+	return `You are compiling a theoretical model into a plan of work.
 
-The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to change the code in the project folder (the current directory) so that it matches the model. A model change may touch one repository, several, or none.
+The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to read the model and the code in the project folder (the current directory), and plan the work that makes the code match the model. You don't change any code: the plugin creates your plan as GitHub issues, and a later build writes the code, one issue at a time.
 
 The model at revision ${head} is in this directory: ${snapshot}
 
-${repoList}
+${repoListText(projectFolder)}
 
 Rules:
 - The model is read-only. Never create, edit, move or delete anything in the model directory, and never write to the Obsidian vault it came from. Writing to the model is forbidden.
-- The model is the source of truth. If the code disagrees with the model, change the code.
-- A note whose front matter has \`realized: false\` is written ahead of the code. Don't build what it describes yet, and don't count it as a mismatch.
+- The model is the source of truth. If the code disagrees with the model, the code changes.
+- A note whose front matter has \`realized: false\` is written ahead of the code. Don't plan what it describes yet, and don't count it as a mismatch.
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
-- Only change files inside the project folder.
-- Before changing a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and follow its rules, including how to test.
+- Read the code in the project folder to plan the work. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
-- Before changing a repository, also read \`instructions.md\` in that repository's folder in the model directory and follow it. When it disagrees with AGENTS.md, the model's \`instructions.md\` wins, because the model is the source of truth.
-- When you commit in a code repository, end each commit message with the trailer \`Model-Revision: ${head}\`.
-- When the project has several repositories, start each entry in \`changes\` and \`problems\` with the repository name in brackets, e.g. "[mobile] ...".
+- Before planning work in a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in that repository's folder in the model directory, so the issues fit how that repository is built and tested.
+- Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
+- List sub-issues in build order: work that other sub-issues depend on comes first. They are built one at a time, each on top of the last.
+- Every issue says what to build and why, in the model's words. It lists the rule IDs it covers in \`rules\`. Those rules are its acceptance criteria.
+- Every issue changes exactly one repository. Name it in \`repo\` as it is named above.
+- A title is a short sentence in the imperative, under 70 characters, like "Show a diff for each file on the Commit page".
+- A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it.
 - Put anything that went wrong (steps you couldn't do) in \`problems\`.
 - When a problem comes from something in the model, give it \`anchors\`: the model file, the heading it sits under, and a short quote copied exactly from the note (under 200 characters). Engineers see these as highlights in the note. Leave \`anchors\` empty when the problem isn't about the model.
-- Set \`status\` to "failed" if the code doesn't match the model at the end.
-- Commit on the branch that is checked out in each repository. Never create, switch, merge or push branches.
+- Set \`status\` to "failed" if you can't plan the work.
+- Never create issues, branches or pull requests, and never touch GitHub.
 ${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}
 ## Revisions since the last compile
 
 ${from ? `Last compiled revision: ${from}` : "This is the first compile, so the whole model is new."}
 
-${revisionList}
+${revisionListText(revisions)}
 
 ## Changes to the model
 
@@ -509,11 +547,14 @@ export function signInFailed(output: string): boolean {
 	);
 }
 
-/** The agent's answer in the shape of REPORT_SCHEMA (CMP-15). */
+/** The agent's answer in the shape of COMPILE_SCHEMA or BUILD_SCHEMA (CMP-15). */
 export interface StructuredAnswer {
 	status: "succeeded" | "failed";
 	summary: string;
-	changes: string[];
+	/** A build's changes. */
+	changes?: string[];
+	/** A compile's plan, checked by `readPlan` before anything is created. */
+	plan?: unknown;
 	/** Question anchors are checked by `checkAnchors` before anything is shown. */
 	questions: (Omit<Question, "anchors"> & { anchors?: unknown })[];
 	/** Checked by `checkProblems` before anything is shown. */
@@ -562,21 +603,46 @@ export interface AgentRun {
 }
 
 /** What an ACP agent is told on top of the prompt Claude Code gets: the answer's shape (AGT-9). */
-export function acpAnswerInstructions(): string {
+export function acpAnswerInstructions(schema: object = COMPILE_SCHEMA): string {
 	return `
 ## Your answer
 
 When you are done, end your last message with your answer as one JSON block in a \`\`\`json fence. It must match this JSON Schema:
 
 \`\`\`json
-${JSON.stringify(REPORT_SCHEMA, null, 2)}
+${JSON.stringify(schema, null, 2)}
 \`\`\`
 `;
 }
 
-export interface CompileRun {
-	report: CompileReport;
-	done: Promise<CompileReport>;
+/** Adds a line to the report's activity log, keeping the last 500 lines. */
+export function appendLog(report: { log: string[] }, line: string) {
+	report.log.push(line);
+	if (report.log.length > MAX_LOG_LINES) report.log.shift();
+}
+
+/** One run of the agent, for a compile or for one issue of a build. */
+export interface SessionParams {
+	settings: AgentSettings;
+	/** Where the agent runs: the project folder for a compile, the issue's repository for a build. */
+	cwd: string;
+	snapshot: string;
+	/** The vault and the snapshot: the agent may never write to them. */
+	protectedPaths: string[];
+	prompt: string;
+	schema: { required: string[] };
+	/** True for a compile: only tools that read, and every other tool denied without a card (CMP-13). */
+	readOnly: boolean;
+	/** "compile" or "build", for the messages. */
+	what: "compile" | "build";
+	/** Where the activity log and the token count go. */
+	report: { log: string[]; tokens?: number };
+	onUpdate: () => void;
+	onPermissionRequest?: (request: PermissionRequest) => void;
+}
+
+export interface AgentSession {
+	done: Promise<AgentOutcome & { skipped: string[] }>;
 	/** Permission requests waiting for an answer, oldest first. */
 	requests: PermissionRequest[];
 	/** Answers one request. Each request is answered on its own, never in bulk. */
@@ -585,75 +651,12 @@ export interface CompileRun {
 }
 
 /**
- * Starts a compile of every vault revision committed since the last compile.
- * Throws before anything runs when the compile can't start; after that, every
- * outcome is recorded in the returned report.
+ * Starts the agent with the permission cards of CMP-27 to CMP-35. Throws when the agent can't even be spawned.
+ * Every step that didn't run because of a denial or a timeout is in `skipped` once the run is done.
  */
-export async function startCompile(options: CompileOptions, onUpdate: (report: CompileReport) => void): Promise<CompileRun> {
-	const { vaultPath, projectFolder } = options;
-	const agent: CompileAgent = options.agent ?? "claude";
-	if (!projectFolder) throw new Error("Choose the project folder in theory.md settings first.");
-	if (!existsSync(projectFolder) || !statSync(projectFolder).isDirectory()) {
-		throw new Error(`The project folder doesn't exist: ${projectFolder}`);
-	}
-	if (agent === "acp" && !options.agentCommand?.trim()) {
-		throw new Error("Set the agent command in theory.md settings first.");
-	}
-
-	const head = await headCommit(vaultPath);
-	const from = await tagCommit(vaultPath);
-	if (from === head || (await pendingRevisionCount(vaultPath)) === 0) {
-		throw new NothingToCompileError("Every committed revision is already compiled.");
-	}
-	// The engineer's unfinished work must never end up on a compile branch.
-	const dirty = await dirtyRepos(projectFolder);
-	if (dirty.length > 0) {
-		throw new Error(`These repositories have uncommitted changes: ${dirty.join(", ")}. Commit or stash them first.`);
-	}
-
-	const revisions = await revisionsBetween(vaultPath, from, head);
-	const diff = await modelDiff(vaultPath, from, head);
-	const notes = await changedNotes(vaultPath, from, head);
-	const snapshot = await createSnapshot(vaultPath, head);
-
-	const snapshotHash = await hashTree(snapshot);
-	const vaultBefore = await workingTreeState(vaultPath);
-
-	const instructions: { repo: string; path: string; text: string }[] = [];
-	const found = findProjectRepos(projectFolder);
-	if (found.kind === "root" || found.kind === "children") {
-		for (const repo of found.repos) {
-			const name = relative(projectFolder, repo) || basename(repo);
-			const file = await modelInstructions(snapshot, name);
-			if (file) instructions.push({ repo: name, ...file });
-		}
-	}
-	// The plugin, never Claude, puts every repository on a compile branch before Claude runs.
-	let branches: PreparedBranch[];
-	try {
-		branches = await prepareBranches(projectFolder, head, options.reports);
-	} catch (error) {
-		await removeSnapshot(snapshot);
-		throw error;
-	}
-
-	const report: CompileReport = {
-		id: `${Date.now()}`,
-		status: "running",
-		startedAt: new Date().toISOString(),
-		fromCommit: from,
-		toCommit: head,
-		revisions,
-		summary: "",
-		changes: [],
-		questions: [],
-		problems: [],
-		log: branches.map((b) => `Checked out ${b.branch} in ${b.name}${b.created ? ` (new, from ${b.base})` : ""}`),
-		author: options.author,
-		...(agent === "acp" ? { agent } : {}),
-	};
-
-	let cancelled = false;
+export function startSession(params: SessionParams): AgentSession {
+	const { report, settings } = params;
+	const agent: CompileAgent = settings.agent ?? "claude";
 	const requests: PermissionRequest[] = [];
 	const log = (line: string) => {
 		report.log.push(line);
@@ -661,13 +664,14 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			report.log.shift();
 			for (const request of requests) request.line--;
 		}
-		onUpdate(report);
+		params.onUpdate();
 	};
 
 	type Respond = (choice: PermissionAnswer | "cancelled", message: string) => void;
 	const pending = new Map<string, { respond: Respond; timer: ReturnType<typeof setTimeout> }>();
 	// Steps that didn't run because a request was denied or timed out. Each becomes a problem.
 	const skipped: string[] = [];
+	const who = agent === "acp" ? "The agent" : "Claude";
 
 	/** Closes a request. Its card becomes one line in the activity log, e.g. "Allowed: npm test". */
 	const close = (id: string, outcome: string) => {
@@ -682,7 +686,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			if (request.line >= 0 && request.line < report.log.length) report.log[request.line] = text;
 			else report.log.push(text);
 		}
-		onUpdate(report);
+		params.onUpdate();
 		return request ? { request, respond: open.respond } : null;
 	};
 
@@ -691,7 +695,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		if (!closed) return;
 		const { request, respond } = closed;
 		if (choice === "deny") {
-			skipped.push(`You denied ${request.tool}: ${request.target}. ${agent === "acp" ? "The agent" : "Claude"} carried on without it.`);
+			skipped.push(`You denied ${request.tool}: ${request.target}. ${who} carried on without it.`);
 			respond("deny", "The engineer denied this. Carry on without this step and name it in problems.");
 			return;
 		}
@@ -719,157 +723,355 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			const timer = setTimeout(() => {
 				if (!close(permission.id, "Timed out")) return;
 				const step = `${permission.tool}: ${permission.target}`;
-				skipped.push(
-					`Nobody answered the request for ${step} within 120 seconds, so it was denied. ${agent === "acp" ? "The agent" : "Claude"} carried on without it.`,
-				);
+				skipped.push(`Nobody answered the request for ${step} within 120 seconds, so it was denied. ${who} carried on without it.`);
 				respond("deny", "Nobody answered in time, so this was denied. Carry on without this step and name it in problems.");
 			}, PERMISSION_TIMEOUT_MS);
 			pending.set(permission.id, { respond, timer });
 			requests.push(permission);
 			// The card shows on this line until it's answered.
 			log(`Asking: ${permission.target}`);
-			options.onPermissionRequest?.(permission);
+			params.onPermissionRequest?.(permission);
 		},
 		withdraw: (id) => void close(id, "Withdrawn"),
 		skip: (problem) => void skipped.push(problem),
 		closeAll: (message) => denyAll(message),
 	};
 
-	const protectedPaths = [vaultPath, snapshot];
-	const prompt = buildPrompt({ snapshot, projectFolder, head, from, revisions, diff, branches, instructions });
-	let agentRun: AgentRun;
+	const run: AgentRun =
+		agent === "acp"
+			? runAcpAgent(
+					{
+						command: settings.agentCommand ?? "",
+						projectFolder: params.cwd,
+						snapshot: params.snapshot,
+						protectedPaths: params.protectedPaths,
+						// Same prompt as Claude Code, plus the answer's shape, since ACP has none built in.
+						prompt: params.prompt + acpAnswerInstructions(params.schema),
+						model: settings.agentModel ?? "",
+						thinkingLevel: settings.agentThinkingLevel ?? "",
+						required: params.schema.required,
+						readOnly: params.readOnly,
+					},
+					host,
+				)
+			: runClaudeCode(params, host);
+	const agentName = agent === "acp" ? "The agent" : "Claude Code";
+
+	return {
+		done: run.done.then((outcome) => {
+			denyAll(`${agentName} exited`);
+			return { ...outcome, skipped };
+		}),
+		requests,
+		answer,
+		cancel() {
+			// An ACP agent hears its open requests were cancelled (AGT-18); Claude Code hears they were denied.
+			denyAll(`the ${params.what} was cancelled`, agent === "acp" ? "cancelled" : "deny");
+			run.cancel();
+		},
+	};
+}
+
+/** The text of a problem when the agent couldn't be started (CMP-19, AGT-19). */
+export function startProblem(error: Error, settings: AgentSettings): string {
+	if ((error as NodeJS.ErrnoException).code !== "ENOENT") return error.message;
+	return settings.agent === "acp"
+		? `Couldn't find the agent ("${settings.agentCommand}"). Set its command in theory.md settings.`
+		: `Couldn't find the Claude Code CLI ("${settings.claudeCommand}"). Set its path in theory.md settings.`;
+}
+
+/** The problem when the agent gave no structured answer (CMP-17, AGT-22). */
+export function noAnswerProblem(outcome: AgentOutcome, settings: AgentSettings): string {
+	return settings.agent === "acp"
+		? // The plugin stops an ACP agent itself, so its exit code means nothing (AGT-22).
+			`The agent gave no structured answer. It stopped because: ${(outcome.stopReason ?? "unknown").replace(/\.$/, "")}. ${outcome.stderr.trim()}`.trim()
+		: `Claude Code exited with code ${outcome.code}. ${outcome.stderr.trim()}`.trim();
+}
+
+/** The snapshot hash and the vault's working tree before the agent ran, to check the model came back as it went in. */
+export interface ModelGuard {
+	snapshot: string;
+	snapshotHash: string;
+	vaultPath: string;
+	vaultBefore: Map<string, string>;
+}
+
+export async function guardModel(vaultPath: string, snapshot: string): Promise<ModelGuard> {
+	return { snapshot, snapshotHash: await hashTree(snapshot), vaultPath, vaultBefore: await workingTreeState(vaultPath) };
+}
+
+/**
+ * The snapshot check (INV-5) and the vault check (INV-6). They run after every run in which an agent started,
+ * cancelled ones included, whatever the agent, because an agent's own shell can write anywhere the engineer
+ * can (AGT-17, INV-12).
+ */
+export async function checkModel(guard: ModelGuard, what: "compile" | "build" = "compile"): Promise<{ intact: boolean; problems: Problem[] }> {
+	const intact = (await hashTree(guard.snapshot).catch(() => "")) === guard.snapshotHash;
+	const vaultAfter = await workingTreeState(guard.vaultPath).catch(() => guard.vaultBefore);
+	// A file that was dirty before and is clean now changed too, so compare both ways.
+	const paths = new Set([...guard.vaultBefore.keys(), ...vaultAfter.keys()]);
+	const touched = [...paths].filter((path) => guard.vaultBefore.get(path) !== vaultAfter.get(path));
+	const problems = [
+		...(touched.length > 0
+			? [plainProblem(`These vault files changed while the ${what} ran: ${touched.join(", ")}. If you didn't edit them, revert them.`)]
+			: []),
+		...(intact ? [] : [plainProblem("Claude tried to change the model snapshot. Those changes were thrown away.")]),
+	];
+	return { intact, problems };
+}
+
+/** Questions from the answer, with their anchors checked against the snapshot when it is still intact. */
+export async function checkedQuestions(structured: StructuredAnswer | undefined, snapshot: string | null): Promise<Question[]> {
+	const questions: Question[] = [];
+	for (const q of structured?.questions ?? []) {
+		const question: Question = { question: q.question, notes: (q.notes ?? []).map((note) => note.replace(/^\.?\//, "")) };
+		const anchors = await checkAnchors(snapshot, q.anchors);
+		if (anchors.length > 0) question.anchors = anchors;
+		questions.push(question);
+	}
+	return questions;
+}
+
+
+export interface CompileRun {
+	report: CompileReport;
+	done: Promise<CompileReport>;
+	/** Permission requests waiting for an answer. A compile denies without asking (CMP-13), so this stays empty. */
+	requests: PermissionRequest[];
+	answer(id: string, answer: PermissionAnswer): void;
+	cancel(): void;
+	/** After creating an issue failed: Retry creates the issues still missing (CMP-68). */
+	retryIssues(): void;
+	/** After creating an issue failed: Discard closes the issues already created as not planned (CMP-68). */
+	discardIssues(): void;
+}
+
+/** The messages of the GitHub checks before a compile (CMP-55 to CMP-57), without "Compile failed: ". */
+export const GH_LOGIN = "Log in to GitHub first. Run gh auth login in a terminal.";
+export const NO_PROJECT = "Choose the GitHub Project in theory.md settings first.";
+
+/**
+ * The GitHub checks a compile and a build share: `gh` logged in (CMP-55), every repository with a GitHub `origin`
+ * (CMP-56), and the GitHub Project set and reachable (CMP-57). Throws the first that fails.
+ */
+export async function requireGitHub(github: GitHub, cwd: string, repos: { name: string; path: string }[], projectUrl: string) {
+	if (await github.authProblem(cwd)) throw new Error(GH_LOGIN);
+	const missing: string[] = [];
+	for (const repo of repos) if (!(await github.repoName(repo.path).catch(() => null))) missing.push(repo.name);
+	if (missing.length > 0) throw new Error(`These repositories have no GitHub origin: ${missing.join(", ")}.`);
+	if (!projectUrl.trim()) throw new Error(NO_PROJECT);
 	try {
-		agentRun =
-			agent === "acp"
-				? runAcpAgent(
-						{
-							command: options.agentCommand ?? "",
-							projectFolder,
-							snapshot,
-							protectedPaths,
-							// Same prompt as Claude Code, plus the answer's shape, since ACP has none built in.
-							prompt: prompt + acpAnswerInstructions(),
-							model: options.agentModel ?? "",
-							thinkingLevel: options.agentThinkingLevel ?? "",
-						},
-						host,
-					)
-				: runClaudeCode(options, { snapshot, protectedPaths, prompt, report }, host);
+		await github.checkProject(projectUrl.trim(), cwd);
 	} catch (error) {
-		await undoBranches(branches);
+		throw new Error(`Couldn't reach the GitHub Project ${projectUrl.trim()}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** Each repository's branch and commit, to check a compile changed none of them (CMP-69). */
+async function codeState(projectFolder: string): Promise<Map<string, string>> {
+	const state = new Map<string, string>();
+	for (const repo of projectRepos(projectFolder)) {
+		const refs = await git(repo.path, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"]).catch(() => ({ stdout: "" }));
+		const head = await git(repo.path, ["rev-parse", "--symbolic-full-name", "HEAD"]).catch(() => ({ stdout: "" }));
+		const status = await git(repo.path, ["status", "--porcelain", "--untracked-files=all"]).catch(() => ({ stdout: "" }));
+		state.set(repo.name, `${head.stdout.trim()}\n${refs.stdout.trim()}\n${status.stdout.trim()}`);
+	}
+	return state;
+}
+
+/**
+ * Starts a compile of every vault revision committed since the last compile. Claude only reads and plans; the
+ * plugin then creates the plan as GitHub issues. Throws before anything runs when the compile can't start;
+ * after that, every outcome is recorded in the returned report.
+ */
+export async function startCompile(options: CompileOptions, onUpdate: (report: CompileReport) => void): Promise<CompileRun> {
+	const { vaultPath, projectFolder } = options;
+	const github = options.github ?? ghGitHub;
+	const agent: CompileAgent = options.agent ?? "claude";
+	if (!projectFolder) throw new Error("Choose the project folder in theory.md settings first.");
+	if (!existsSync(projectFolder) || !statSync(projectFolder).isDirectory()) {
+		throw new Error(`The project folder doesn't exist: ${projectFolder}`);
+	}
+	if (agent === "acp" && !options.agentCommand?.trim()) {
+		throw new Error("Set the agent command in theory.md settings first.");
+	}
+
+	const head = await headCommit(vaultPath);
+	const from = await tagCommit(vaultPath);
+	if (from === head || (await pendingRevisionCount(vaultPath)) === 0) {
+		throw new NothingToCompileError("Every committed revision is already compiled.");
+	}
+	// Claude plans from the committed code, never from the engineer's unfinished work (CMP-36).
+	const dirty = await dirtyRepos(projectFolder);
+	if (dirty.length > 0) {
+		throw new Error(`These repositories have uncommitted changes: ${dirty.join(", ")}. Commit or stash them first.`);
+	}
+	const repos = projectRepos(projectFolder);
+	await requireGitHub(github, projectFolder, repos, options.githubProject);
+
+	const revisions = await revisionsBetween(vaultPath, from, head);
+	const diff = await modelDiff(vaultPath, from, head);
+	const notes = await changedNotes(vaultPath, from, head);
+	const snapshot = await createSnapshot(vaultPath, head);
+	const guard = await guardModel(vaultPath, snapshot);
+	const codeBefore = await codeState(projectFolder);
+
+	const instructions: { repo: string; path: string; text: string }[] = [];
+	for (const repo of repos) {
+		const file = await modelInstructions(snapshot, repo.name);
+		if (file) instructions.push({ repo: repo.name, ...file });
+	}
+
+	const report: CompileReport = {
+		id: `${Date.now()}`,
+		status: "running",
+		startedAt: new Date().toISOString(),
+		fromCommit: from,
+		toCommit: head,
+		revisions,
+		summary: "",
+		changes: [],
+		questions: [],
+		problems: [],
+		log: [],
+		author: options.author,
+		...(agent === "acp" ? { agent } : {}),
+	};
+
+	let session: AgentSession;
+	try {
+		session = startSession({
+			settings: options,
+			cwd: projectFolder,
+			snapshot,
+			protectedPaths: [vaultPath, snapshot],
+			prompt: compilePrompt({ snapshot, projectFolder, head, from, revisions, diff, instructions }),
+			schema: COMPILE_SCHEMA,
+			readOnly: true,
+			what: "compile",
+			report,
+			onUpdate: () => onUpdate(report),
+			onPermissionRequest: options.onPermissionRequest,
+		});
+	} catch (error) {
 		await removeSnapshot(snapshot);
 		throw error;
 	}
 	const agentName = agent === "acp" ? "The agent" : "Claude Code";
 
-	/**
-	 * The snapshot check (INV-5) and the vault check (INV-6). They run after every compile in which an agent
-	 * started, cancelled ones included, whatever the agent, because an agent's own shell can write anywhere
-	 * the engineer can (AGT-17, INV-12). They never change a cancelled compile's status or move the marker.
-	 */
-	const checkModel = async () => {
-		const intact = (await hashTree(snapshot).catch(() => "")) === snapshotHash;
-		const vaultAfter = await workingTreeState(vaultPath).catch(() => vaultBefore);
-		// A file that was dirty before and is clean now changed too, so compare both ways.
-		const paths = new Set([...vaultBefore.keys(), ...vaultAfter.keys()]);
-		const touched = [...paths].filter((path) => vaultBefore.get(path) !== vaultAfter.get(path));
-		return { intact, touched };
-	};
-	const modelProblems = ({ intact, touched }: { intact: boolean; touched: string[] }): Problem[] => [
-		...(touched.length > 0
-			? [plainProblem(`These vault files changed while the compile ran: ${touched.join(", ")}. If you didn't edit them, revert them.`)]
-			: []),
-		...(intact ? [] : [plainProblem("Claude tried to change the model snapshot. Those changes were thrown away.")]),
-	];
+	let cancelled = false;
+	// Set while the report waits for Retry or Discard (CMP-68).
+	let choose: ((choice: "retry" | "discard") => void) | null = null;
+	const markCompiled = () => git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
 
 	const done = (async () => {
-		const { result, code, error, stopReason, stderr } = await agentRun.done;
-		denyAll(`${agentName} exited`);
+		const outcome = await session.done;
+		const { result, error, stderr } = outcome;
+		let snapshotGone = false;
+		const dropSnapshot = async () => {
+			if (snapshotGone) return;
+			snapshotGone = true;
+			await removeSnapshot(snapshot);
+		};
 		try {
-			// Whatever the outcome, a new branch without commits goes, and its repository goes back to its base.
-			report.branches = await finishBranches(branches);
-			for (const b of report.branches) {
-				if (!b.kept) log(`Deleted ${b.branch} in ${b.repo}, which got no commits, and checked out ${b.base}`);
-			}
-			// Uncommitted work would block the next compile, so the engineer must hear about it.
-			const left = await dirtyRepos(projectFolder).catch(() => []);
-			if (left.length > 0) skipped.push(`These repositories have uncommitted changes after the compile: ${left.join(", ")}.`);
+			const checked = await checkModel(guard);
+			// A compile never changes code (CMP-69): anything that did is the agent's own shell, and the engineer must hear.
+			const codeAfter = await codeState(projectFolder).catch(() => codeBefore);
+			const changedRepos = [...codeBefore.keys()].filter((name) => codeBefore.get(name) !== codeAfter.get(name));
+			const codeProblems = changedRepos.length
+				? [plainProblem(`These repositories changed during the compile: ${changedRepos.join(", ")}. A compile never changes code, so check them.`)]
+				: [];
 			if (cancelled) {
 				report.status = "cancelled";
 				report.summary = "You cancelled this compile. The last compile marker didn't move.";
-				report.problems.unshift(...modelProblems(await checkModel()));
+				report.problems.unshift(...checked.problems, ...codeProblems);
 				return report;
 			}
 			if (error) {
 				report.status = "failed";
 				report.summary = `${agent === "acp" ? "The agent" : "Claude Code"} couldn't be started.`;
-				const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
-				report.problems.push(
-					plainProblem(
-						!missing
-							? error.message
-							: agent === "acp"
-								? `Couldn't find the agent ("${options.agentCommand}"). Set its command in theory.md settings.`
-								: `Couldn't find the Claude Code CLI ("${options.claudeCommand}"). Set its path in theory.md settings.`,
-					),
-				);
-				report.problems.unshift(...modelProblems(await checkModel()));
+				report.problems.push(plainProblem(startProblem(error, options)));
+				report.problems.unshift(...checked.problems, ...codeProblems);
 				return report;
 			}
-
 			// Claude Code that can't sign in never read the revisions, so the compile couldn't start (CMP-54).
 			if (agent !== "acp" && !result?.structured && signInFailed(`${result?.text ?? ""}\n${stderr}`)) {
 				report.status = "failed";
 				report.summary = SIGN_IN_SUMMARY;
-				report.problems.unshift(...modelProblems(await checkModel()));
+				report.problems.unshift(...checked.problems, ...codeProblems);
 				return report;
 			}
 
 			report.suspectNotes = notes;
 			const structured = result?.structured;
 			let claimedProblems: unknown = [];
+			let plan = null;
+			const planProblems: string[] = [];
 			if (structured) {
 				report.status = structured.status === "succeeded" && !result?.isError ? "succeeded" : "failed";
 				report.summary = structured.summary;
-				report.changes = structured.changes ?? [];
-				report.questions = (structured.questions ?? []).map((q) => ({
-					question: q.question,
-					notes: (q.notes ?? []).map((note) => note.replace(/^\.?\//, "")),
-				}));
 				claimedProblems = structured.problems;
+				if (report.status === "succeeded") {
+					const read = readPlan(structured.plan, repos.map((r) => r.name));
+					plan = read.plan;
+					planProblems.push(...read.problems);
+					if (!plan) report.status = "failed";
+				}
 			} else {
 				report.status = "failed";
 				report.summary = result?.text || `${agentName} finished without a report.`;
-				report.problems.push(
-					plainProblem(
-						agent === "acp"
-							? // The plugin stops an ACP agent itself, so its exit code means nothing (AGT-22).
-								`The agent gave no structured answer. It stopped because: ${(stopReason ?? "unknown").replace(/\.$/, "")}. ${stderr.trim()}`.trim()
-							: `Claude Code exited with code ${code}. ${stderr.trim()}`.trim(),
-					),
-				);
+				report.problems.push(plainProblem(noAnswerProblem(outcome, options)));
 			}
 
-			// The model must come back exactly as it went in.
-			const checked = await checkModel();
 			const { intact } = checked;
 			// Anchors are only checked against a snapshot that is still the compiled revision.
 			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			report.problems.push(...planProblems.map(plainProblem));
 			// The engineer must know which steps didn't run, whatever Claude reported.
-			report.problems.push(...skipped.map(plainProblem));
-			for (let i = 0; i < report.questions.length; i++) {
-				const anchors = await checkAnchors(intact ? snapshot : null, structured?.questions?.[i]?.anchors);
-				if (anchors.length > 0) report.questions[i].anchors = anchors;
-			}
-			if (!intact) report.status = "failed";
-			report.problems.unshift(...modelProblems(checked));
+			report.problems.push(...outcome.skipped.map(plainProblem));
+			report.questions = await checkedQuestions(structured, intact ? snapshot : null);
+			if (!intact || changedRepos.length > 0) report.status = "failed";
+			report.problems.unshift(...checked.problems, ...codeProblems);
+			await dropSnapshot();
 
-			// The marker moves even when the compile fails, so the next compile only takes newer revisions.
-			await git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
+			if (report.status !== "succeeded" || !plan) {
+				// A failed compile creates no issue, and the marker still moves (CMP-17, CMP-22).
+				await markCompiled();
+				return report;
+			}
+
+			// The plugin, never Claude, creates the plan on GitHub (CMP-63).
+			report.issues = issueRecords(plan, new Map(repos.map((r) => [r.name, r.path])));
+			onUpdate(report);
+			for (;;) {
+				try {
+					await createIssues(github, report.issues, revisions, options.githubProject.trim(), () => onUpdate(report));
+					delete report.issueFailure;
+					break;
+				} catch (failure) {
+					report.issueFailure = `Couldn't create the issues: ${failure instanceof Error ? failure.message : String(failure)}`;
+					onUpdate(report);
+					const choice = cancelled ? "discard" : await new Promise<"retry" | "discard">((resolve) => (choose = resolve));
+					choose = null;
+					if (choice === "retry" && !cancelled) continue;
+					// A GitHub failure says nothing about the model: the revisions stay pending (CMP-68).
+					const reason = report.issueFailure;
+					delete report.issueFailure;
+					const notClosed = await discardIssues(github, report.issues);
+					report.status = cancelled ? "cancelled" : "failed";
+					if (cancelled) report.summary = "You cancelled this compile. The last compile marker didn't move.";
+					report.problems.push(
+						plainProblem(`${reason} The issues already created were closed as not planned, and the last compile marker didn't move.`),
+						...notClosed.map(plainProblem),
+					);
+					return report;
+				}
+			}
+			await markCompiled();
 			return report;
 		} finally {
 			report.finishedAt = new Date().toISOString();
-			await removeSnapshot(snapshot);
+			await dropSnapshot();
 			onUpdate(report);
 		}
 	})();
@@ -877,26 +1079,27 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	return {
 		report,
 		done,
-		requests,
-		answer,
+		requests: session.requests,
+		answer: session.answer,
 		cancel() {
 			if (report.status !== "running" || cancelled) return;
 			cancelled = true;
-			// An ACP agent hears its open requests were cancelled (AGT-18); Claude Code hears they were denied.
-			denyAll("the compile was cancelled", agent === "acp" ? "cancelled" : "deny");
-			agentRun.cancel();
+			// Waiting for Retry or Discard, Cancel discards (CMP-18: a cancelled compile creates no issue).
+			if (choose) return choose("discard");
+			session.cancel();
 		},
+		retryIssues: () => choose?.("retry"),
+		discardIssues: () => choose?.("discard"),
 	};
 }
 
-/** Runs Claude Code with `-p` and stream-json in the project folder for one compile. */
-function runClaudeCode(
-	options: CompileOptions,
-	params: { snapshot: string; protectedPaths: string[]; prompt: string; report: CompileReport },
-	host: AgentHost,
-): AgentRun {
-	const { projectFolder } = options;
-	const { snapshot, protectedPaths, prompt, report } = params;
+
+/** The tools a compile's Claude Code gets: reading files, searching and listing (CMP-13). */
+export const READ_ONLY_TOOLS = ["Read", "Glob", "Grep"];
+
+/** The arguments Claude Code runs with. A read-only run gets only READ_ONLY_TOOLS, and every other tool is denied without asking. */
+export function claudeArgs(params: Pick<SessionParams, "settings" | "protectedPaths" | "snapshot" | "schema" | "readOnly">): string[] {
+	const { settings, protectedPaths, snapshot, schema, readOnly } = params;
 	const disallowed = protectedPaths.flatMap((path) =>
 		["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(//${path.replace(/^\//, "")}/**)`),
 	);
@@ -912,22 +1115,24 @@ function runClaudeCode(
 		"--verbose",
 		"--no-session-persistence",
 		"--permission-mode",
-		options.permissionMode,
-		"--add-dir",
-		snapshot,
-		"--json-schema",
-		JSON.stringify(REPORT_SCHEMA),
-		"--disallowedTools",
-		...disallowed,
+		readOnly ? "dontAsk" : settings.permissionMode,
 	];
+	if (readOnly) args.push("--tools", READ_ONLY_TOOLS.join(","), "--strict-mcp-config");
+	args.push("--add-dir", snapshot, "--json-schema", JSON.stringify(schema), "--disallowedTools", ...disallowed);
+	if (readOnly) args.push(...WRITE_TOOLS, "Bash");
 	// Fixed when Claude Code starts, so a running compile keeps the model and effort it started with.
-	if (options.model) args.push("--model", options.model);
-	if (options.effort) args.push("--effort", options.effort);
-	const allowed = options.allowedTools.trim();
+	if (settings.model) args.push("--model", settings.model);
+	if (settings.effort) args.push("--effort", settings.effort);
+	const allowed = readOnly ? READ_ONLY_TOOLS.join(" ") : settings.allowedTools.trim();
 	if (allowed) args.push("--allowedTools", allowed);
+	return args;
+}
 
-	const child: ChildProcess = spawn(options.claudeCommand || "claude", args, {
-		cwd: projectFolder,
+/** Runs Claude Code with `-p` and stream-json in `cwd` for one compile, or one issue of a build. */
+function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
+	const { settings, protectedPaths, prompt, report, cwd, readOnly } = params;
+	const child: ChildProcess = spawn(settings.claudeCommand || "claude", claudeArgs(params), {
+		cwd,
 		env: { ...process.env, PATH: toolPath() },
 	});
 
@@ -948,7 +1153,15 @@ function runClaudeCode(
 		}
 		const tool = String(request.tool_name ?? "");
 		const input: Record<string, unknown> = request.input ?? {};
-		const file = writtenFile(tool, input, projectFolder);
+		// A compile only reads: anything else is denied without a card (CMP-13).
+		if (readOnly) {
+			const target = requestTarget(tool, input);
+			host.skip(`A compile only reads, so ${tool}: ${target} was denied.`);
+			host.log(`Denied: ${target}`);
+			deny(id, "A compile only reads the model and the code. Carry on without this step.");
+			return;
+		}
+		const file = writtenFile(tool, input, cwd);
 		// Writes to the model never reach a card.
 		if (file && protectedPaths.some((dir) => isInside(file, dir))) {
 			host.skip(`Claude tried to write to the model (${file}). That was denied.`);
@@ -958,7 +1171,7 @@ function runClaudeCode(
 		}
 		const description = typeof input.description === "string" ? input.description : "";
 		const reason = description || (typeof request.decision_reason === "string" ? request.decision_reason : "");
-		const rules = requestRules(tool, input, projectFolder, request.permission_suggestions);
+		const rules = requestRules(tool, input, cwd, request.permission_suggestions);
 		host.ask(
 			{
 				id,
@@ -1007,7 +1220,8 @@ function runClaudeCode(
 			} else if (event.type === "control_cancel_request") {
 				host.withdraw(String(event.request_id));
 			} else if (event.type === "result") {
-				report.tokens = totalTokens(event.usage);
+				const tokens = totalTokens(event.usage);
+				if (tokens !== undefined) report.tokens = (report.tokens ?? 0) + tokens;
 				result = {
 					isError: Boolean(event.is_error) || event.subtype !== "success",
 					text: typeof event.result === "string" ? event.result : "",

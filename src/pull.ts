@@ -261,14 +261,21 @@ export async function pullRepos(repos: CodeRepo[]): Promise<RepoPull[]> {
 	return results;
 }
 
-/** Whether the pull before a compile stops it (PULL-16) or lets it carry on offline (PULL-17). */
-export function compileGate(vault: VaultPull | null, repos: RepoPull[]): { error: string | null; offline: boolean } {
+/**
+ * Whether the pull before a compile stops it (PULL-16) or lets it carry on offline (PULL-17). A build pulls the
+ * same way (BLD-4), and its messages say "build again".
+ */
+export function compileGate(
+	vault: VaultPull | null,
+	repos: RepoPull[],
+	action: "compile" | "build" = "compile",
+): { error: string | null; offline: boolean } {
 	if (vault?.kind === "diverged") {
-		return { error: "The vault and its remote both have new commits. Pull with rebase in git, then compile again.", offline: false };
+		return { error: `The vault and its remote both have new commits. Pull with rebase in git, then ${action} again.`, offline: false };
 	}
 	if (vault?.kind === "waiting") {
 		return {
-			error: `New revisions on the remote change notes you haven't committed: ${vault.files.join(", ")}. Commit or discard them, then compile again.`,
+			error: `New revisions on the remote change notes you haven't committed: ${vault.files.join(", ")}. Commit or discard them, then ${action} again.`,
 			offline: false,
 		};
 	}
