@@ -33,6 +33,14 @@ export async function gh(cwd: string, args: string[]) {
 	}
 }
 
+/**
+ * Parses a list `gh` printed with `--json`. Some list commands, like `gh label list --search`, print nothing
+ * instead of `[]` when nothing matches, so empty output is an empty list.
+ */
+export function parseJsonList<T>(stdout: string): T[] {
+	return stdout.trim() ? (JSON.parse(stdout) as T[]) : [];
+}
+
 /** Null when `gh` is installed and logged in, else the reason it can't be used. */
 export async function ghProblem(cwd: string): Promise<string | null> {
 	try {
@@ -115,7 +123,7 @@ export async function branchPullRequest(
 	let prs: { url: string; state: string; isDraft: boolean; headRefOid: string }[];
 	try {
 		const { stdout } = await gh(repoPath, ["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,isDraft,headRefOid", "--limit", "20"]);
-		prs = JSON.parse(stdout);
+		prs = parseJsonList(stdout);
 	} catch {
 		return null;
 	}
@@ -239,7 +247,7 @@ export const ghGitHub: GitHub = {
 	},
 	async ensureLabel(repoPath, label) {
 		const { stdout } = await gh(repoPath, ["label", "list", "--search", label, "--json", "name", "--limit", "100"]);
-		const names = (JSON.parse(stdout) as { name: string }[]).map((l) => l.name.toLowerCase());
+		const names = parseJsonList<{ name: string }>(stdout).map((l) => l.name.toLowerCase());
 		if (names.includes(label.toLowerCase())) return;
 		await gh(repoPath, ["label", "create", label, "--description", "A theory.md compile's epic"]);
 	},

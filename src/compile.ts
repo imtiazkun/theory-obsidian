@@ -1007,18 +1007,21 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			let claimedProblems: unknown = [];
 			let plan = null;
 			const planProblems: string[] = [];
+			// The report stays running until every issue exists (CMP-16): the view shows Retry and Discard, and
+			// Cancel works, only while it runs.
+			let verdict: "succeeded" | "failed";
 			if (structured) {
-				report.status = structured.status === "succeeded" && !result?.isError ? "succeeded" : "failed";
+				verdict = structured.status === "succeeded" && !result?.isError ? "succeeded" : "failed";
 				report.summary = structured.summary;
 				claimedProblems = structured.problems;
-				if (report.status === "succeeded") {
+				if (verdict === "succeeded") {
 					const read = readPlan(structured.plan, repos.map((r) => r.name));
 					plan = read.plan;
 					planProblems.push(...read.problems);
-					if (!plan) report.status = "failed";
+					if (!plan) verdict = "failed";
 				}
 			} else {
-				report.status = "failed";
+				verdict = "failed";
 				report.summary = result?.text || `${agentName} finished without a report.`;
 				report.problems.push(plainProblem(noAnswerProblem(outcome, options)));
 			}
@@ -1030,12 +1033,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			// The engineer must know which steps didn't run, whatever Claude reported.
 			report.problems.push(...outcome.skipped.map(plainProblem));
 			report.questions = await checkedQuestions(structured, intact ? snapshot : null);
-			if (!intact || changedRepos.length > 0) report.status = "failed";
+			if (!intact || changedRepos.length > 0) verdict = "failed";
 			report.problems.unshift(...checked.problems, ...codeProblems);
 			await dropSnapshot();
 
-			if (report.status !== "succeeded" || !plan) {
+			if (verdict !== "succeeded" || !plan) {
 				// A failed compile creates no issue, and the marker still moves (CMP-17, CMP-22).
+				report.status = "failed";
 				await markCompiled();
 				return report;
 			}
@@ -1067,6 +1071,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					return report;
 				}
 			}
+			report.status = "succeeded";
 			await markCompiled();
 			return report;
 		} finally {

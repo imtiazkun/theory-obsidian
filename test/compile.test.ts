@@ -293,6 +293,40 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		expect(await s.marker()).toBe(COMPILED_TAG);
 	});
 
+	it("stays running while Retry or Discard waits, so the report can offer them, and succeeds once every issue exists", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ epic, issues: [issue("web", "first"), issue("api", "second")] }) }]);
+		s.github.failures.set("createIssue", { at: 2, message: "HTTP 502" });
+		const statuses: string[] = [];
+		let run: Awaited<ReturnType<typeof startCompile>>;
+		run = await startCompile(s.options(), (report) => {
+			if (!report.issueFailure || statuses.length) return;
+			statuses.push(report.status);
+			setTimeout(() => run.retryIssues(), 0);
+		});
+		const report = await run.done;
+		expect(statuses).toEqual(["running"]);
+		expect(report.status).toBe("succeeded");
+		expect(await s.marker()).toBe(COMPILED_TAG);
+	});
+
+	it("Cancel while Retry or Discard waits discards the issues and cancels the compile", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ epic, issues: [issue("web", "first"), issue("api", "second")] }) }]);
+		s.github.failures.set("createIssue", { at: 2, message: "HTTP 502" });
+		let run: Awaited<ReturnType<typeof startCompile>>;
+		let asked = false;
+		run = await startCompile(s.options(), (report) => {
+			if (!report.issueFailure || asked) return;
+			asked = true;
+			setTimeout(() => run.cancel(), 0);
+		});
+		const report = await run.done;
+		expect(report.status).toBe("cancelled");
+		expect(s.github.issues.map((i) => [i.title, i.state, i.closedAs])).toEqual([["Ship the big thing", "closed", "not planned"]]);
+		expect(await s.marker()).toBe("");
+	});
+
 	it("Discard closes the issues already created as not planned, fails the compile and leaves the marker in place", async () => {
 		const s = await setup();
 		s.claude.setSteps([{ answer: answer({ epic, issues: [issue("web", "first"), issue("api", "second")] }) }]);
