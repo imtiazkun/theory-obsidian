@@ -1,12 +1,6 @@
 import { ItemView, Notice, Setting, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
-import {
-	BranchCommit,
-	CompileBranch,
-	branchCommits,
-	isOpenCompileBranch,
-	projectRepos,
-	recordedPullRequest,
-} from "./branches";
+import { projectRepos } from "./branches";
+import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates } from "./build";
 import type { CompileReport } from "./compile";
 import {
 	PullRequest,
@@ -24,25 +18,6 @@ export const CREATE_PR_VIEW_TYPE = "theory-create-pr";
 
 /** Marks where the footer starts, so a second Create replaces it instead of adding another. */
 const FOOTER_MARK = "<!-- theory.md compile -->";
-
-/** A repository whose compile branch has commits and no pull request yet. */
-export interface PullRequestCandidate {
-	branch: CompileBranch;
-	/** Commits on the compile branch that aren't in its base. */
-	commits: BranchCommit[];
-}
-
-/** The repositories of this report that still need a pull request: an open compile branch, with commits, and none yet. */
-export async function pullRequestCandidates(report: CompileReport, reports: CompileReport[]): Promise<PullRequestCandidate[]> {
-	const candidates: PullRequestCandidate[] = [];
-	for (const branch of report.branches ?? []) {
-		if (!branch.kept || (await recordedPullRequest(reports, branch.repoPath, branch.branch))) continue;
-		if (!(await isOpenCompileBranch(branch.repoPath, branch.branch, branch.base, reports))) continue;
-		const commits = await branchCommits(branch.repoPath, branch.branch, branch.base);
-		if (commits.length > 0) candidates.push({ branch, commits });
-	}
-	return candidates;
-}
 
 /** One repository's section on the page. Its text lives only here: closing the page discards it. */
 interface Section extends PullRequestCandidate {
@@ -120,14 +95,19 @@ export class CreatePullRequestView extends ItemView {
 		if (!report) return this.render();
 		this.loading = true;
 		this.render();
-		this.title = report.revisions[report.revisions.length - 1]?.subject ?? "";
-		this.body = "";
-		const candidates = await pullRequestCandidates(report, this.plugin.reports);
+		const epic = report.issues?.find((i) => i.kind === "epic");
+		const epicOrigin = epic ? await githubOrigin(epic.repoPath) : null;
+		const epicRepoName = epicOrigin ? epicOrigin.replace("https://github.com/", "") : null;
+		this.title = epic?.title ?? report.revisions[report.revisions.length - 1]?.subject ?? "";
+		// The shared body is the epic repository's. A repository whose body differs starts with its own (REP-27).
+		this.body = epic ? epicPullRequestBody(report, epic.repoPath, epicRepoName) : "";
+		const candidates = await pullRequestCandidates(report);
 		const ghBlocked = candidates.length > 0 ? await ghProblem(candidates[0].branch.repoPath) : null;
 		for (const candidate of candidates) {
 			const { repoPath, base } = candidate.branch;
 			const origin = await githubOrigin(repoPath);
 			const remote = await remoteBranches(repoPath);
+			const body = epicPullRequestBody(report, repoPath, epicRepoName);
 			this.sections.push({
 				...candidate,
 				blocked: !origin ? "This repository has no GitHub origin." : ghBlocked,
@@ -135,9 +115,9 @@ export class CreatePullRequestView extends ItemView {
 				base,
 				draft: false,
 				reviewers: "",
-				shared: true,
-				title: "",
-				body: "",
+				shared: body === this.body,
+				title: this.title,
+				body,
 				error: null,
 				creating: false,
 				created: null,
@@ -158,11 +138,11 @@ export class CreatePullRequestView extends ItemView {
 		}
 		contentEl.createEl("h3", { text: "Create pull requests" });
 		if (this.loading) {
-			contentEl.createDiv({ cls: "theory-report-empty", text: "Looking at the compile branches…" });
+			contentEl.createDiv({ cls: "theory-report-empty", text: "Looking at the epic branches…" });
 			return;
 		}
 		if (this.sections.length === 0) {
-			contentEl.createDiv({ cls: "theory-report-empty", text: "No compile branch from this compile needs a pull request." });
+			contentEl.createDiv({ cls: "theory-report-empty", text: "No epic branch from this build needs a pull request." });
 			return;
 		}
 
@@ -280,7 +260,7 @@ export class CreatePullRequestView extends ItemView {
 		});
 	}
 
-	/** Pushes each ready compile branch and opens its pull request, then links them all to each other. */
+	/** Pushes each ready epic branch and opens its pull request, then links them all to each other. */
 	private async create() {
 		const report = this.report();
 		if (!report) return;

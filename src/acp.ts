@@ -102,19 +102,25 @@ function matchingBrace(text: string, start: number): number {
 	return -1;
 }
 
-/** The compile answer (CMP-15) in `value`, or null when it lacks status, summary, changes, questions or problems. */
-export function structuredAnswer(value: unknown): StructuredAnswer | null {
+/** A compile's answer must have these (CMP-15). A build's has `changes` instead of `plan`. */
+export const COMPILE_FIELDS = ["status", "summary", "plan", "questions", "problems"];
+
+/** The answer in `value`, or null when it lacks one of the `required` fields (AGT-10). */
+export function structuredAnswer(value: unknown, required: string[] = COMPILE_FIELDS): StructuredAnswer | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const answer = value as Record<string, unknown>;
 	if (answer.status !== "succeeded" && answer.status !== "failed") return null;
 	if (typeof answer.summary !== "string") return null;
-	if (!Array.isArray(answer.changes) || !Array.isArray(answer.questions) || !Array.isArray(answer.problems)) return null;
+	for (const field of ["changes", "questions", "problems"]) {
+		if (required.includes(field) && !Array.isArray(answer[field])) return null;
+	}
+	if (required.includes("plan") && (!answer.plan || typeof answer.plan !== "object" || Array.isArray(answer.plan))) return null;
 	return answer as unknown as StructuredAnswer;
 }
 
 /** The answer read from the last JSON block in the agent's messages (AGT-10), or null when there is none. */
-export function answerFromMessages(messages: string[]): StructuredAnswer | null {
-	return structuredAnswer(lastJsonBlock(messages.join("\n")));
+export function answerFromMessages(messages: string[], required: string[] = COMPILE_FIELDS): StructuredAnswer | null {
+	return structuredAnswer(lastJsonBlock(messages.join("\n")), required);
 }
 
 /** `path` with symbolic links resolved, as far as it exists. A file not written yet keeps its own name. */
@@ -250,9 +256,16 @@ export interface AcpOptions {
 	model: string;
 	/** The Agent thinking level setting, matched against the agent's thinking-level choices. "" means the agent's default. */
 	thinkingLevel: string;
+	/** The fields the answer must have. A compile's by default. */
+	required?: string[];
+	/** True for a compile: every write and every request to run a command is refused without a card (CMP-13). */
+	readOnly?: boolean;
 }
 
-/** Runs an Agent Client Protocol agent over stdio for one compile. */
+/** The kinds of ACP tool call that only read. A read-only run allows these without a card, and denies the rest. */
+const READ_KINDS = ["read", "search"];
+
+/** Runs an Agent Client Protocol agent over stdio for one compile, or one issue of a build. */
 export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 	const [command, ...args] = splitCommand(options.command);
 	const child: ChildProcess = spawn(command, args, {
@@ -296,6 +309,14 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 			return;
 		}
 		const title = typeof toolCall.title === "string" ? toolCall.title : "";
+		// A compile only reads: reading is allowed, and anything else is denied without a card (CMP-13).
+		if (options.readOnly) {
+			if (READ_KINDS.includes(toolCall.kind)) return select(acpOptionId(choices, "allow"));
+			const target = requestTarget(toolCall, options.projectFolder);
+			host.skip(`A compile only reads, so ${KIND_NAMES[toolCall.kind] ?? "Tool"}: ${target} was denied.`);
+			host.log(`Denied: ${target}`);
+			return select(acpOptionId(choices, "deny"));
+		}
 		host.ask(
 			{
 				id: `acp-${String(id)}`,
@@ -323,7 +344,9 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 			}
 			if (method === "fs/write_text_file") {
 				const path = String(params?.path ?? "");
-				const refused = refusedWrite(path, options.projectFolder, options.protectedPaths);
+				const refused = options.readOnly
+					? `A compile only reads, so the write to ${path} was refused.`
+					: refusedWrite(path, options.projectFolder, options.protectedPaths);
 				if (refused) {
 					host.skip(refused);
 					host.log(`Refused write: ${path}`);
@@ -418,7 +441,7 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 			await call("initialize", {
 				protocolVersion: ACP_PROTOCOL_VERSION,
 				// No terminal: the agent runs commands itself, and asks first when it wants to (AGT-16).
-				clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
+				clientCapabilities: { fs: { readTextFile: true, writeTextFile: !options.readOnly }, terminal: false },
 				clientInfo: { name: "theory-md", title: "theory.md" },
 			});
 			const session = await call("session/new", {
@@ -461,7 +484,7 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 	const done = (async (): Promise<AgentOutcome> => {
 		const [turn, { code, error }] = await Promise.all([run(), exit]);
 		if (error) return { result: null, code, error, stderr };
-		const structured = answerFromMessages(messages);
+		const structured = answerFromMessages(messages, options.required);
 		const text = [...messages].reverse().find((m) => m.trim() !== "")?.trim() ?? "";
 		return {
 			result: {

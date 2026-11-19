@@ -1,21 +1,24 @@
 import { spawn } from "child_process";
 import type { CommentAction, CommentFile } from "./comments";
 import type { CompileReport, PermissionRequest } from "./compile";
+import type { IssueRecord } from "./plan";
 import { PUSH_REJECTED, type PushResult } from "./push";
 import { toolPath } from "./tool-path";
 import { git } from "./vault";
 
 /** The events a hook can be tied to (HOOK-2). */
-export const HOOK_EVENTS = ["comment", "commit", "push", "compile-start", "compile-end", "permission-request"] as const;
+export const HOOK_EVENTS = ["comment", "commit", "push", "compile-start", "compile-end", "build-start", "build-end", "permission-request"] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 /** What each event means, for the settings. */
 export const HOOK_EVENT_NAMES: Record<HookEvent, string> = {
-	comment: "Comment committed",
+	comment: "Comment posted",
 	commit: "Revision committed",
 	push: "Push finished",
 	"compile-start": "Compile started",
 	"compile-end": "Compile ended",
+	"build-start": "Build started",
+	"build-end": "Build ended",
 	"permission-request": "Permission requested",
 };
 
@@ -179,7 +182,7 @@ export class Hooks {
 export function sampleDetails(event: HookEvent): Record<string, unknown> {
 	switch (event) {
 		case "comment":
-			return { action: "comment", note: "Example.md", text: "This is a sample comment." };
+			return { action: "comment", note: "Example.md", text: "This is a sample comment.", committed: true };
 		case "commit":
 			return { hash: "0000000", subject: "Sample revision" };
 		case "push":
@@ -187,15 +190,27 @@ export function sampleDetails(event: HookEvent): Record<string, unknown> {
 		case "compile-start":
 			return { status: "running", revisions: 1 };
 		case "compile-end":
-			return { status: "succeeded", summary: "A sample compile.", questions: 0 };
+			return { status: "succeeded", summary: "A sample compile.", questions: 0, issues: [] };
+		case "build-start":
+			return { issues: [{ repo: "app", number: 1, title: "A sample issue", url: "https://github.com/team/app/issues/1" }], epic: null };
+		case "build-end":
+			return {
+				ended: "finished",
+				issues: [{ repo: "app", number: 1, title: "A sample issue", url: "https://github.com/team/app/issues/1", state: "built" }],
+				pullRequests: ["https://github.com/team/app/pull/2"],
+				epicBranch: null,
+			};
 		case "permission-request":
 			return { tool: "Bash", target: "npm test", reason: "A sample request." };
 	}
 }
 
-/** The details of a `comment` event: the note, what was done and the comment's text (HOOK-3). */
-export function commentDetails(notePath: string, action: CommentAction, file: CommentFile): Record<string, unknown> {
-	const details: Record<string, unknown> = { action: action.kind, note: notePath };
+/**
+ * The details of a `comment` event: the note, what was done, the comment's text and whether its commit
+ * worked (HOOK-2, HOOK-3). The event fires once the comment is saved, committed or not.
+ */
+export function commentDetails(notePath: string, action: CommentAction, file: CommentFile, committed: boolean): Record<string, unknown> {
+	const details: Record<string, unknown> = { action: action.kind, note: notePath, committed };
 	if (action.kind === "comment" || action.kind === "reply") {
 		details.text = action.text;
 		if (action.kind === "reply") details.thread = action.threadId;
@@ -227,9 +242,44 @@ export function pushDetails(result: PushResult): Record<string, unknown> | null 
 	}
 }
 
-/** The details of a `compile-end` event: the status, the summary and the number of questions (HOOK-3). */
+function issueDetails(issue: IssueRecord): Record<string, unknown> {
+	return { repo: issue.repo, number: issue.number ?? null, title: issue.title, url: issue.url ?? null };
+}
+
+/** The details of a `compile-end` event: the status, the summary, the number of questions and the issues it created (HOOK-3). */
 export function compileEndDetails(report: CompileReport): Record<string, unknown> {
-	return { status: report.status, summary: report.summary, questions: report.questions.length };
+	const created = (report.issues ?? []).filter((i) => i.number !== undefined && !i.discarded);
+	return {
+		status: report.status,
+		summary: report.summary,
+		questions: report.questions.length,
+		issues: created.filter((i) => i.kind === "issue").map(issueDetails),
+		epic: created.filter((i) => i.kind === "epic").map(issueDetails)[0] ?? null,
+	};
+}
+
+/** The details of a `build-start` event: the issues to build and the epic, if there is one (HOOK-3). */
+export function buildStartDetails(report: CompileReport): Record<string, unknown> {
+	const issues = report.issues ?? [];
+	return {
+		issues: issues.filter((i) => i.kind === "issue" && i.build === "waiting").map(issueDetails),
+		epic: issues.filter((i) => i.kind === "epic").map(issueDetails)[0] ?? null,
+	};
+}
+
+/**
+ * The details of a `build-end` event: how the build ended, each issue's state (BLD-3), the pull requests it
+ * opened and the epic branch, if there is one (HOOK-3).
+ */
+export function buildEndDetails(report: CompileReport): Record<string, unknown> {
+	const branches = report.build?.epicBranches ?? [];
+	const opened = (report.pullRequests ?? []).filter((pr) => !branches.some((b) => b.repoPath === pr.repoPath && b.branch === pr.branch));
+	return {
+		ended: report.build?.status ?? "stopped",
+		issues: (report.issues ?? []).filter((i) => i.kind === "issue").map((i) => ({ ...issueDetails(i), state: i.build ?? "waiting" })),
+		pullRequests: opened.map((pr) => pr.url),
+		epicBranch: branches[0]?.branch ?? null,
+	};
 }
 
 /** The details of a `permission-request` event: the tool, the exact command or file, and the reason. */

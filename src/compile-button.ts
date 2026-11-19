@@ -315,7 +315,8 @@ export class CompileButton {
 						`Claude is asking to use ${request.tool}. Click to answer in the compile report.`,
 					);
 				} else {
-					this.show("loader", "Compiling…", "A compile is running. Click to follow it.");
+					if (this.plugin.isBuilding()) this.show("loader", "Building…", "A build is running. Click to follow it.");
+					else this.show("loader", "Compiling…", "A compile is running. Click to follow it.");
 				}
 				break;
 			}

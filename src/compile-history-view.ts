@@ -73,7 +73,7 @@ export class CompileHistoryView extends ItemView {
 			// The state of its pull requests, one per repository when there are several.
 			const prs = report.pullRequests ?? [];
 			const repos = new Map<string, PullRequestState | null>();
-			for (const b of report.branches ?? []) if (b.kept && b.commits.length > 0) repos.set(b.repoPath, null);
+			for (const issue of report.issues ?? []) if (issue.kind === "issue" && issue.number !== undefined) repos.set(issue.repoPath, null);
 			for (const pr of prs) repos.set(pr.repoPath, pr.state);
 			const states = item.createDiv({ cls: "theory-history-meta theory-compile-history-prs" });
 			const state = (value: PullRequestState | null) =>

@@ -310,7 +310,7 @@ describe("code repository pull", () => {
 		const diverged = await codeRepo(project, "diverged");
 		for (const r of [safe, dirty, compiling, diverged]) await anaPushes(r.other, { "main.go": "package main // new\n" });
 		write(dirty.repo, { "wip.go": "wip\n" });
-		await git(compiling.repo, ["checkout", "--quiet", "-b", "theory/compile-abc1234", "--track", "origin/main"]);
+		await git(compiling.repo, ["checkout", "--quiet", "-b", "theory/57-sparkle-long-folders", "--track", "origin/main"]);
 		await commitFiles(diverged.repo, { "mine.go": "mine\n" }, "Mine");
 		const heads = {
 			dirty: await out(dirty.repo, ["rev-parse", "HEAD"]),
@@ -330,7 +330,7 @@ describe("code repository pull", () => {
 		expect(await out(dirty.repo, ["rev-parse", "HEAD"])).toBe(heads.dirty);
 		expect(read(join(dirty.repo, "wip.go"))).toBe("wip\n");
 		expect(await out(compiling.repo, ["rev-parse", "HEAD"])).toBe(heads.compiling);
-		expect(await out(compiling.repo, ["symbolic-ref", "--short", "HEAD"])).toBe("theory/compile-abc1234");
+		expect(await out(compiling.repo, ["symbolic-ref", "--short", "HEAD"])).toBe("theory/57-sparkle-long-folders");
 		expect(await out(diverged.repo, ["rev-parse", "HEAD"])).toBe(heads.diverged);
 		// The fetch still happened in every repository.
 		expect(await out(dirty.repo, ["rev-parse", "@{u}"])).toBe(await out(dirty.other, ["rev-parse", "HEAD"]));
@@ -375,6 +375,15 @@ describe("the pull before a compile", () => {
 	it("stops the compile when a sync is needed", () => {
 		expect(compileGate({ kind: "diverged" }, []).error).toBe(
 			"The vault and its remote both have new commits. Pull with rebase in git, then compile again.",
+		);
+	});
+
+	it("stops a build the same way, telling the engineer to build again (BLD-4)", () => {
+		expect(compileGate({ kind: "diverged" }, [], "build").error).toBe(
+			"The vault and its remote both have new commits. Pull with rebase in git, then build again.",
+		);
+		expect(compileGate({ kind: "waiting", count: 1, files: ["Build.md"] }, [], "build").error).toBe(
+			"New revisions on the remote change notes you haven't committed: Build.md. Commit or discard them, then build again.",
 		);
 	});
 

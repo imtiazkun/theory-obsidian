@@ -46,6 +46,8 @@ export interface TheorySettings extends SavedAuthor {
 	pullCodeRepos: boolean;
 	/** The engineer's own commands run on events (HOOK-1). In plugin data only, never in the vault (HOOK-8). */
 	hooks: Hook[];
+	/** The GitHub Project every issue a compile creates is added to, as its URL (CFG-40). Empty by default. */
+	githubProject: string;
 }
 
 export const DEFAULT_SETTINGS: TheorySettings = {
@@ -67,13 +69,14 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	pullInterval: 5,
 	pullCodeRepos: true,
 	hooks: [],
+	githubProject: "",
 };
 
 /** The Compile heading's description, naming the agent that compiles (AGT-28). */
 export function compileDescription(agent: CompileAgent): string {
 	return agent === "acp"
-		? "Compile hands new revisions of the model to the ACP agent, which updates the code to match."
-		: "Compile hands new revisions of the model to Claude Code, which updates the code to match.";
+		? "Compile hands new revisions of the model to the ACP agent, which plans the work as GitHub issues. Build has it write the code for each issue."
+		: "Compile hands new revisions of the model to Claude Code, which plans the work as GitHub issues. Build has it write the code for each issue.";
 }
 
 /** The Claude Code command's description. With an ACP agent, Claude Code still runs everything but Compile (AGT-27). */
@@ -187,6 +190,22 @@ export class TheorySettingTab extends PluginSettingTab {
 		// Settings never start the agent, not even to read its model list (AGT-25).
 		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
 		else this.displayClaudeCode(containerEl);
+
+		new Setting(containerEl).setName("GitHub Project").setHeading();
+		new Setting(containerEl)
+			.setName("GitHub Project")
+			.setDesc(
+				"Every issue a compile creates is added to this GitHub Project, given as its URL, like https://github.com/orgs/team/projects/1. Compile and Build don't start while it is empty.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("https://github.com/orgs/team/projects/1")
+					.setValue(this.plugin.settings.githubProject)
+					.onChange(async (value) => {
+						this.plugin.settings.githubProject = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName("Hooks")

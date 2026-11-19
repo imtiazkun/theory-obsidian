@@ -8,9 +8,11 @@ import {
 	type PermissionRequest,
 	type Question,
 } from "./compile";
-import { pullRequestCandidates } from "./create-pr-view";
+import { buildPromptText, pullRequestCandidates, type BuildStatus } from "./build";
+import type { BuildState, IssueRecord } from "./plan";
 import type { PullRequestState } from "./github";
 import type TheoryPlugin from "./main";
+import type { BuildChoice } from "./build";
 import { startSuggest, type SuggestRun } from "./suggest";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -27,6 +29,22 @@ export const STATUS_ICON:Record<CompileStatus, string> = {
 	succeeded: "check-circle",
 	failed: "alert-triangle",
 	cancelled: "x-circle",
+};
+
+/** An issue's build state as the report shows it (BLD-3). */
+export const BUILD_STATE_TEXT: Record<BuildState, string> = {
+	waiting: "Waiting",
+	building: "Building…",
+	built: "Built",
+	skipped: "Skipped",
+	failed: "Failed",
+};
+
+export const BUILD_STATUS_TEXT: Record<BuildStatus, string> = {
+	running: "Building…",
+	finished: "Build finished",
+	stopped: "Build stopped",
+	cancelled: "Build cancelled",
 };
 
 export const PR_STATE_TEXT: Record<PullRequestState, string> = {
@@ -65,6 +83,8 @@ export class CompileReportView extends ItemView {
 	private candidates = new Map<string, number>();
 	// The report last drawn. Switching to another report refreshes the pull request states.
 	private drawnId: string | null = null;
+	// Reports whose "Build them now?" got Later. Only on screen: the Build button stays (BLD-1).
+	private later = new Set<string>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -170,7 +190,8 @@ export class CompileReportView extends ItemView {
 			cls: "theory-report-range",
 			text: `${shortHash(report.fromCommit)} → ${shortHash(report.toCommit)}`,
 		});
-		if (report.status === "running") {
+		const building = report.build?.status === "running";
+		if (report.status === "running" || building) {
 			header
 				.createEl("button", { cls: "theory-report-cancel", text: "Cancel" })
 				.addEventListener("click", () => this.plugin.cancelCompile());
@@ -179,7 +200,7 @@ export class CompileReportView extends ItemView {
 				.createEl("button", { cls: "theory-report-cancel", text: "Clear highlights" })
 				.addEventListener("click", () => this.plugin.overlay.dismiss());
 		}
-		// Shown when a repository has an open compile branch with commits and no pull request yet.
+		// Shown once a build finished an epic whose branches have commits and no pull request yet (REP-25).
 		if (report.status !== "running" && (this.candidates.get(report.id) ?? 0) > 0) {
 			const create = header.createEl("button", { cls: "theory-report-cancel theory-report-create-pr", text: "Create PR" });
 			setIcon(create.createSpan({ cls: "theory-report-reply-icon" }), "git-pull-request");
@@ -187,6 +208,10 @@ export class CompileReportView extends ItemView {
 		}
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
+
+		this.renderIssueFailure(report);
+		this.renderBuild(report);
+		this.renderIssues(report);
 
 		if (report.pullRequests?.length) {
 			const section = this.section("Pull requests", report.pullRequests.length);
@@ -264,9 +289,9 @@ export class CompileReportView extends ItemView {
 			});
 		}
 
-		if (report.log.length === 0 && report.status !== "running") return;
-		// Waiting permission requests show as cards on their own line of the log.
-		const waiting = report.status === "running" ? this.plugin.permissionRequests() : [];
+		if (report.log.length === 0 && report.status !== "running" && !building) return;
+		// Waiting permission requests show as cards on their own line of the log, in the report that runs.
+		const waiting = this.plugin.activeReportId() === report.id ? this.plugin.permissionRequests() : [];
 		const cardAt = new Map(waiting.map((request) => [request.line, request]));
 		// Folded until the engineer opens it, and kept that way as new lines arrive. Open while a card waits.
 		const details = contentEl.createEl("details", { cls: "theory-report-log" });
@@ -308,12 +333,102 @@ export class CompileReportView extends ItemView {
 			this.drawnId = report.id;
 			this.plugin.refreshPullRequestStates("report");
 		}
-		if (report.status === "running") return;
+		if (report.status === "running" || report.build?.status !== "finished") return;
 		if (this.candidates.has(report.id)) return;
 		this.candidates.set(report.id, 0);
-		const found = await pullRequestCandidates(report, this.plugin.reports).catch(() => []);
+		const found = await pullRequestCandidates(report).catch(() => []);
 		this.candidates.set(report.id, found.length);
 		if (found.length > 0) this.refresh();
+	}
+
+	/** CMP-68: creating an issue failed, and the compile waits for Retry or Discard. */
+	private renderIssueFailure(report: CompileReport) {
+		if (!report.issueFailure || report.status !== "running") return;
+		const card = this.contentEl.createDiv({ cls: "theory-permission-card theory-build-question" });
+		card.createDiv({ cls: "theory-permission-title", text: report.issueFailure });
+		card.createDiv({
+			cls: "theory-report-meta",
+			text: "Retry creates the issues still missing. Discard closes the issues already created as not planned, and the last compile marker doesn't move.",
+		});
+		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
+		buttons.createEl("button", { cls: "mod-cta", text: "Retry" }).addEventListener("click", () => this.plugin.retryIssues());
+		buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
+	}
+
+	/** The build: "Build them now?", the Build button, its status and message, and what it waits on (BLD-1, BLD-17, BLD-22, BLD-23). */
+	private renderBuild(report: CompileReport) {
+		const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
+		if (report.status !== "succeeded" || issues.length === 0) return;
+		const build = report.build;
+		const busy = this.plugin.isCompiling();
+		const section = this.contentEl.createDiv({ cls: "theory-report-build" });
+		if (!build && !this.later.has(report.id)) {
+			const ask = section.createDiv({ cls: "theory-permission-card theory-build-question" });
+			ask.createDiv({ cls: "theory-permission-title", text: buildPromptText(report) });
+			const buttons = ask.createDiv({ cls: "theory-permission-buttons" });
+			const now = buttons.createEl("button", { cls: "mod-cta", text: "Build" });
+			now.disabled = busy;
+			now.addEventListener("click", () => this.plugin.build(report.id));
+			buttons.createEl("button", { text: "Later" }).addEventListener("click", () => {
+				this.later.add(report.id);
+				this.refresh();
+			});
+			return;
+		}
+		const row = section.createDiv({ cls: "theory-report-build-row" });
+		if (build) row.createSpan({ cls: `theory-report-build-status is-${build.status}`, text: BUILD_STATUS_TEXT[build.status] });
+		const left = issues.some((i) => i.build !== "built");
+		if (build?.status !== "running" && left) {
+			const button = row.createEl("button", { cls: "mod-cta", text: "Build" });
+			button.disabled = busy;
+			button.addEventListener("click", () => this.plugin.build(report.id));
+		}
+		if (build?.message) section.createEl("p", { cls: "theory-report-summary", text: build.message });
+
+		const waiting = build?.status === "running" ? build.waiting : undefined;
+		if (!waiting) return;
+		const issue = report.issues?.[waiting.issue];
+		const card = section.createDiv({ cls: "theory-permission-card theory-build-question" });
+		const name = issue ? `${issue.repo}#${issue.number}` : "The issue";
+		const buttons = (choices: [BuildChoice, string][]) => {
+			const el = card.createDiv({ cls: "theory-permission-buttons" });
+			for (const [choice, text] of choices) {
+				el.createEl("button", { text, cls: choice === "retry" || choice === "keep" ? "mod-cta" : "" }).addEventListener("click", () =>
+					this.plugin.chooseInBuild(choice),
+				);
+			}
+		};
+		if (waiting.kind === "failure") {
+			card.createDiv({ cls: "theory-permission-title", text: `${name} failed.` });
+			card.createDiv({ cls: "theory-report-meta", text: waiting.reason });
+			buttons([["retry", "Retry"], ...(waiting.canSkip ? [["skip", "Skip"] as [BuildChoice, string]] : []), ["stop", "Stop"]]);
+		} else {
+			card.createDiv({ cls: "theory-permission-title", text: `Keep ${waiting.branch}?` });
+			card.createDiv({ cls: "theory-report-meta", text: `You cancelled the build of ${name}. Keep its branch, or delete it.` });
+			buttons([
+				["keep", "Keep branch"],
+				["delete", "Delete branch"],
+			]);
+		}
+	}
+
+	/** REP-40: the issues this compile created, the epic first, with their build state. */
+	private renderIssues(report: CompileReport) {
+		const issues = report.issues ?? [];
+		if (issues.length === 0) return;
+		const section = this.section("Issues", issues.length);
+		for (const issue of issues) this.issueRow(section, issue);
+	}
+
+	private issueRow(container: HTMLElement, issue: IssueRecord) {
+		const item = container.createDiv({ cls: `theory-report-issue is-${issue.kind}` });
+		item.createSpan({ cls: "theory-report-pr-repo", text: issue.number !== undefined ? `${issue.repo}#${issue.number}` : issue.repo });
+		if (issue.url) item.createEl("a", { text: issue.title, href: issue.url });
+		else item.createSpan({ text: `${issue.title} (not created)` });
+		if (issue.kind === "epic") item.createSpan({ cls: "theory-pr-state is-epic", text: "Epic" });
+		else if (issue.discarded) item.createSpan({ cls: "theory-pr-state is-closed", text: "Discarded" });
+		else if (issue.build) item.createSpan({ cls: `theory-pr-state is-build-${issue.build}`, text: BUILD_STATE_TEXT[issue.build] });
+		if (issue.branch) item.createEl("code", { cls: "theory-report-meta", text: issue.branch });
 	}
 
 	/** Suggest asks Claude for ideas on answering the question. One question has at most one suggestion at a time. */
