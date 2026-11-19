@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { tmpdir } from "os";
-import { NOT_SENT } from "./compile";
+import { type CompileEffort, type CompileModel, NOT_SENT } from "./compile";
 import { toolPath } from "./tool-path";
 import { uncommittedDiff } from "./vault";
 
@@ -39,8 +39,9 @@ function cleanMessage(text: string): string {
 export async function generateCommitMessage(
 	vaultPath: string,
 	paths: string[],
-	claudeCommand: string,
+	options: { claudeCommand: string; model?: CompileModel; effort?: CompileEffort },
 ): Promise<string> {
+	const { claudeCommand } = options;
 	let diff = await uncommittedDiff(vaultPath, paths, NOT_SENT);
 	if (diff.trim() === "") throw new Error("None of these changes may be sent to Claude.");
 	if (diff.length > MAX_DIFF_CHARS) diff = diff.slice(0, MAX_DIFF_CHARS) + "\n\n[Diff cut short.]\n";
@@ -56,6 +57,9 @@ export async function generateCommitMessage(
 		"--disallowedTools",
 		...["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(//${vault}/**)`),
 	];
+	// The Writing row's model and effort (CMT-7). "" is Claude Code's default, and passes nothing.
+	if (options.model) args.push("--model", options.model);
+	if (options.effort) args.push("--effort", options.effort);
 
 	const output = await new Promise<string>((resolve, reject) => {
 		const child = spawn(claudeCommand || "claude", args, { cwd: tmpdir(), env: { ...process.env, PATH: toolPath() } });

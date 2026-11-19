@@ -1,5 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
+import { SAME, TASK_NAMES, type BuildRow, type ClaudeRow, type CompileRow, type TaskRows, agentName, defaultTaskRows, resolveTask } from "./agent-rows";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
 import { hasOrigin } from "./github";
 import { HOOK_EVENTS, HOOK_EVENT_NAMES, type Hook, type HookEvent } from "./hooks";
@@ -21,20 +22,10 @@ export interface TheorySettings extends SavedAuthor {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
-	/** Which agent compiles. Expand, commit messages and pull request bodies always use Claude Code. */
-	agent: CompileAgent;
-	/** The command that starts the ACP agent, with its arguments. Empty by default. */
-	agentCommand: string;
-	/** The ACP agent's model, matched by value or name at compile. "" means the agent's default. Kept apart from `model` (AGT-24). */
-	agentModel: string;
-	/** The ACP agent's thinking level, matched by value or name at compile. "" means the agent's default. Kept apart from `effort`. */
-	agentThinkingLevel: string;
+	/** One row per task: Compile, Build, Expand and Writing, each with its agent, model and effort (CFG-41). */
+	tasks: TaskRows;
 	permissionMode: PermissionMode;
 	allowedTools: string;
-	/** Passed to Claude Code as `--model`, unless it's "" (Claude Code default). */
-	model: CompileModel;
-	/** Passed to Claude Code as `--effort`, unless it's "" (Claude Code default). */
-	effort: CompileEffort;
 	showCompileButton: boolean;
 	/** Shows who last changed each rule in the editor (CFG-38). */
 	showRuleAuthors: boolean;
@@ -55,14 +46,9 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	email: "",
 	projectFolder: "",
 	claudeCommand: "claude",
-	agent: "claude",
-	agentCommand: "",
-	agentModel: "",
-	agentThinkingLevel: "",
+	tasks: defaultTaskRows(),
 	permissionMode: "acceptEdits",
 	allowedTools: "Bash(git *)",
-	model: "",
-	effort: "",
 	showCompileButton: true,
 	showRuleAuthors: true,
 	pullAutomatically: true,
@@ -72,18 +58,24 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	githubProject: "",
 };
 
-/** The Compile heading's description, naming the agent that compiles (AGT-28). */
-export function compileDescription(agent: CompileAgent): string {
-	return agent === "acp"
-		? "Compile hands new revisions of the model to the ACP agent, which plans the work as GitHub issues. Build has it write the code for each issue."
-		: "Compile hands new revisions of the model to Claude Code, which plans the work as GitHub issues. Build has it write the code for each issue.";
+/** The Compile heading's description, naming the agent that compiles and the one that builds (AGT-28). */
+export function compileDescription(rows: TaskRows): string {
+	const compile = resolveTask(rows, "compile").agent;
+	const build = resolveTask(rows, "build").agent;
+	return `Compile hands new revisions of the model to ${agentName(compile)}, which plans the work as GitHub issues. Build has ${agentName(build)} write the code for each issue.`;
 }
 
-/** The Claude Code command's description. With an ACP agent, Claude Code still runs everything but Compile (AGT-27). */
-export function claudeCommandDescription(agent: CompileAgent): string {
-	return agent === "acp"
-		? "The Claude Code CLI, as a command name or an absolute path. Used for Expand, commit messages and pull request bodies."
+/** The Claude Code command's description. With an ACP agent for both Compile and Build, Claude Code still runs Expand and Writing (AGT-27). */
+export function claudeCommandDescription(rows: TaskRows): string {
+	const acp = resolveTask(rows, "compile").agent === "acp" && resolveTask(rows, "build").agent === "acp";
+	return acp
+		? "The Claude Code CLI, as a command name or an absolute path. Used for Expand and Writing."
 		: "The Claude Code CLI, as a command name or an absolute path.";
+}
+
+/** Permission mode and Allowed commands are hidden only when Build, after following Compile, runs an ACP agent (AGT-26). */
+export function showsPermissionSettings(rows: TaskRows): boolean {
+	return resolveTask(rows, "build").agent !== "acp";
 }
 
 export class TheorySettingTab extends PluginSettingTab {
@@ -114,7 +106,7 @@ export class TheorySettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Compile")
-			.setDesc(compileDescription(this.plugin.settings.agent))
+			.setDesc(compileDescription(this.plugin.settings.tasks))
 			.setHeading();
 
 		new Setting(containerEl)
@@ -140,43 +132,11 @@ export class TheorySettingTab extends PluginSettingTab {
 			);
 
 
-		new Setting(containerEl)
-			.setName("Agent")
-			.setDesc(
-				"The agent that compiles. Claude Code, or any agent that speaks the Agent Client Protocol (ACP). Expand, commit messages and pull request bodies always use Claude Code.",
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("claude", "Claude Code")
-					.addOption("acp", "ACP agent")
-					.setValue(this.plugin.settings.agent)
-					.onChange(async (value) => {
-						this.plugin.settings.agent = value as CompileAgent;
-						await this.plugin.saveSettings();
-						this.display();
-					}),
-			);
-
-		if (this.plugin.settings.agent === "acp") {
-			new Setting(containerEl)
-				.setName("Agent command")
-				.setDesc(
-					"The command that starts the agent, with its arguments. theory.md never installs an agent: install it yourself first.",
-				)
-				.addText((text) =>
-					text
-						.setPlaceholder("gemini --experimental-acp")
-						.setValue(this.plugin.settings.agentCommand)
-						.onChange(async (value) => {
-							this.plugin.settings.agentCommand = value.trim();
-							await this.plugin.saveSettings();
-						}),
-				);
-		}
+		this.displayTaskRows(containerEl);
 
 		new Setting(containerEl)
 			.setName("Claude Code command")
-			.setDesc(claudeCommandDescription(this.plugin.settings.agent))
+			.setDesc(claudeCommandDescription(this.plugin.settings.tasks))
 			.addText((text) =>
 				text
 					.setPlaceholder("claude")
@@ -187,9 +147,8 @@ export class TheorySettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// Settings never start the agent, not even to read its model list (AGT-25).
-		if (this.plugin.settings.agent === "acp") this.displayAcpAgent(containerEl);
-		else this.displayClaudeCode(containerEl);
+		// Claude Code only, and only a build can use them (AGT-7, AGT-26).
+		if (showsPermissionSettings(this.plugin.settings.tasks)) this.displayPermissions(containerEl);
 
 		new Setting(containerEl).setName("GitHub Project").setHeading();
 		new Setting(containerEl)
@@ -447,56 +406,145 @@ export class TheorySettingTab extends PluginSettingTab {
 		field?.querySelector<HTMLInputElement>("input")?.focus();
 	}
 
-	/** Model and thinking level as text, matched against the agent's choices at compile (AGT-6, AGT-23). */
-	private displayAcpAgent(containerEl: HTMLElement) {
+	/** One row per task, each with its agent, model and effort (CFG-41 to CFG-43, AGT-4 to AGT-6). Settings never start an agent (AGT-25). */
+	private displayTaskRows(containerEl: HTMLElement) {
+		const rows = this.plugin.settings.tasks;
+		new Setting(containerEl)
+			.setName("Agents and models")
+			.setDesc(
+				"Each task has its own agent, model and effort. Compile and Build may use Claude Code or any agent that speaks the Agent Client Protocol (ACP). Expand and Writing (commit messages, pull request bodies and suggestions) always use Claude Code. A change applies from the task's next run.",
+			)
+			.setHeading();
+		this.displayCompileRow(containerEl, rows.compile);
+		this.displayBuildRow(containerEl, rows);
+		this.displayClaudeRow(containerEl, rows.expand, "Expand", "Suggests notes a model folder is missing.");
+		this.displayClaudeRow(containerEl, rows.writing, "Writing", "Commit messages, pull request bodies and suggestions.");
+	}
+
+	private rowTitle(containerEl: HTMLElement, name: string, desc: string) {
+		const title = new Setting(containerEl).setName(name).setDesc(desc);
+		title.settingEl.addClass("theory-task-row");
+	}
+
+	private displayCompileRow(containerEl: HTMLElement, row: CompileRow) {
+		this.rowTitle(containerEl, TASK_NAMES.compile, `Plans the work as GitHub issues. Runs ${agentName(row.agent)}.`);
+		this.agentDropdown(containerEl, row.agent, false, async (value) => {
+			row.agent = value as CompileAgent;
+		});
+		if (row.agent === "acp") this.displayAcpFields(containerEl, row, false);
+		else this.modelAndEffort(containerEl, row, false);
+	}
+
+	private displayBuildRow(containerEl: HTMLElement, rows: TaskRows) {
+		const row: BuildRow = rows.build;
+		const agent = resolveTask(rows, "build").agent;
+		const desc =
+			row.agent === SAME
+				? `Writes the code for each issue. Same as Compile: runs ${agentName(agent)}.`
+				: `Writes the code for each issue. Runs ${agentName(agent)}.`;
+		this.rowTitle(containerEl, TASK_NAMES.build, desc);
+		this.agentDropdown(containerEl, row.agent, true, async (value) => {
+			row.agent = value as BuildRow["agent"];
+		});
+		if (row.agent === SAME) return;
+		if (row.agent === "acp") this.displayAcpFields(containerEl, row, true);
+		else this.modelAndEffort(containerEl, row, true);
+	}
+
+	/** Expand and Writing always run Claude Code, with their own model and effort (CFG-43). */
+	private displayClaudeRow(containerEl: HTMLElement, row: ClaudeRow, name: string, what: string) {
+		this.rowTitle(containerEl, name, `${what} Runs Claude Code.`);
+		this.modelAndEffort(containerEl, row, true);
+	}
+
+	/** Agent is a dropdown in the Compile and Build rows; Build's also offers "Same as Compile" (AGT-4). */
+	private agentDropdown(containerEl: HTMLElement, value: string, same: boolean, set: (value: string) => Promise<void>) {
+		new Setting(containerEl).setName("Agent").addDropdown((dropdown) => {
+			if (same) dropdown.addOption(SAME, "Same as Compile");
+			dropdown
+				.addOption("claude", "Claude Code")
+				.addOption("acp", "ACP agent")
+				.setValue(value)
+				.onChange(async (next) => {
+					await set(next);
+					await this.plugin.saveSettings();
+					this.display();
+				});
+		});
+	}
+
+	/** An ACP row's command, model and thinking level, stored apart from its Claude Code model and effort (AGT-5, AGT-6, AGT-24). */
+	private displayAcpFields(
+		containerEl: HTMLElement,
+		row: { agentCommand: string; agentModel: string; agentThinkingLevel: string },
+		build: boolean,
+	) {
+		const task = build ? "build" : "compile";
+		new Setting(containerEl)
+			.setName("Agent command")
+			.setDesc(
+				`The command that starts the agent, with its arguments. theory.md never installs an agent: install it yourself first. ${build ? "Build" : "Compile"} can't start while it is empty.`,
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("gemini --experimental-acp")
+					.setValue(row.agentCommand)
+					.onChange(async (value) => {
+						row.agentCommand = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
 		new Setting(containerEl)
 			.setName("Agent model")
 			.setDesc(
-				"The model the agent compiles with, by its value or its name as the agent shows it. Empty means the agent's default. The activity log says which model the agent picked.",
+				`The model the agent uses to ${task}, by its value or its name as the agent shows it. Empty means the agent's default. The activity log says which model the agent picked.`,
 			)
 			.addText((text) =>
-				text.setValue(this.plugin.settings.agentModel).onChange(async (value) => {
-					this.plugin.settings.agentModel = value.trim();
+				text.setValue(row.agentModel).onChange(async (value) => {
+					row.agentModel = value.trim();
 					await this.plugin.saveSettings();
 				}),
 			);
-
 		new Setting(containerEl)
 			.setName("Agent thinking level")
-			.setDesc(
-				"How much the agent thinks while it compiles, by its value or its name as the agent shows it. Empty means the agent's default.",
-			)
+			.setDesc("How much the agent thinks, by its value or its name as the agent shows it. Empty means the agent's default.")
 			.addText((text) =>
-				text.setValue(this.plugin.settings.agentThinkingLevel).onChange(async (value) => {
-					this.plugin.settings.agentThinkingLevel = value.trim();
+				text.setValue(row.agentThinkingLevel).onChange(async (value) => {
+					row.agentThinkingLevel = value.trim();
 					await this.plugin.saveSettings();
 				}),
 			);
 	}
 
-	/** Model, effort, permission mode and allowed commands: Claude Code only (AGT-7, AGT-26). */
-	private displayClaudeCode(containerEl: HTMLElement) {
+	/** A row's Claude Code Model and Effort (CFG-17, CFG-18). Rows other than Compile also offer "Same as Compile". */
+	private modelAndEffort(
+		containerEl: HTMLElement,
+		row: { model: CompileModel | typeof SAME; effort: CompileEffort | typeof SAME },
+		same: boolean,
+	) {
 		new Setting(containerEl)
 			.setName("Model")
-			.setDesc("The Claude model that compiles. A change applies from the next compile.")
-			.addDropdown((dropdown) =>
+			.setDesc("The Claude model this task runs with.")
+			.addDropdown((dropdown) => {
+				if (same) dropdown.addOption(SAME, "Same as Compile");
 				dropdown
 					.addOption("", "Claude Code default")
 					.addOption("fable", "Fable")
 					.addOption("opus", "Opus")
 					.addOption("sonnet", "Sonnet")
 					.addOption("haiku", "Haiku")
-					.setValue(this.plugin.settings.model)
+					.setValue(row.model)
 					.onChange(async (value) => {
-						this.plugin.settings.model = value as CompileModel;
+						row.model = value as CompileModel;
 						await this.plugin.saveSettings();
-					}),
-			);
+					});
+			});
 
 		new Setting(containerEl)
 			.setName("Effort")
-			.setDesc("How much Claude thinks while it compiles. A change applies from the next compile.")
-			.addDropdown((dropdown) =>
+			.setDesc("How much Claude thinks during this task.")
+			.addDropdown((dropdown) => {
+				if (same) dropdown.addOption(SAME, "Same as Compile");
 				dropdown
 					.addOption("", "Claude Code default")
 					.addOption("low", "Low")
@@ -504,13 +552,16 @@ export class TheorySettingTab extends PluginSettingTab {
 					.addOption("high", "High")
 					.addOption("xhigh", "Extra high")
 					.addOption("max", "Max")
-					.setValue(this.plugin.settings.effort)
+					.setValue(row.effort)
 					.onChange(async (value) => {
-						this.plugin.settings.effort = value as CompileEffort;
+						row.effort = value as CompileEffort;
 						await this.plugin.saveSettings();
-					}),
-			);
+					});
+			});
+	}
 
+	/** Permission mode and allowed commands: Claude Code only (AGT-7, AGT-26). */
+	private displayPermissions(containerEl: HTMLElement) {
 		new Setting(containerEl)
 			.setName("Permission mode")
 			.setDesc(
@@ -605,7 +656,7 @@ export class TheorySettingTab extends PluginSettingTab {
 			setting.descEl.createDiv({ cls: "theory-project-path", text: folder });
 		} else {
 			setting.setDesc(
-				`The folder holding this project's code. Compile runs ${this.plugin.settings.agent === "acp" ? "the ACP agent" : "Claude Code"} here.`,
+				`The folder holding this project's code. Compile runs ${agentName(resolveTask(this.plugin.settings.tasks, "compile").agent)} here.`,
 			);
 		}
 		if (folder) {

@@ -1,5 +1,6 @@
 import { join } from "path";
 import { describe, expect, it } from "vitest";
+import { SAME, defaultTaskRows, taskAgentSettings } from "../src/agent-rows";
 import { uniqueBranchName } from "../src/branches";
 import {
 	BuildChoice,
@@ -119,6 +120,22 @@ describe("the checks before a build (BLD-5 to BLD-9)", () => {
 		await expect(startBuild(s.options(), report, [report], () => {})).rejects.toThrow(`Couldn't reach the GitHub Project ${PROJECT_URL}: HTTP 404`);
 		expect(report.build).toBeUndefined();
 		expect(s.claude.calls()).toEqual([]);
+	});
+
+	it("stops when Build's row is an ACP agent with no command, even when Compile's row is Claude Code (AGT-5, BLD-19)", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		const tasks = defaultTaskRows();
+		tasks.compile.agentCommand = "compile-agent --acp";
+		tasks.build = { agent: "acp", agentCommand: "", agentModel: "m", agentThinkingLevel: "", model: SAME, effort: SAME };
+		const agent = taskAgentSettings({ tasks, claudeCommand: s.claude.command, permissionMode: "acceptEdits", allowedTools: "" }, "build");
+		expect(agent.agent).toBe("acp");
+		await expect(startBuild(s.options(agent), report, [report], () => {})).rejects.toThrow(
+			"Set the agent command in theory.md settings first.",
+		);
+		expect(report.build).toBeUndefined();
+		expect(s.claude.calls()).toEqual([]);
+		expect(await branches(s.api.repo)).toEqual(["main"]);
 	});
 
 	it("stops on uncommitted changes in a repository with an issue, and only there", async () => {

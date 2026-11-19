@@ -1,3 +1,4 @@
+import { resolveTask } from "./agent-rows";
 import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type { Anchor } from "./anchor";
 import {
@@ -443,7 +444,8 @@ export class CompileReportView extends ItemView {
 
 	private async suggest(report: CompileReport, q: Question, key: string) {
 		if (this.suggestions.get(key)?.state === "running") return;
-		const { claudeCommand, model, effort } = this.plugin.settings;
+		const { claudeCommand } = this.plugin.settings;
+		const { model, effort } = resolveTask(this.plugin.settings.tasks, "writing");
 		// The current text of every note the question names, uncommitted edits included.
 		const paths = [...new Set([...q.notes, ...(q.anchors ?? []).map((a) => a.path)])];
 		const notes = new Map<string, string | null>();
