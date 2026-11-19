@@ -10,7 +10,7 @@ import {
 	claudeArgs,
 	startCompile,
 } from "../src/compile";
-import { epicRepo, issueBody, readPlan, readyText, shortNameProblem, titleProblem } from "../src/plan";
+import { compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, titleProblem } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
 import { initRepo, out, tempFolder, write } from "./helpers";
@@ -184,8 +184,13 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 			"The plan has several issues and no epic. Several pieces of work need an epic.",
 		]);
 		expect(readPlan({ epic, issues: [issue("api", "a")] }, repos).problems).toEqual([
-			"The plan has an epic with fewer than two sub-issues. One piece of work is one issue.",
+			'The epic "Ship the big thing" has fewer than two sub-issues. One piece of work is one issue.',
 		]);
+		// An epic with no sub-issues is a broken plan, not an empty one (CMP-70, CMP-71).
+		expect(readPlan({ epic, issues: [] }, repos)).toEqual({
+			plan: null,
+			problems: ['The epic "Ship the big thing" has fewer than two sub-issues. One piece of work is one issue.'],
+		});
 		expect(readPlan({ issues: [issue("cli", "a")] }, repos).problems).toEqual([
 			'The issue "Change a" names a repository that isn\'t in the project folder: "cli".',
 		]);
@@ -201,8 +206,58 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		expect(titleProblem("x".repeat(69))).toBeNull();
 		expect(titleProblem("x".repeat(70))).toBe(`The title "${"x".repeat(70)}" isn't under 70 characters.`);
 		expect(titleProblem(" ")).toBe("An issue has no title.");
-		expect(readPlan({ issues: [issue("api", "Bad Name", "x".repeat(80))] }, repos).problems).toHaveLength(2);
+		expect(readPlan({ issues: [issue("api", "Bad Name", "x".repeat(80))] }, repos).problems).toEqual([
+			`The issue "${"x".repeat(80)}" has a title that isn't under 70 characters.`,
+			`The issue "${"x".repeat(80)}" has the short name "Bad Name", which may use only lowercase letters, digits and dashes.`,
+		]);
 	});
+
+	it("names the issue in each short name and title problem, the epic's included (CMP-70)", () => {
+		expect(readPlan({ epic: { ...epic, shortName: "x".repeat(41) }, issues: [issue("api", "a"), issue("web", "b_c")] }, repos).problems).toEqual([
+			`The epic "Ship the big thing" has the short name "${"x".repeat(41)}", which is longer than 40 characters.`,
+			'The issue "Change b_c" has the short name "b_c", which may use only lowercase letters, digits and dashes.',
+		]);
+		expect(readPlan({ issues: [issue("api", "one", "")] }, repos).problems).toEqual(['The issue with the short name "one" has no title.']);
+		expect(readPlan({ issues: [{ ...issue("api", "one"), shortName: "" }] }, repos).problems).toEqual(['The issue "Change one" has no short name.']);
+	});
+
+	it("refuses an issue or an epic that lists no rule IDs (CMP-70)", () => {
+		expect(readPlan({ issues: [{ ...issue("api", "one"), rules: [] }] }, repos).problems).toEqual(['The issue "Change one" lists no rule IDs.']);
+		expect(readPlan({ issues: [{ ...issue("api", "one"), rules: [" ", 3] }] }, repos).problems).toEqual(['The issue "Change one" lists no rule IDs.']);
+		expect(readPlan({ epic: { ...epic, rules: [] }, issues: [issue("api", "a"), issue("web", "b")] }, repos).problems).toEqual([
+			'The epic "Ship the big thing" lists no rule IDs.',
+		]);
+	});
+
+	it("refuses two issues with the same short name, the epic's included (CMP-70)", () => {
+		expect(readPlan({ epic, issues: [issue("api", "a"), issue("web", "a", "Change a too")] }, repos).problems).toEqual([
+			'The short name "a" is used more than once in the plan: The issue "Change a", The issue "Change a too".',
+		]);
+		expect(readPlan({ epic, issues: [issue("api", "big-thing"), issue("web", "b")] }, repos).problems).toEqual([
+			'The short name "big-thing" is used more than once in the plan: The epic "Ship the big thing", The issue "Change big-thing".',
+		]);
+	});
+
+	for (const [name, plan, problem] of [
+		["no rule IDs", { issues: [{ ...issue("api", "one"), rules: [] }] }, 'The issue "Change one" lists no rule IDs.'],
+		[
+			"a short name used twice",
+			{ epic, issues: [issue("api", "a"), issue("web", "a", "Change a too")] },
+			'The short name "a" is used more than once in the plan: The issue "Change a", The issue "Change a too".',
+		],
+		["an epic with no sub-issues", { epic, issues: [] }, 'The epic "Ship the big thing" has fewer than two sub-issues. One piece of work is one issue.'],
+	] as const) {
+		it(`fails a compile whose plan has ${name}, creates no issue, and moves the marker (CMP-17, CMP-63)`, async () => {
+			const s = await setup();
+			s.claude.setSteps([{ answer: answer(plan) }]);
+			const report = await compile(s.options());
+			expect(report.status).toBe("failed");
+			expect(report.problems.map((p) => p.text)).toContain(problem);
+			expect(s.github.issues).toEqual([]);
+			expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
+			expect(await s.marker()).toBe(COMPILED_TAG);
+		});
+	}
 
 	it("fails a compile whose plan breaks the rules, creates nothing, and still moves the marker", async () => {
 		const s = await setup();
@@ -221,6 +276,30 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		expect(report.status).toBe("failed");
 		expect(s.github.issues).toEqual([]);
 		expect(await s.marker()).toBe(COMPILED_TAG);
+	});
+});
+
+describe("nothing to build (CMP-15, CMP-71)", () => {
+	it("succeeds with an empty plan, creates no issue, offers no Build and moves the marker", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ issues: [] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		expect(report.issues).toEqual([]);
+		expect(report.problems).toEqual([]);
+		expect(s.github.issues).toEqual([]);
+		expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
+		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(compileFinishedText(report.issues ?? [], 0)).toBe("Compile finished. The code already matches the model.");
+	});
+
+	it("says the code already matches the model, or how many issues are ready, with the question count (CMP-16, CMP-21)", () => {
+		expect(compileFinishedText([], 0)).toBe("Compile finished. The code already matches the model.");
+		expect(compileFinishedText([], 1)).toBe("Compile finished. The code already matches the model. Claude has 1 question about the model.");
+		expect(compileFinishedText([], 3)).toBe("Compile finished. The code already matches the model. Claude has 3 questions about the model.");
+		const record = { kind: "issue" as const, repo: "api", repoPath: "/api", title: "T", body: "", rules: ["R-1"], shortName: "t" };
+		expect(compileFinishedText([record], 0)).toBe("Compile finished. 1 issue is ready to build.");
+		expect(compileFinishedText([record, record], 2)).toBe("Compile finished. 2 issues are ready to build. Claude has 2 questions about the model.");
 	});
 });
 

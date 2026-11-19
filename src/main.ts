@@ -48,7 +48,7 @@ import {
 	savedHooks,
 } from "./hooks";
 import { BuildChoice, BuildRun, buildableReport, interruptedBuild, startBuild } from "./build";
-import { readyText } from "./plan";
+import { compileFinishedText, questionText } from "./plan";
 import {
 	IdentityError,
 	MissingStarters,
@@ -557,9 +557,8 @@ export default class TheoryPlugin extends Plugin {
 		this.noteStatus.sync();
 		this.changeDots.sync();
 		const questions = report.questions.length;
-		const extra = questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
-		if (report.status === "succeeded") new Notice(`Compile finished. ${readyText(report.issues ?? [])}${extra}`);
-		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${extra}`, 10000);
+		if (report.status === "succeeded") new Notice(compileFinishedText(report.issues ?? [], questions));
+		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${questionText(questions)}`, 10000);
 	}
 
 	/** Cancel in the report: stops the running compile or build (CMP-24, BLD-23). */

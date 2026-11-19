@@ -95,11 +95,17 @@ export const PLAN_SCHEMA = {
 	required: ["issues"],
 };
 
+/** Null when the short name is fine (CMP-61), else what is wrong with it, to follow "which". */
+function shortNameReason(name: string): string | null {
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) return "may use only lowercase letters, digits and dashes";
+	if (name.length > SHORT_NAME_MAX) return `is longer than ${SHORT_NAME_MAX} characters`;
+	return null;
+}
+
 /** Null when the short name is fine (CMP-61), else what is wrong with it. */
 export function shortNameProblem(name: string): string | null {
-	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) return `The short name "${name}" may use only lowercase letters, digits and dashes.`;
-	if (name.length > SHORT_NAME_MAX) return `The short name "${name}" is longer than ${SHORT_NAME_MAX} characters.`;
-	return null;
+	const reason = shortNameReason(name);
+	return reason ? `The short name "${name}" ${reason}.` : null;
 }
 
 /** Null when the title is fine (CMP-62), else what is wrong with it. Whether it is imperative is Claude's to get right. */
@@ -117,10 +123,19 @@ function text(value: unknown): string {
 	return typeof value === "string" ? value.trim() : "";
 }
 
+/** How a plan's problem names the issue it is about: by its title, else by its short name (CMP-70). */
+function named(kind: "epic" | "issue", item: { title: string; shortName: string }): string {
+	if (item.title) return `The ${kind} "${item.title}"`;
+	if (item.shortName) return `The ${kind} with the short name "${item.shortName}"`;
+	return `An ${kind === "epic" ? "epic" : "issue"} with no title and no short name`;
+}
+
 /**
- * Reads the plan from Claude's answer and checks it: one issue, or an epic with at least two sub-issues (CMP-59),
- * every issue in a repository of the project folder, and every short name and title as CMP-61 and CMP-62 say.
- * The sub-issues keep Claude's order, which is the build order (CMP-60).
+ * Reads the plan from Claude's answer and checks it (CMP-70): one issue, or an epic with at least two sub-issues
+ * (CMP-59), every issue in a repository of the project folder, every issue (the epic included) with at least one
+ * rule ID, every short name and title as CMP-61 and CMP-62 say, and no short name used twice. Each problem names
+ * the issue it is about. The sub-issues keep Claude's order, which is the build order (CMP-60). A plan with no
+ * epic and no issues is empty: the code already matches the model (CMP-71).
  */
 export function readPlan(value: unknown, repos: string[]): { plan: Plan | null; problems: string[] } {
 	const problems: string[] = [];
@@ -135,18 +150,37 @@ export function readPlan(value: unknown, repos: string[]): { plan: Plan | null; 
 		const e = raw.epic as Record<string, unknown>;
 		epic = { title: text(e.title), body: text(e.body), rules: strings(e.rules), shortName: text(e.shortName) };
 	}
-	if (epic && issues.length < 2) problems.push("The plan has an epic with fewer than two sub-issues. One piece of work is one issue.");
+	if (epic && issues.length < 2) problems.push(`${named("epic", epic)} has fewer than two sub-issues. One piece of work is one issue.`);
 	if (!epic && issues.length > 1) problems.push("The plan has several issues and no epic. Several pieces of work need an epic.");
-	for (const item of [...(epic ? [epic] : []), ...issues]) {
-		const title = titleProblem(item.title);
-		if (title) problems.push(title);
-		const name = shortNameProblem(item.shortName);
-		if (name) problems.push(name);
+	const items: [kind: "epic" | "issue", item: PlannedEpic | PlannedIssue][] = [
+		...(epic ? [["epic", epic] as ["epic", PlannedEpic]] : []),
+		...issues.map((i) => ["issue", i] as ["issue", PlannedIssue]),
+	];
+	for (const [kind, item] of items) {
+		const who = named(kind, item);
+		if (!item.title) problems.push(`${who} has no title.`);
+		else if (item.title.length >= TITLE_MAX) problems.push(`${who} has a title that isn't under ${TITLE_MAX} characters.`);
+		const name = shortNameReason(item.shortName);
+		if (name) problems.push(`${who} has ${item.shortName ? `the short name "${item.shortName}", which ${name}` : "no short name"}.`);
+		if (item.rules.length === 0) problems.push(`${who} lists no rule IDs.`);
+		if (kind === "issue" && !repos.includes((item as PlannedIssue).repo)) {
+			problems.push(`${who} names a repository that isn't in the project folder: "${(item as PlannedIssue).repo}".`);
+		}
 	}
-	for (const issue of issues) {
-		if (!repos.includes(issue.repo)) problems.push(`The issue "${issue.title}" names a repository that isn't in the project folder: "${issue.repo}".`);
+	const byName = new Map<string, string[]>();
+	for (const [kind, item] of items) {
+		if (!item.shortName) continue;
+		byName.set(item.shortName, [...(byName.get(item.shortName) ?? []), named(kind, item)]);
+	}
+	for (const [name, users] of byName) {
+		if (users.length > 1) problems.push(`The short name "${name}" is used more than once in the plan: ${users.join(", ")}.`);
 	}
 	return problems.length > 0 ? { plan: null, problems } : { plan: { epic, issues }, problems };
+}
+
+/** True when the plan has nothing to build: no epic and no issues (CMP-71). */
+export function isEmptyPlan(plan: Plan): boolean {
+	return !plan.epic && plan.issues.length === 0;
 }
 
 /** The repository the epic goes in: the one with the most sub-issues, the first by name on a tie (CMP-64). */
@@ -231,6 +265,20 @@ export async function discardIssues(github: GitHub, records: IssueRecord[]): Pro
 		}
 	}
 	return failed;
+}
+
+/**
+ * The end notice of a compile that succeeded: "{n} issues are ready to build." (CMP-16), or "The code already
+ * matches the model." when it had nothing to build (CMP-71), then the CMP-21 question count.
+ */
+export function compileFinishedText(records: IssueRecord[], questions: number): string {
+	const done = records.length === 0 ? "The code already matches the model." : readyText(records);
+	return `Compile finished. ${done}${questionText(questions)}`;
+}
+
+/** " Claude has N questions about the model." (CMP-21), or nothing without questions. */
+export function questionText(questions: number): string {
+	return questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
 }
 
 /** "{n} issues are ready to build." (CMP-16), counting the issues a build builds: never the epic. */
