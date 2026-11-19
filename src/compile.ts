@@ -9,7 +9,7 @@ import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./an
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { IssueRecord, PLAN_SCHEMA, createIssues, discardIssues, issueRecords, readPlan } from "./plan";
+import { IssueRecord, PLAN_SCHEMA, createIssues, discardIssues, isEmptyPlan, issueRecords, readPlan } from "./plan";
 import { findProjectRepos } from "./project";
 import { toolPath } from "./tool-path";
 import { git, isInDotFolder } from "./vault";
@@ -1044,7 +1044,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				return report;
 			}
 
-			// The plugin, never Claude, creates the plan on GitHub (CMP-63).
+			if (isEmptyPlan(plan)) {
+				// Nothing to build: the code already matches the model. No issue, no Build, and the marker moves (CMP-71).
+				report.issues = [];
+				report.status = "succeeded";
+				await markCompiled();
+				return report;
+			}
+
+			// The plugin, never Claude, creates the plan on GitHub, only once the plan passed CMP-70 (CMP-63).
 			report.issues = issueRecords(plan, new Map(repos.map((r) => [r.name, r.path])));
 			onUpdate(report);
 			for (;;) {
