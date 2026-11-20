@@ -11,6 +11,8 @@ import {
 	buildableReport,
 	epicBranchName,
 	epicPullRequestBody,
+	issueRef,
+	sharedEpicPullRequestBody,
 	interruptedBuild,
 	issueBranchName,
 	openBuildBranch,
@@ -324,6 +326,48 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 	});
 });
 
+describe("referring to issues across repositories (BLD-16, BLD-26, REP-27)", () => {
+	it("writes #n in the same repository and owner/name#n in another, compared by GitHub name", () => {
+		expect(issueRef(57, "imtiazkun/theory.md", "imtiazkun/theory.md")).toBe("#57");
+		expect(issueRef(57, "Imtiazkun/Theory.md", "imtiazkun/theory.md")).toBe("#57");
+		expect(issueRef(57, "imtiazkun/theory.md", "imtiazkun/obsidian-plugin")).toBe("imtiazkun/theory.md#57");
+		expect(issueRef(57, "imtiazkun/theory.md", null)).toBe("imtiazkun/theory.md#57");
+		// Without the target's GitHub name, never a bare #n that would link to the wrong repository.
+		expect(issueRef(57, null, "imtiazkun/obsidian-plugin", "https://github.com/imtiazkun/theory.md/issues/57")).toBe(
+			"https://github.com/imtiazkun/theory.md/issues/57",
+		);
+	});
+
+	it("gives the epic's repository, another repository and the shared Body their default bodies", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
+		const epic = report.issues?.find((i) => i.kind === "epic");
+		expect([epic?.repo, epic?.number]).toEqual(["api", 1]);
+		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
+		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
+		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
+		// Not the local folder name when the epic's GitHub name is unknown.
+		expect(epicPullRequestBody(report, "team/web", null)).toBe(`Part of ${epic?.url}`);
+		expect(sharedEpicPullRequestBody(report, null)).toBe(`Part of ${epic?.url}`);
+	});
+
+	it("decides the sub-issue's 'Part of' by GitHub name, not by local folder", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ commit: "a.txt", answer: built("A.") },
+			{ commit: "b.txt", answer: built("B.") },
+		]);
+		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
+		// Both folders are clones of one GitHub repository, so the epic is in the sub-issue's own repository.
+		s.github.repoName = async () => "team/shared";
+		await build(s, report);
+		expect(s.github.pullRequests.map((p) => [p.repo, p.body])).toEqual([
+			["web", "A.\n\nPart of #1\nResolves #2"],
+			["api", "B.\n\nPart of #1\nResolves #3"],
+		]);
+	});
+});
+
 describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", () => {
 	it("offers Create PR for each epic branch once every sub-issue is built, with the epic's title and bodies", async () => {
 		const s = await setup();
@@ -339,8 +383,9 @@ describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", ()
 			["web", "theory/epic-1-big-thing", "main", true],
 			["api", "theory/epic-1-big-thing", "main", true],
 		]);
-		expect(epicPullRequestBody(report, s.api.repo, "team/api")).toBe("Closes #1");
-		expect(epicPullRequestBody(report, s.web.repo, "team/api")).toBe("Part of team/api#1");
+		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
+		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
+		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// A single issue's pull request comes from the build itself.
 		const single = { ...(await planned(s, [{ repo: "api", shortName: "c" }])), id: "2" };
 		single.build = { status: "finished", startedAt: "" };

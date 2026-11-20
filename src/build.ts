@@ -344,12 +344,14 @@ export async function startBuild(
 	const ref = (issue: IssueRecord) => `${issue.repo}#${issue.number}`;
 	const pullRequests = () => (report.pullRequests ??= []);
 
-	/** The epic's number as a sub-issue in `repoPath` must write it: `#n` in its own repository, `owner/name#n` elsewhere. */
+	/** The epic as a sub-issue in `repoPath` must write it (BLD-26), the repositories compared by their GitHub names. */
 	const epicRef = async (repoPath: string) => {
-		if (!epic) return "";
-		if (epic.repoPath === repoPath) return `#${epic.number}`;
-		const name = await github.repoName(epic.repoPath).catch(() => null);
-		return name ? `${name}#${epic.number}` : `#${epic.number}`;
+		if (!epic?.number) return "";
+		const [epicName, name] = await Promise.all([
+			github.repoName(epic.repoPath).catch(() => null),
+			github.repoName(repoPath).catch(() => null),
+		]);
+		return issueRef(epic.number, epicName, name, epic.url);
 	};
 
 	/** Brings the local epic branch up to `origin`, where each sub-issue's pull request was merged. */
@@ -665,13 +667,33 @@ export async function pullRequestCandidates(report: CompileReport): Promise<Pull
 }
 
 /**
- * The epic branch pull request's default body in one repository (REP-27): "Closes #{epic}" in the epic's own
- * repository, "Part of {repo}#{epic}" in the others, with the epic's repository as GitHub names it.
+ * How text written in the repository GitHub names `fromRepoName` refers to an issue or pull request in `repoName`
+ * (BLD-26): `#n` in the same repository, `owner/name#n` in another. Repositories are the same only when their GitHub
+ * names match, never by local path. When the target's GitHub name is unknown, its web address is used, because a
+ * bare `#n` would link to the wrong repository.
  */
-export function epicPullRequestBody(report: CompileReport, repoPath: string, epicRepoName: string | null): string {
+export function issueRef(number: number, repoName: string | null, fromRepoName: string | null, url?: string): string {
+	if (repoName && fromRepoName && repoName.toLowerCase() === fromRepoName.toLowerCase()) return `#${number}`;
+	if (repoName) return `${repoName}#${number}`;
+	return url ?? `#${number}`;
+}
+
+/**
+ * The epic branch pull request's default body in one repository (REP-27): "Closes #{epic}" in the epic's own
+ * repository, "Part of {owner}/{name}#{epic}" in the others. Both are GitHub names (`owner/name`), so "the epic's own
+ * repository" is decided by comparing them.
+ */
+export function epicPullRequestBody(report: CompileReport, repoName: string | null, epicRepoName: string | null): string {
 	const epic = report.issues?.find((i) => i.kind === "epic");
 	if (!epic?.number) return "";
-	if (epic.repoPath === repoPath) return `Closes #${epic.number}`;
-	return `Part of ${epicRepoName ?? epic.repo}#${epic.number}`;
+	const ref = issueRef(epic.number, epicRepoName, repoName, epic.url);
+	return ref === `#${epic.number}` ? `Closes ${ref}` : `Part of ${ref}`;
+}
+
+/** The shared Body's default on the Create PR page (REP-27): "Part of {owner}/{name}#{epic}", whatever the repository. */
+export function sharedEpicPullRequestBody(report: CompileReport, epicRepoName: string | null): string {
+	const epic = report.issues?.find((i) => i.kind === "epic");
+	if (!epic?.number) return "";
+	return `Part of ${issueRef(epic.number, epicRepoName, null, epic.url)}`;
 }
 
