@@ -69,7 +69,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Compile history view in the right sidebar: when, who and tokens spent | Done |
 | Open `Index.md` on launch | Done |
 | Compile: send revisions since the last compile to Claude Code, which only reads and plans the work; theory.md creates it on GitHub as one issue, or an epic with sub-issues, added to your GitHub Project | Done |
-| Build: Claude Code writes the code for each issue on its own branch; one issue becomes a pull request you merge, an epic's sub-issues are merged into an epic branch you merge; Retry, Skip and Stop when an issue fails | Done |
+| Build: Claude Code writes the code for each issue on its own branch; one issue becomes a pull request you merge, an epic's sub-issues are merged into an epic branch you merge; Retry, Skip and Stop when an issue fails; building the same compile again continues it on the same branches | Done |
 | Last compile marker (local `theory/compiled` tag) | Done |
 | Compile lock within the app, so only one compile or build runs at a time | Done |
 | Compile report view, with questions linking to the notes and a Reply button that opens the note at the rule that needs updating | Done |

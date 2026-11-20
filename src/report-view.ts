@@ -356,7 +356,7 @@ export class CompileReportView extends ItemView {
 		buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
 	}
 
-	/** The build: "Build them now?", the Build button, its status and message, and what it waits on (BLD-1, BLD-17, BLD-22, BLD-23). */
+	/** The build: "Build them now?", the Build button, its status and message, and what it waits on (BLD-1, BLD-17, BLD-22, BLD-23, BLD-28). */
 	private renderBuild(report: CompileReport) {
 		const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
 		if (report.status !== "succeeded" || issues.length === 0) return;
@@ -385,6 +385,8 @@ export class CompileReportView extends ItemView {
 			button.addEventListener("click", () => this.plugin.build(report.id));
 		}
 		if (build?.message) section.createEl("p", { cls: "theory-report-summary", text: build.message });
+		// BLD-28: the sub-issues a finished epic build skipped, still open.
+		if (build?.skippedLine) section.createEl("p", { cls: "theory-report-summary", text: build.skippedLine });
 
 		const waiting = build?.status === "running" ? build.waiting : undefined;
 		if (!waiting) return;

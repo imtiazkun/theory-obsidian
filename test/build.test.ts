@@ -5,6 +5,8 @@ import { uniqueBranchName } from "../src/branches";
 import {
 	BuildChoice,
 	BuildOptions,
+	NOTHING_LEFT,
+	NothingLeftError,
 	buildPromptText,
 	buildableReport,
 	epicBranchName,
@@ -453,6 +455,121 @@ describe("when a build goes wrong (BLD-22, BLD-23)", () => {
 			expect((await branches(s.api.repo)).includes("theory/2-first")).toBe(choice === "keep");
 		});
 	}
+});
+
+describe("continuing a build of the same compile (BLD-8, BLD-9, BLD-12, BLD-27, BLD-28)", () => {
+	it("reuses the epic branch in every repository, builds only the rest in order, and keeps the built one built", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "first.txt", answer: built("First.") }, { answer: failed }]);
+		const report = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "first" },
+				{ repo: "web", shortName: "second" },
+				{ repo: "api", shortName: "third" },
+			],
+			true,
+		);
+		await build(s, report, { answer: () => "stop" });
+		expect(report.build?.status).toBe("stopped");
+		expect(report.issues?.slice(1).map((i) => i.build)).toEqual(["built", "failed", "waiting"]);
+		const epicBranch = "theory/epic-1-big-thing";
+		const firstPr = s.github.pullRequests[0].url;
+
+		// Another compile is still refused by this one's open epic branch (BLD-8).
+		const other = { ...(await planned(s, [{ repo: "api", shortName: "other" }])), id: "2" };
+		await expect(startBuild(s.options(), other, [other, report], () => {})).rejects.toThrow(`Finish the open work in api first: ${epicBranch}.`);
+
+		// Building it again isn't refused by its own open work, and continues it.
+		s.claude.setSteps([
+			{ commit: "second.txt", answer: built("Second.") },
+			{ commit: "third.txt", answer: built("Third.") },
+		]);
+		await build(s, report, { reports: [other, report] });
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.epicBranches?.map((b) => [b.repo, b.branch])).toEqual([
+			["api", epicBranch],
+			["web", epicBranch],
+		]);
+		for (const repo of [s.api.repo, s.web.repo]) expect((await branches(repo)).filter((b) => b.startsWith("theory/epic-"))).toEqual([epicBranch]);
+		const again = s.claude.calls().slice(2);
+		expect(again.map((c) => c.cwd)).toEqual([s.web.repo, s.api.repo]);
+		expect(again.map((c) => c.prompt.match(/Issue: #(\d+)/)?.[1])).toEqual(["3", "4"]);
+		expect(report.issues?.slice(1).map((i) => [i.branch, i.build])).toEqual([
+			["theory/2-first", "built"],
+			["theory/3-second", "built"],
+			["theory/4-third", "built"],
+		]);
+		// The sub-issue the first build closed stays built: no "the issue is closed", and its pull request stays.
+		expect(report.problems.map((p) => p.text).filter((t) => t.includes("the issue is closed"))).toEqual([]);
+		expect(s.github.pullRequests.map((p) => p.head)).toEqual(["theory/2-first", "theory/3-second", "theory/4-third"]);
+		expect(s.github.pullRequests[0].url).toBe(firstPr);
+		expect((await out(s.api.bare, ["ls-tree", "--name-only", epicBranch])).split("\n")).toEqual(["README.md", "first.txt", "third.txt"]);
+		expect(report.build?.message).toBe(`Epic #1 is built on ${epicBranch}. Open a pull request into main when you're ready.`);
+		expect(report.build?.skippedLine).toBeUndefined();
+	});
+
+	it("reuses an issue's branch from the earlier build, even when only origin still has it", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "half.txt", answer: failed }]);
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report, { answer: () => "stop" });
+		expect(report.issues?.[0]).toMatchObject({ build: "failed", branch: "theory/1-one" });
+		// The branch still exists, only on origin now: it is reused, not replaced by theory/1-one-2 (BLD-12).
+		await out(s.api.repo, ["push", "--quiet", "origin", "theory/1-one"]);
+		await out(s.api.repo, ["checkout", "--quiet", "main"]);
+		await out(s.api.repo, ["branch", "-D", "theory/1-one"]);
+		s.claude.setSteps([{ commit: "rest.txt", answer: built() }]);
+		await build(s, report);
+		expect(report.issues?.[0]).toMatchObject({ build: "built", branch: "theory/1-one" });
+		expect(await branches(s.api.repo)).toEqual(["main", "theory/1-one"]);
+		expect((await out(s.api.repo, ["ls-tree", "--name-only", "theory/1-one"])).split("\n")).toEqual(["README.md", "half.txt", "rest.txt"]);
+	});
+
+	it("says every issue is built when nothing is left, and changes nothing", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report);
+		const before = JSON.stringify(report);
+		const attempt = startBuild(s.options(), report, [report], () => {});
+		await expect(attempt).rejects.toThrow(NothingLeftError);
+		await expect(attempt).rejects.toThrow(NOTHING_LEFT);
+		expect(NOTHING_LEFT).toBe("Every issue of this compile is built.");
+		expect(JSON.stringify(report)).toBe(before);
+		expect(s.claude.calls()).toHaveLength(1);
+	});
+
+	it("skips a closed issue no build of this compile built, and lists the skipped sub-issues still open", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: failed }, { commit: "third.txt", answer: built() }]);
+		const report = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "first" },
+				{ repo: "api", shortName: "second" },
+				{ repo: "api", shortName: "third" },
+			],
+			true,
+		);
+		s.github.issue("api", 3).state = "closed";
+		await build(s, report, { answer: () => "skip" });
+		expect(report.build?.status).toBe("finished");
+		expect(report.issues?.slice(1).map((i) => i.build)).toEqual(["skipped", "skipped", "built"]);
+		expect(report.problems.map((p) => p.text)).toContain("Skipped api#3: the issue is closed.");
+		expect(report.build?.skippedLine).toBe("Skipped and still open: api#2.");
+		expect((await pullRequestCandidates(report)).map((c) => c.branch.repo)).toEqual(["api"]);
+	});
+
+	it("offers no Create PR when every sub-issue was skipped", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: failed }, { answer: failed }]);
+		const report = await planned(s, [{ repo: "api", shortName: "first" }, { repo: "web", shortName: "second" }], true);
+		await build(s, report, { answer: () => "skip" });
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.skippedLine).toBe("Skipped and still open: api#2, web#3.");
+		expect(report.build?.message).toBeUndefined();
+		expect(await pullRequestCandidates(report)).toEqual([]);
+	});
 });
 
 describe("a build after Obsidian closed, and which compile Build builds (BLD-1, BLD-24)", () => {
