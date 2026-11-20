@@ -1,13 +1,18 @@
 import { join } from "path";
 import { describe, expect, it } from "vitest";
+import { SAME, defaultTaskRows, taskAgentSettings } from "../src/agent-rows";
 import { uniqueBranchName } from "../src/branches";
 import {
 	BuildChoice,
 	BuildOptions,
+	NOTHING_LEFT,
+	NothingLeftError,
 	buildPromptText,
 	buildableReport,
 	epicBranchName,
 	epicPullRequestBody,
+	issueRef,
+	sharedEpicPullRequestBody,
 	interruptedBuild,
 	issueBranchName,
 	openBuildBranch,
@@ -119,6 +124,22 @@ describe("the checks before a build (BLD-5 to BLD-9)", () => {
 		await expect(startBuild(s.options(), report, [report], () => {})).rejects.toThrow(`Couldn't reach the GitHub Project ${PROJECT_URL}: HTTP 404`);
 		expect(report.build).toBeUndefined();
 		expect(s.claude.calls()).toEqual([]);
+	});
+
+	it("stops when Build's row is an ACP agent with no command, even when Compile's row is Claude Code (AGT-5, BLD-19)", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		const tasks = defaultTaskRows();
+		tasks.compile.agentCommand = "compile-agent --acp";
+		tasks.build = { agent: "acp", agentCommand: "", agentModel: "m", agentThinkingLevel: "", model: SAME, effort: SAME };
+		const agent = taskAgentSettings({ tasks, claudeCommand: s.claude.command, permissionMode: "acceptEdits", allowedTools: "" }, "build");
+		expect(agent.agent).toBe("acp");
+		await expect(startBuild(s.options(agent), report, [report], () => {})).rejects.toThrow(
+			"Set the agent command in theory.md settings first.",
+		);
+		expect(report.build).toBeUndefined();
+		expect(s.claude.calls()).toEqual([]);
+		expect(await branches(s.api.repo)).toEqual(["main"]);
 	});
 
 	it("stops on uncommitted changes in a repository with an issue, and only there", async () => {
@@ -305,6 +326,48 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 	});
 });
 
+describe("referring to issues across repositories (BLD-16, BLD-26, REP-27)", () => {
+	it("writes #n in the same repository and owner/name#n in another, compared by GitHub name", () => {
+		expect(issueRef(57, "imtiazkun/theory.md", "imtiazkun/theory.md")).toBe("#57");
+		expect(issueRef(57, "Imtiazkun/Theory.md", "imtiazkun/theory.md")).toBe("#57");
+		expect(issueRef(57, "imtiazkun/theory.md", "imtiazkun/obsidian-plugin")).toBe("imtiazkun/theory.md#57");
+		expect(issueRef(57, "imtiazkun/theory.md", null)).toBe("imtiazkun/theory.md#57");
+		// Without the target's GitHub name, never a bare #n that would link to the wrong repository.
+		expect(issueRef(57, null, "imtiazkun/obsidian-plugin", "https://github.com/imtiazkun/theory.md/issues/57")).toBe(
+			"https://github.com/imtiazkun/theory.md/issues/57",
+		);
+	});
+
+	it("gives the epic's repository, another repository and the shared Body their default bodies", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
+		const epic = report.issues?.find((i) => i.kind === "epic");
+		expect([epic?.repo, epic?.number]).toEqual(["api", 1]);
+		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
+		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
+		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
+		// Not the local folder name when the epic's GitHub name is unknown.
+		expect(epicPullRequestBody(report, "team/web", null)).toBe(`Part of ${epic?.url}`);
+		expect(sharedEpicPullRequestBody(report, null)).toBe(`Part of ${epic?.url}`);
+	});
+
+	it("decides the sub-issue's 'Part of' by GitHub name, not by local folder", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ commit: "a.txt", answer: built("A.") },
+			{ commit: "b.txt", answer: built("B.") },
+		]);
+		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
+		// Both folders are clones of one GitHub repository, so the epic is in the sub-issue's own repository.
+		s.github.repoName = async () => "team/shared";
+		await build(s, report);
+		expect(s.github.pullRequests.map((p) => [p.repo, p.body])).toEqual([
+			["web", "A.\n\nPart of #1\nResolves #2"],
+			["api", "B.\n\nPart of #1\nResolves #3"],
+		]);
+	});
+});
+
 describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", () => {
 	it("offers Create PR for each epic branch once every sub-issue is built, with the epic's title and bodies", async () => {
 		const s = await setup();
@@ -320,8 +383,9 @@ describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", ()
 			["web", "theory/epic-1-big-thing", "main", true],
 			["api", "theory/epic-1-big-thing", "main", true],
 		]);
-		expect(epicPullRequestBody(report, s.api.repo, "team/api")).toBe("Closes #1");
-		expect(epicPullRequestBody(report, s.web.repo, "team/api")).toBe("Part of team/api#1");
+		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
+		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
+		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// A single issue's pull request comes from the build itself.
 		const single = { ...(await planned(s, [{ repo: "api", shortName: "c" }])), id: "2" };
 		single.build = { status: "finished", startedAt: "" };
@@ -436,6 +500,121 @@ describe("when a build goes wrong (BLD-22, BLD-23)", () => {
 			expect((await branches(s.api.repo)).includes("theory/2-first")).toBe(choice === "keep");
 		});
 	}
+});
+
+describe("continuing a build of the same compile (BLD-8, BLD-9, BLD-12, BLD-27, BLD-28)", () => {
+	it("reuses the epic branch in every repository, builds only the rest in order, and keeps the built one built", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "first.txt", answer: built("First.") }, { answer: failed }]);
+		const report = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "first" },
+				{ repo: "web", shortName: "second" },
+				{ repo: "api", shortName: "third" },
+			],
+			true,
+		);
+		await build(s, report, { answer: () => "stop" });
+		expect(report.build?.status).toBe("stopped");
+		expect(report.issues?.slice(1).map((i) => i.build)).toEqual(["built", "failed", "waiting"]);
+		const epicBranch = "theory/epic-1-big-thing";
+		const firstPr = s.github.pullRequests[0].url;
+
+		// Another compile is still refused by this one's open epic branch (BLD-8).
+		const other = { ...(await planned(s, [{ repo: "api", shortName: "other" }])), id: "2" };
+		await expect(startBuild(s.options(), other, [other, report], () => {})).rejects.toThrow(`Finish the open work in api first: ${epicBranch}.`);
+
+		// Building it again isn't refused by its own open work, and continues it.
+		s.claude.setSteps([
+			{ commit: "second.txt", answer: built("Second.") },
+			{ commit: "third.txt", answer: built("Third.") },
+		]);
+		await build(s, report, { reports: [other, report] });
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.epicBranches?.map((b) => [b.repo, b.branch])).toEqual([
+			["api", epicBranch],
+			["web", epicBranch],
+		]);
+		for (const repo of [s.api.repo, s.web.repo]) expect((await branches(repo)).filter((b) => b.startsWith("theory/epic-"))).toEqual([epicBranch]);
+		const again = s.claude.calls().slice(2);
+		expect(again.map((c) => c.cwd)).toEqual([s.web.repo, s.api.repo]);
+		expect(again.map((c) => c.prompt.match(/Issue: #(\d+)/)?.[1])).toEqual(["3", "4"]);
+		expect(report.issues?.slice(1).map((i) => [i.branch, i.build])).toEqual([
+			["theory/2-first", "built"],
+			["theory/3-second", "built"],
+			["theory/4-third", "built"],
+		]);
+		// The sub-issue the first build closed stays built: no "the issue is closed", and its pull request stays.
+		expect(report.problems.map((p) => p.text).filter((t) => t.includes("the issue is closed"))).toEqual([]);
+		expect(s.github.pullRequests.map((p) => p.head)).toEqual(["theory/2-first", "theory/3-second", "theory/4-third"]);
+		expect(s.github.pullRequests[0].url).toBe(firstPr);
+		expect((await out(s.api.bare, ["ls-tree", "--name-only", epicBranch])).split("\n")).toEqual(["README.md", "first.txt", "third.txt"]);
+		expect(report.build?.message).toBe(`Epic #1 is built on ${epicBranch}. Open a pull request into main when you're ready.`);
+		expect(report.build?.skippedLine).toBeUndefined();
+	});
+
+	it("reuses an issue's branch from the earlier build, even when only origin still has it", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "half.txt", answer: failed }]);
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report, { answer: () => "stop" });
+		expect(report.issues?.[0]).toMatchObject({ build: "failed", branch: "theory/1-one" });
+		// The branch still exists, only on origin now: it is reused, not replaced by theory/1-one-2 (BLD-12).
+		await out(s.api.repo, ["push", "--quiet", "origin", "theory/1-one"]);
+		await out(s.api.repo, ["checkout", "--quiet", "main"]);
+		await out(s.api.repo, ["branch", "-D", "theory/1-one"]);
+		s.claude.setSteps([{ commit: "rest.txt", answer: built() }]);
+		await build(s, report);
+		expect(report.issues?.[0]).toMatchObject({ build: "built", branch: "theory/1-one" });
+		expect(await branches(s.api.repo)).toEqual(["main", "theory/1-one"]);
+		expect((await out(s.api.repo, ["ls-tree", "--name-only", "theory/1-one"])).split("\n")).toEqual(["README.md", "half.txt", "rest.txt"]);
+	});
+
+	it("says every issue is built when nothing is left, and changes nothing", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report);
+		const before = JSON.stringify(report);
+		const attempt = startBuild(s.options(), report, [report], () => {});
+		await expect(attempt).rejects.toThrow(NothingLeftError);
+		await expect(attempt).rejects.toThrow(NOTHING_LEFT);
+		expect(NOTHING_LEFT).toBe("Every issue of this compile is built.");
+		expect(JSON.stringify(report)).toBe(before);
+		expect(s.claude.calls()).toHaveLength(1);
+	});
+
+	it("skips a closed issue no build of this compile built, and lists the skipped sub-issues still open", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: failed }, { commit: "third.txt", answer: built() }]);
+		const report = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "first" },
+				{ repo: "api", shortName: "second" },
+				{ repo: "api", shortName: "third" },
+			],
+			true,
+		);
+		s.github.issue("api", 3).state = "closed";
+		await build(s, report, { answer: () => "skip" });
+		expect(report.build?.status).toBe("finished");
+		expect(report.issues?.slice(1).map((i) => i.build)).toEqual(["skipped", "skipped", "built"]);
+		expect(report.problems.map((p) => p.text)).toContain("Skipped api#3: the issue is closed.");
+		expect(report.build?.skippedLine).toBe("Skipped and still open: api#2.");
+		expect((await pullRequestCandidates(report)).map((c) => c.branch.repo)).toEqual(["api"]);
+	});
+
+	it("offers no Create PR when every sub-issue was skipped", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: failed }, { answer: failed }]);
+		const report = await planned(s, [{ repo: "api", shortName: "first" }, { repo: "web", shortName: "second" }], true);
+		await build(s, report, { answer: () => "skip" });
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.skippedLine).toBe("Skipped and still open: api#2, web#3.");
+		expect(report.build?.message).toBeUndefined();
+		expect(await pullRequestCandidates(report)).toEqual([]);
+	});
 });
 
 describe("a build after Obsidian closed, and which compile Build builds (BLD-1, BLD-24)", () => {

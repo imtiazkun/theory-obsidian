@@ -78,6 +78,18 @@ export interface BuildRecord {
 	waiting?: BuildQuestion;
 	/** "Epic #{n} is built on {branch}. …" once every sub-issue is built (BLD-17). */
 	message?: string;
+	/** "Skipped and still open: {issues}." when an epic's build finished with sub-issues skipped (BLD-28). */
+	skippedLine?: string;
+}
+
+/** What Build says when a compile has nothing left to build (BLD-27). */
+export const NOTHING_LEFT = "Every issue of this compile is built.";
+
+/** Thrown by `startBuild` before anything changes when every issue of the compile is built (BLD-27). Not a failure. */
+export class NothingLeftError extends Error {
+	constructor() {
+		super(NOTHING_LEFT);
+	}
 }
 
 export interface BuildOptions extends AgentSettings {
@@ -145,6 +157,7 @@ function commandFound(command: string): Promise<boolean> {
 /**
  * Open work from an earlier build in this repository, or null (BLD-8): an open pull request, or an epic branch not
  * merged into its base whose pull request isn't merged or closed. Pull request states come from GitHub, else the reports.
+ * `reports` must leave out the compile being built: its own work is continued, not in the way (BLD-27).
  */
 export async function openWork(github: GitHub, repo: CodeRepo, reports: CompileReport[]): Promise<string | null> {
 	for (const report of reports) {
@@ -231,6 +244,8 @@ export async function startBuild(
 	const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
 	const epic = report.issues?.find((i) => i.kind === "epic" && i.number !== undefined) ?? null;
 	if (issues.length === 0) throw new Error("This compile created no issues to build.");
+	// BLD-27: issues built before keep their state, and a compile whose every issue is built has nothing left.
+	if (issues.every((i) => i.build === "built")) throw new NothingLeftError();
 	const repos: CodeRepo[] = [];
 	for (const issue of issues) if (!repos.some((r) => r.path === issue.repoPath)) repos.push({ name: issue.repo, path: issue.repoPath });
 
@@ -260,29 +275,47 @@ export async function startBuild(
 		}
 	}
 
-	// BLD-8: new work starts from code that holds every earlier change.
+	// BLD-8: new work starts from code that holds every earlier change. This compile's own work is continued (BLD-27).
+	const others = reports.filter((r) => r !== report && r.id !== report.id);
 	for (const repo of repos) {
-		const open = await openWork(github, repo, reports);
+		const open = await openWork(github, repo, others);
 		if (open) throw new Error(`Finish the open work in ${repo.name} first: ${open}.`);
 	}
 
-	// BLD-9: a closed issue is skipped. When GitHub can't say, the issue counts as open.
+	// BLD-9 and BLD-27: only issues still open with no open pull request are built, in the plan's order. A sub-issue
+	// this compile's build closed stays built. When GitHub can't say, the issue counts as open.
 	const toBuild: IssueRecord[] = [];
 	const skippedClosed: string[] = [];
+	const closed = new Set<IssueRecord>();
 	for (const issue of issues) {
 		if (issue.build === "built") continue;
 		const state = await github.issueState(issue.repoPath, issue.number as number).catch(() => "open");
 		if (state === "closed") {
+			closed.add(issue);
 			issue.build = "skipped";
-			skippedClosed.push(`Skipped ${issue.repo}#${issue.number}: the issue is closed.`);
+			const line = `Skipped ${issue.repo}#${issue.number}: the issue is closed.`;
+			if (!report.problems.some((p) => p.text === line)) skippedClosed.push(line);
 			continue;
+		}
+		const pr = (report.pullRequests ?? []).find((p) => p.repoPath === issue.repoPath && p.branch === issue.branch);
+		if (pr && (pr.state === "open" || pr.state === "draft")) {
+			pr.state = await github.pullRequestState(pr.repoPath, pr.url).catch(() => pr.state);
+			if (pr.state === "open" || pr.state === "draft") continue;
 		}
 		issue.build = "waiting";
 		toBuild.push(issue);
 	}
+	if (toBuild.length === 0 && skippedClosed.length === 0) throw new NothingLeftError();
 
 	const snapshot = await createSnapshot(options.vaultPath, report.toCommit);
-	const build: BuildRecord = { status: "running", startedAt: new Date().toISOString() };
+	// BLD-27: a build of a compile built before continues its record, epic branches included.
+	const build: BuildRecord = report.build ?? { status: "running", startedAt: "" };
+	build.status = "running";
+	build.startedAt = new Date().toISOString();
+	delete build.finishedAt;
+	delete build.waiting;
+	delete build.message;
+	delete build.skippedLine;
 	report.build = build;
 	report.problems.push(...skippedClosed.map(plainProblem));
 	for (const line of skippedClosed) appendLog(report, line);
@@ -311,12 +344,14 @@ export async function startBuild(
 	const ref = (issue: IssueRecord) => `${issue.repo}#${issue.number}`;
 	const pullRequests = () => (report.pullRequests ??= []);
 
-	/** The epic's number as a sub-issue in `repoPath` must write it: `#n` in its own repository, `owner/name#n` elsewhere. */
+	/** The epic as a sub-issue in `repoPath` must write it (BLD-26), the repositories compared by their GitHub names. */
 	const epicRef = async (repoPath: string) => {
-		if (!epic) return "";
-		if (epic.repoPath === repoPath) return `#${epic.number}`;
-		const name = await github.repoName(epic.repoPath).catch(() => null);
-		return name ? `${name}#${epic.number}` : `#${epic.number}`;
+		if (!epic?.number) return "";
+		const [epicName, name] = await Promise.all([
+			github.repoName(epic.repoPath).catch(() => null),
+			github.repoName(repoPath).catch(() => null),
+		]);
+		return issueRef(epic.number, epicName, name, epic.url);
 	};
 
 	/** Brings the local epic branch up to `origin`, where each sub-issue's pull request was merged. */
@@ -334,6 +369,10 @@ export async function startBuild(
 		}
 		try {
 			if (epic) await syncEpic(repoPath, base);
+			// BLD-27: the branch an earlier build of this compile made is reused, from origin when it's only there.
+			if (issue.branch && !(await branchExists(repoPath, issue.branch)) && (await refExists(repoPath, `refs/remotes/origin/${issue.branch}`))) {
+				await git(repoPath, ["branch", issue.branch, `refs/remotes/origin/${issue.branch}`]);
+			}
 			if (!issue.branch || !(await branchExists(repoPath, issue.branch))) {
 				// The plugin makes and switches every branch, never Claude (BLD-13, BLD-16).
 				issue.branch = await uniqueBranchName([repoPath], issueBranchName(issue));
@@ -447,19 +486,35 @@ export async function startBuild(
 	const run = async (): Promise<BuildStatus> => {
 		if (epic) {
 			// BLD-15: one epic branch name in every repository with a sub-issue, from its default branch, pushed.
-			const branch = await uniqueBranchName(repos.map((r) => r.path), epicBranchName(epic));
+			// BLD-27: a continued build reuses this compile's epic branch, so one epic never splits in two.
+			const earlier = build.epicBranches ?? [];
+			const branch = earlier[0]?.branch ?? (await uniqueBranchName(repos.map((r) => r.path), epicBranchName(epic)));
+			const kept = earlier.filter((b) => b.branch === branch && repos.some((r) => r.path === b.repoPath));
 			build.epicBranches = [];
 			for (const repo of repos) {
-				const base = defaults.get(repo.path) as string;
+				const before = kept.find((b) => b.repoPath === repo.path);
+				const base = before?.base ?? (defaults.get(repo.path) as string);
+				const remote = `refs/remotes/origin/${branch}`;
 				try {
-					await git(repo.path, ["branch", branch, base]);
-					await pushBranch(repo.path, branch);
+					if (await branchExists(repo.path, branch)) {
+						log(`Continuing on ${branch} in ${repo.name}`);
+					} else if (await refExists(repo.path, remote)) {
+						await git(repo.path, ["branch", branch, remote]);
+						log(`Continuing on ${branch} in ${repo.name}, from origin`);
+					} else {
+						await git(repo.path, ["branch", branch, base]);
+						log(`Created ${branch} in ${repo.name} from ${base}`);
+					}
+					if (!(await refExists(repo.path, remote))) {
+						await pushBranch(repo.path, branch);
+						log(`Pushed ${branch} in ${repo.name}`);
+					}
 				} catch (error) {
 					report.problems.push(plainProblem(`Couldn't create ${branch} in ${repo.name}: ${gitError(error)}`));
+					build.epicBranches.push(...kept.filter((b) => !build.epicBranches?.some((e) => e.repoPath === b.repoPath)));
 					return "stopped";
 				}
 				build.epicBranches.push({ repo: repo.name, repoPath: repo.path, branch, base });
-				log(`Created and pushed ${branch} in ${repo.name} from ${base}`);
 			}
 		}
 		// BLD-16: one at a time, in the plan's order.
@@ -499,8 +554,13 @@ export async function startBuild(
 			}
 		}
 		if (epic && build.epicBranches?.length) {
+			// BLD-28: an epic with skipped sub-issues still finishes. With none built there is nothing to open.
 			const [first] = build.epicBranches.filter((b) => b.repoPath === epic.repoPath).concat(build.epicBranches);
-			build.message = `Epic #${epic.number} is built on ${first.branch}. Open a pull request into ${first.base} when you're ready.`;
+			if (issues.some((i) => i.build === "built")) {
+				build.message = `Epic #${epic.number} is built on ${first.branch}. Open a pull request into ${first.base} when you're ready.`;
+			}
+			const stillOpen = issues.filter((i) => i.build === "skipped" && !closed.has(i)).map(ref);
+			if (stillOpen.length > 0) build.skippedLine = `Skipped and still open: ${stillOpen.join(", ")}.`;
 		}
 		return "finished";
 	};
@@ -590,8 +650,8 @@ export interface PullRequestCandidate {
 }
 
 /**
- * The epic branches of this report that still need a pull request (REP-25): only after a build finished every
- * sub-issue of an epic, and only those with commits and no pull request yet. One issue and each sub-issue get
+ * The epic branches of this report that still need a pull request (REP-25): only after a build reached the end of
+ * an epic, skipped sub-issues or not (BLD-28), and only those with commits and no pull request yet. One issue and each sub-issue get
  * their pull request from the build itself.
  */
 export async function pullRequestCandidates(report: CompileReport): Promise<PullRequestCandidate[]> {
@@ -607,13 +667,33 @@ export async function pullRequestCandidates(report: CompileReport): Promise<Pull
 }
 
 /**
- * The epic branch pull request's default body in one repository (REP-27): "Closes #{epic}" in the epic's own
- * repository, "Part of {repo}#{epic}" in the others, with the epic's repository as GitHub names it.
+ * How text written in the repository GitHub names `fromRepoName` refers to an issue or pull request in `repoName`
+ * (BLD-26): `#n` in the same repository, `owner/name#n` in another. Repositories are the same only when their GitHub
+ * names match, never by local path. When the target's GitHub name is unknown, its web address is used, because a
+ * bare `#n` would link to the wrong repository.
  */
-export function epicPullRequestBody(report: CompileReport, repoPath: string, epicRepoName: string | null): string {
+export function issueRef(number: number, repoName: string | null, fromRepoName: string | null, url?: string): string {
+	if (repoName && fromRepoName && repoName.toLowerCase() === fromRepoName.toLowerCase()) return `#${number}`;
+	if (repoName) return `${repoName}#${number}`;
+	return url ?? `#${number}`;
+}
+
+/**
+ * The epic branch pull request's default body in one repository (REP-27): "Closes #{epic}" in the epic's own
+ * repository, "Part of {owner}/{name}#{epic}" in the others. Both are GitHub names (`owner/name`), so "the epic's own
+ * repository" is decided by comparing them.
+ */
+export function epicPullRequestBody(report: CompileReport, repoName: string | null, epicRepoName: string | null): string {
 	const epic = report.issues?.find((i) => i.kind === "epic");
 	if (!epic?.number) return "";
-	if (epic.repoPath === repoPath) return `Closes #${epic.number}`;
-	return `Part of ${epicRepoName ?? epic.repo}#${epic.number}`;
+	const ref = issueRef(epic.number, epicRepoName, repoName, epic.url);
+	return ref === `#${epic.number}` ? `Closes ${ref}` : `Part of ${ref}`;
+}
+
+/** The shared Body's default on the Create PR page (REP-27): "Part of {owner}/{name}#{epic}", whatever the repository. */
+export function sharedEpicPullRequestBody(report: CompileReport, epicRepoName: string | null): string {
+	const epic = report.issues?.find((i) => i.kind === "epic");
+	if (!epic?.number) return "";
+	return `Part of ${issueRef(epic.number, epicRepoName, null, epic.url)}`;
 }
 

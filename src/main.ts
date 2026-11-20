@@ -3,6 +3,7 @@ import { CommitButtons } from "./commit";
 import { COMMIT_VIEW_TYPE, CommitView, PAST_COMMIT_VIEW_TYPE, PastCommitView } from "./commit-view";
 import { type PushResult, commitNotice, pushNotice, pushVault } from "./push";
 import { generateCommitMessage } from "./commit-message";
+import { OLD_AGENT_FIELDS, resolveTask, savedTaskRows, taskAgentSettings } from "./agent-rows";
 import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
 import {
@@ -47,8 +48,8 @@ import {
 	pushDetails,
 	savedHooks,
 } from "./hooks";
-import { BuildChoice, BuildRun, buildableReport, interruptedBuild, startBuild } from "./build";
-import { readyText } from "./plan";
+import { BuildChoice, BuildRun, NothingLeftError, buildableReport, interruptedBuild, startBuild } from "./build";
+import { compileFinishedText, questionText } from "./plan";
 import {
 	IdentityError,
 	MissingStarters,
@@ -398,7 +399,8 @@ export default class TheoryPlugin extends Plugin {
 			for (const view of this.expandViews(repo)) view.showFailure(errorMessage(error));
 			return;
 		}
-		const { claudeCommand, model, effort, projectFolder } = this.settings;
+		const { claudeCommand, projectFolder } = this.settings;
+		const { model, effort } = resolveTask(this.settings.tasks, "expand");
 		const repoPath = projectRepos(projectFolder).find((r) => r.name === repo)?.path ?? null;
 		const run = startExpand({ claudeCommand, model, effort, vaultPath, repo, repoPath });
 		this.expandRuns.set(repo, run);
@@ -484,34 +486,16 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const {
-			projectFolder,
-			claudeCommand,
-			agent,
-			agentCommand,
-			agentModel,
-			agentThinkingLevel,
-			permissionMode,
-			allowedTools,
-			model,
-			effort,
-			githubProject,
-		} = this.settings;
+		const { projectFolder, githubProject } = this.settings;
+		// Read once: a change to the row applies from the next compile (CFG-19, CMP-13).
+		const agentSettings = taskAgentSettings(this.settings, "compile");
 		let run: CompileRun;
 		try {
 			run = await startCompile(
 				{
 					vaultPath,
 					projectFolder,
-					claudeCommand,
-					agent,
-					agentCommand,
-					agentModel,
-					agentThinkingLevel,
-					permissionMode,
-					allowedTools,
-					model,
-					effort,
+					...agentSettings,
 					author,
 					githubProject,
 					onPermissionRequest: (request) => {
@@ -557,9 +541,8 @@ export default class TheoryPlugin extends Plugin {
 		this.noteStatus.sync();
 		this.changeDots.sync();
 		const questions = report.questions.length;
-		const extra = questions > 0 ? ` Claude has ${questions} question${questions === 1 ? "" : "s"} about the model.` : "";
-		if (report.status === "succeeded") new Notice(`Compile finished. ${readyText(report.issues ?? [])}${extra}`);
-		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${extra}`, 10000);
+		if (report.status === "succeeded") new Notice(compileFinishedText(report.issues ?? [], questions));
+		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${questionText(questions)}`, 10000);
 	}
 
 	/** Cancel in the report: stops the running compile or build (CMP-24, BLD-23). */
@@ -626,23 +609,16 @@ export default class TheoryPlugin extends Plugin {
 			new Notice(failure("Build failed", error), 10000);
 			return;
 		}
-		const { projectFolder, claudeCommand, agent, agentCommand, agentModel, agentThinkingLevel, permissionMode, allowedTools, model, effort, githubProject } =
-			this.settings;
+		const { projectFolder, githubProject } = this.settings;
+		// Read once: a change to the row applies from the next build (CFG-19, BLD-19).
+		const agentSettings = taskAgentSettings(this.settings, "build");
 		let run: BuildRun;
 		try {
 			run = await startBuild(
 				{
 					vaultPath,
 					projectFolder,
-					claudeCommand,
-					agent,
-					agentCommand,
-					agentModel,
-					agentThinkingLevel,
-					permissionMode,
-					allowedTools,
-					model,
-					effort,
+					...agentSettings,
 					githubProject,
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
@@ -659,7 +635,8 @@ export default class TheoryPlugin extends Plugin {
 				},
 			);
 		} catch (error) {
-			new Notice(`Build failed: ${errorMessage(error)}`, 10000);
+			// BLD-27: nothing left to build isn't a failure.
+			new Notice(error instanceof NothingLeftError ? error.message : `Build failed: ${errorMessage(error)}`, 10000);
 			await this.saveSettings();
 			return;
 		}
@@ -679,7 +656,10 @@ export default class TheoryPlugin extends Plugin {
 		await this.saveSettings();
 		this.pullRequestsChanged();
 		const status = report.build?.status;
-		if (status === "finished") new Notice(report.build?.message ?? "Build finished. See the compile report.");
+		if (status === "finished") {
+			const text = [report.build?.message ?? "Build finished. See the compile report.", report.build?.skippedLine].filter(Boolean).join(" ");
+			new Notice(text);
+		}
 		else if (status === "stopped") new Notice("Build stopped. See the compile report.", 10000);
 	}
 
@@ -884,7 +864,8 @@ export default class TheoryPlugin extends Plugin {
 	/** Asks Claude for a commit message describing the changes to `paths`. Returns null when it couldn't. */
 	async generateCommitMessage(paths: string[]): Promise<string | null> {
 		try {
-			return await generateCommitMessage(this.getVaultPath(), paths, this.settings.claudeCommand);
+			const { model, effort } = resolveTask(this.settings.tasks, "writing");
+			return await generateCommitMessage(this.getVaultPath(), paths, { claudeCommand: this.settings.claudeCommand, model, effort });
 		} catch (error) {
 			new Notice(`Couldn't generate a message: ${errorMessage(error)}`, 10000);
 			return null;
@@ -999,8 +980,12 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const { reports, codeRepoPath, repos, setupOnLoad, ...settings } = (await this.loadData()) ?? {};
+		const saved = (await this.loadData()) ?? {};
+		const { reports, codeRepoPath, repos, setupOnLoad, ...settings } = saved;
+		// Before rows existed, one agent, model and effort served every task. They become Compile's row (CFG-42).
+		for (const key of OLD_AGENT_FIELDS) delete settings[key];
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
+		this.settings.tasks = savedTaskRows(saved);
 		this.settings.hooks = savedHooks(this.settings.hooks);
 		this.setupOnLoad = setupOnLoad === true;
 		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
