@@ -1,7 +1,7 @@
 import { resolveTask } from "./agent-rows";
 import { ItemView, Notice, Setting, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
 import { projectRepos } from "./branches";
-import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates } from "./build";
+import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates, sharedEpicPullRequestBody } from "./build";
 import type { CompileReport } from "./compile";
 import {
 	PullRequest,
@@ -100,15 +100,17 @@ export class CreatePullRequestView extends ItemView {
 		const epicOrigin = epic ? await githubOrigin(epic.repoPath) : null;
 		const epicRepoName = epicOrigin ? epicOrigin.replace("https://github.com/", "") : null;
 		this.title = epic?.title ?? report.revisions[report.revisions.length - 1]?.subject ?? "";
-		// The shared body is the epic repository's. A repository whose body differs starts with its own (REP-27).
-		this.body = epic ? epicPullRequestBody(report, epic.repoPath, epicRepoName) : "";
+		// Every title starts as the epic's. The shared body refers to the epic from anywhere; each repository's
+		// own body refers to it as that repository must (REP-27, BLD-26).
+		this.body = sharedEpicPullRequestBody(report, epicRepoName);
 		const candidates = await pullRequestCandidates(report);
 		const ghBlocked = candidates.length > 0 ? await ghProblem(candidates[0].branch.repoPath) : null;
 		for (const candidate of candidates) {
 			const { repoPath, base } = candidate.branch;
 			const origin = await githubOrigin(repoPath);
 			const remote = await remoteBranches(repoPath);
-			const body = epicPullRequestBody(report, repoPath, epicRepoName);
+			const repoName = origin ? origin.replace("https://github.com/", "") : null;
+			const body = epicPullRequestBody(report, repoName, epicRepoName);
 			this.sections.push({
 				...candidate,
 				blocked: !origin ? "This repository has no GitHub origin." : ghBlocked,
@@ -116,7 +118,8 @@ export class CreatePullRequestView extends ItemView {
 				base,
 				draft: false,
 				reviewers: "",
-				shared: body === this.body,
+				// Off by default: each repository refers to the epic differently (REP-26).
+				shared: false,
 				title: this.title,
 				body,
 				error: null,
@@ -195,12 +198,8 @@ export class CreatePullRequestView extends ItemView {
 			.addText((text) => text.setValue(section.reviewers).onChange((value) => (section.reviewers = value)));
 		new Setting(el).setName("Use the shared title and body").addToggle((toggle) =>
 			toggle.setValue(section.shared).onChange((value) => {
+				// Its own title and body are kept, only hidden, while the shared ones are used.
 				section.shared = value;
-				// Its own title and body start from the shared ones.
-				if (!value) {
-					section.title = this.title;
-					section.body = this.body;
-				}
 				this.render();
 			}),
 		);
