@@ -48,7 +48,7 @@ import {
 	pushDetails,
 	savedHooks,
 } from "./hooks";
-import { BuildChoice, BuildRun, buildableReport, interruptedBuild, startBuild } from "./build";
+import { BuildChoice, BuildRun, NothingLeftError, buildableReport, interruptedBuild, startBuild } from "./build";
 import { compileFinishedText, questionText } from "./plan";
 import {
 	IdentityError,
@@ -635,7 +635,8 @@ export default class TheoryPlugin extends Plugin {
 				},
 			);
 		} catch (error) {
-			new Notice(`Build failed: ${errorMessage(error)}`, 10000);
+			// BLD-27: nothing left to build isn't a failure.
+			new Notice(error instanceof NothingLeftError ? error.message : `Build failed: ${errorMessage(error)}`, 10000);
 			await this.saveSettings();
 			return;
 		}
@@ -655,7 +656,10 @@ export default class TheoryPlugin extends Plugin {
 		await this.saveSettings();
 		this.pullRequestsChanged();
 		const status = report.build?.status;
-		if (status === "finished") new Notice(report.build?.message ?? "Build finished. See the compile report.");
+		if (status === "finished") {
+			const text = [report.build?.message ?? "Build finished. See the compile report.", report.build?.skippedLine].filter(Boolean).join(" ");
+			new Notice(text);
+		}
 		else if (status === "stopped") new Notice("Build stopped. See the compile report.", 10000);
 	}
 
