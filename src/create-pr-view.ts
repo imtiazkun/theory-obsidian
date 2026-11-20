@@ -1,3 +1,4 @@
+import { resolveTask } from "./agent-rows";
 import { ItemView, Notice, Setting, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
 import { projectRepos } from "./branches";
 import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates } from "./build";
@@ -237,7 +238,8 @@ export class CreatePullRequestView extends ItemView {
 		generate.addEventListener("click", async () => {
 			const report = this.report();
 			if (!report || this.generating.has(key)) return;
-			const { claudeCommand, model, effort } = this.plugin.settings;
+			const { claudeCommand } = this.plugin.settings;
+			const { model, effort } = resolveTask(this.plugin.settings.tasks, "writing");
 			const several = projectRepos(this.plugin.settings.projectFolder).length > 1;
 			const run = generatePullRequestBody({ claudeCommand, model, effort, report, repos, several });
 			this.generating.set(key, run);
