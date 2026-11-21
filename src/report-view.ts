@@ -11,6 +11,7 @@ import {
 } from "./compile";
 import { buildPromptText, pullRequestCandidates, type BuildStatus } from "./build";
 import type { BuildState, IssueRecord } from "./plan";
+import { canDiscard, stepsLeft } from "./plan";
 import type { PullRequestState } from "./github";
 import type TheoryPlugin from "./main";
 import type { BuildChoice } from "./build";
@@ -342,18 +343,27 @@ export class CompileReportView extends ItemView {
 		if (found.length > 0) this.refresh();
 	}
 
-	/** CMP-68: creating an issue failed, and the compile waits for Retry or Discard. */
+	/** CMP-68, CMP-81: a GitHub step failed, and the compile waits for Retry, or Discard while it is still offered. */
 	private renderIssueFailure(report: CompileReport) {
 		if (!report.issueFailure || report.status !== "running") return;
 		const card = this.contentEl.createDiv({ cls: "theory-permission-card theory-build-question" });
 		card.createDiv({ cls: "theory-permission-title", text: report.issueFailure });
+		const discard = canDiscard(report.issues ?? [], report.closing);
+		const left = stepsLeft(report.issues ?? [], report.closing);
+		if (left.length > 0) {
+			card.createDiv({ cls: "theory-report-meta", text: "Still to do on GitHub:" });
+			const list = card.createEl("ul");
+			for (const line of left) list.createEl("li", { text: line });
+		}
 		card.createDiv({
 			cls: "theory-report-meta",
-			text: "Retry creates the issues still missing. Discard closes the issues already created as not planned, and the last compile marker doesn't move.",
+			text: discard
+				? "Retry carries on from there. Discard closes the issues already created as not planned, and the last compile marker doesn't move."
+				: "Retry carries on from there. An earlier issue has already changed on GitHub, which can't be undone, so there is no Discard.",
 		});
 		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
 		buttons.createEl("button", { cls: "mod-cta", text: "Retry" }).addEventListener("click", () => this.plugin.retryIssues());
-		buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
+		if (discard) buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
 	}
 
 	/** The build: "Build them now?", the Build button, its status and message, and what it waits on (BLD-1, BLD-17, BLD-22, BLD-23, BLD-28). */

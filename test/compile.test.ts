@@ -10,7 +10,7 @@ import {
 	claudeArgs,
 	startCompile,
 } from "../src/compile";
-import { IssueRecord, PLAN_SCHEMA, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, titleProblem } from "../src/plan";
+import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -578,5 +578,279 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 			);
 			expect(s.github.issues).toHaveLength(1);
 		});
+	});
+});
+
+describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", () => {
+	const SYNC = /^(createIssue|editIssue|commentIssue|addSubIssue|removeSubIssue|closeIssue) /;
+	const url = (repo: string, n: number) => `https://github.com/team/${repo}/issues/${n}`;
+
+	/** Compiles `firstPlan`, commits an answer, and returns what a recompile needs. GitHub's calls start empty. */
+	async function recompiling(firstPlan: unknown, secondAnswer: unknown) {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer(firstPlan) }, { answer: secondAnswer }]);
+		const first = await compile(s.options());
+		expect(first.status).toBe("succeeded");
+		const before = structuredClone(first);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		const revision = (await out(s.vault, ["rev-parse", "--short=7", "HEAD"])).trim();
+		s.github.calls = [];
+		const head = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
+		/** Where the marker is now: "earlier" where the first compile left it, "head" once moved. */
+		const marker = async () => {
+			const at = (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+			return at === head ? "head" : at === first.toCommit ? "earlier" : at;
+		};
+		return { s, first, before, revision, marker };
+	}
+
+	// Earlier: the epic api#1 with one (api#2), two (web#3) and three (api#4).
+	const earlierPlan = { epic, issues: [issue("api", "one"), issue("web", "two"), issue("api", "three")] };
+
+	it("creates, updates, links and closes, in that order, and comments only on what changed", async () => {
+		const { s, first, before, revision , marker } = await recompiling(
+			earlierPlan,
+			answer({
+				epic: { ...epic, body: "Several pieces, again.", continues: 1, changed: "Now covers R-3." },
+				issues: [
+					{ ...issue("api", "one", "Change one better"), continues: 2, changed: "Now names R-3, answered in the note." },
+					{ ...issue("web", "two"), continues: 3, changed: "Covers the same." },
+					issue("web", "four"),
+				],
+			}),
+		);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(s.github.calls.filter((c) => SYNC.test(c))).toEqual([
+			"createIssue web Change four",
+			"addSubIssue web#5 to api#1",
+			"editIssue api#1 Ship the big thing",
+			"commentIssue api#1",
+			"editIssue api#2 Change one better",
+			"commentIssue api#2",
+			"editIssue web#3 Change two",
+			"commentIssue api#4",
+			"closeIssue api#4 not planned",
+		]);
+		expect(s.github.issue("api", 2).comments).toEqual([`Now names R-3, answered in the note.\n\nPlanned again by theory.md from revision ${revision} of the model.`]);
+		// Its title and body didn't change, so no comment (CMP-80 step 2).
+		expect(s.github.issue("web", 3).comments).toEqual([]);
+		expect(s.github.issue("web", 3).body).toContain(`- ${revision} Answer the question`);
+		expect(s.github.issue("api", 4).comments).toEqual([`No longer planned after ${revision}. The new plan is ${url("api", 1)}.`]);
+		expect([s.github.issue("api", 4).state, s.github.issue("api", 4).closedAs]).toEqual(["closed", "not planned"]);
+		expect(s.github.issue("web", 5).inProject).toBe(PROJECT_URL);
+		// The new report owns every issue it created or continued, in the new plan's order (CMP-83).
+		expect(report.issues?.map((i) => [i.kind, i.repo, i.number, i.shortName])).toEqual([
+			["epic", "api", 1, "big-thing"],
+			["issue", "api", 2, "one"],
+			["issue", "web", 3, "two"],
+			["issue", "web", 5, "four"],
+		]);
+		expect(report.closing?.map((c) => [c.repo, c.number, c.closed])).toEqual([["api", 4, true]]);
+		expect(await marker()).toBe("head");
+		// The earlier report's records were never changed.
+		expect(first).toEqual(before);
+	});
+
+	it("keeps a continued epic in its repository when another repository now has more sub-issues (CMP-64)", async () => {
+		expect(epicRepo([{ repo: "web" }, { repo: "web" }, { repo: "api" }], { repo: "api" })).toBe("api");
+		const { s, first , marker } = await recompiling(
+			{ epic, issues: [issue("api", "one"), issue("api", "two")] },
+			answer({ epic: { ...epic, continues: 1 }, issues: [issue("web", "three"), issue("web", "four"), { ...issue("api", "one"), continues: 2 }] }),
+		);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(report.issues?.[0]).toMatchObject({ kind: "epic", repo: "api", number: 1 });
+		expect(s.github.calls.filter((c) => c.startsWith("createIssue"))).toEqual(["createIssue web Change three", "createIssue web Change four"]);
+		expect(s.github.issues.filter((i) => i.repo === "web").map((i) => i.parent)).toEqual(["api#1", "api#1"]);
+		expect([s.github.issue("api", 3).state, s.github.issue("api", 3).comments]).toEqual(["closed", [expect.stringContaining(url("api", 1))]]);
+	});
+
+	it("takes a continued issue out of an epic that isn't in the plan, and closes the rest with the new issue named", async () => {
+		const { s, first, revision , marker } = await recompiling(
+			{ epic, issues: [issue("api", "one"), issue("web", "two")] },
+			answer({ issues: [{ ...issue("api", "one"), continues: 2 }] }),
+		);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(s.github.calls.filter((c) => SYNC.test(c))).toEqual([
+			"editIssue api#2 Change one",
+			"removeSubIssue api#2 from api#1",
+			"commentIssue api#1",
+			"closeIssue api#1 not planned",
+			"commentIssue web#3",
+			"closeIssue web#3 not planned",
+		]);
+		expect(s.github.issue("api", 2).parent).toBeUndefined();
+		expect(s.github.issue("web", 3).comments).toEqual([`No longer planned after ${revision}. The new plan is ${url("api", 2)}.`]);
+	});
+
+	it("moves continued issues under a new epic, after leaving the old one", async () => {
+		const { s, first , marker } = await recompiling(
+			earlierPlan,
+			answer({
+				epic: { ...epic, title: "Ship it again", shortName: "again" },
+				issues: [{ ...issue("api", "one"), continues: 2 }, { ...issue("web", "two"), continues: 3 }, issue("web", "five")],
+			}),
+		);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(s.github.calls.filter((c) => /^(createIssue|addSubIssue|removeSubIssue|closeIssue) /.test(c))).toEqual([
+			"createIssue web Ship it again",
+			"createIssue web Change five",
+			"addSubIssue web#6 to web#5",
+			"removeSubIssue api#2 from api#1",
+			"addSubIssue api#2 to web#5",
+			"removeSubIssue web#3 from api#1",
+			"addSubIssue web#3 to web#5",
+			"closeIssue api#1 not planned",
+			"closeIssue api#4 not planned",
+		]);
+		expect(s.github.issues.filter((i) => i.state === "open").map((i) => `${i.repo}#${i.number} ${i.parent ?? ""}`)).toEqual([
+			"api#2 web#5",
+			"web#3 web#5",
+			"web#5 ",
+			"web#6 web#5",
+		]);
+	});
+
+	it("puts a continued single issue under a new epic", async () => {
+		const { s, first , marker } = await recompiling(
+			{ issues: [issue("api", "one")] },
+			answer({ epic, issues: [{ ...issue("api", "one"), continues: 1 }, issue("web", "two")] }),
+		);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(s.github.issue("api", 1).parent).toBe("api#2");
+		expect(s.github.issue("web", 3).parent).toBe("api#2");
+		expect(s.github.issue("api", 1).state).toBe("open");
+	});
+
+	it("closes every earlier issue with its own comment when the new plan is empty (CMP-71)", async () => {
+		const { s, first, revision , marker } = await recompiling({ issues: [issue("api", "one")] }, answer({ issues: [] }));
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(report.issues).toEqual([]);
+		expect(s.github.issue("api", 1).comments).toEqual([`The model no longer asks for this work (${revision}).`]);
+		expect(s.github.issue("api", 1).closedAs).toBe("not planned");
+		expect(await marker()).toBe("head");
+	});
+
+	// Earlier: epic api#1 with one api#2, two web#3, three api#4. The plan uses every GitHub method of the four steps.
+	const everyStep = answer({
+		epic: { ...epic, title: "Ship it again", shortName: "again" },
+		issues: [{ ...issue("api", "one", "Change one better"), continues: 2, changed: "Now names R-3." }, { ...issue("web", "two"), continues: 3 }, issue("web", "five")],
+	});
+	const finalState = (github: FakeGitHub) =>
+		github.issues.map((i) => [`${i.repo}#${i.number}`, i.title, i.state, i.parent ?? null, i.comments.length, i.inProject ?? null]);
+
+	for (const [method, step, discard] of [
+		["createIssue", "Couldn't create the issues", true],
+		["editIssue", "Couldn't update the continued issues", true],
+		["commentIssue", "Couldn't update the continued issues", false],
+		["removeSubIssue", "Couldn't link the sub-issues", false],
+		["addSubIssue", "Couldn't create the issues", true],
+		["closeIssue", "Couldn't close the earlier issues", false],
+	] as const) {
+		it(`Retry after ${method} fails carries on from there (CMP-81)`, async () => {
+			const clean = await recompiling(earlierPlan, everyStep);
+			await compile(clean.s.options({ recompile: clean.first }));
+			const expected = finalState(clean.s.github);
+
+			const { s, first , marker } = await recompiling(earlierPlan, everyStep);
+			s.github.failNext(method, "HTTP 502");
+			const seen: { failure: string; canDiscard: boolean; left: string[] }[] = [];
+			let run: Awaited<ReturnType<typeof startCompile>>;
+			run = await startCompile(s.options({ recompile: first }), (report) => {
+				if (!report.issueFailure || seen.length) return;
+				seen.push({ failure: report.issueFailure, canDiscard: canDiscard(report.issues ?? [], report.closing), left: stepsLeft(report.issues ?? [], report.closing) });
+				setTimeout(() => run.retryIssues(), 0);
+			});
+			const report = await run.done;
+			expect(seen).toHaveLength(1);
+			expect(seen[0].failure).toBe(`${step}: HTTP 502`);
+			// Discard is offered only while no earlier issue has changed.
+			expect(seen[0].canDiscard).toBe(discard);
+			expect(seen[0].left.length).toBeGreaterThan(0);
+			expect(seen[0].left.at(-1)).toBe("Close api#4 as not planned.");
+			expect(report.status).toBe("succeeded");
+			expect(finalState(s.github)).toEqual(expected);
+			expect(await marker()).toBe("head");
+		});
+	}
+
+	it("lists what's still to do when a step fails", async () => {
+		const { s, first , marker } = await recompiling(earlierPlan, everyStep);
+		s.github.failNext("removeSubIssue", "HTTP 502");
+		let left: string[] = [];
+		let run: Awaited<ReturnType<typeof startCompile>>;
+		run = await startCompile(s.options({ recompile: first }), (report) => {
+			if (!report.issueFailure || left.length) return;
+			left = stepsLeft(report.issues ?? [], report.closing);
+			setTimeout(() => run.retryIssues(), 0);
+		});
+		await run.done;
+		expect(left).toEqual([
+			"Remove api#2 from api#1.",
+			"Link api#2 to web#5.",
+			"Remove web#3 from api#1.",
+			"Link web#3 to web#5.",
+			"Close api#1 as not planned.",
+			"Close api#4 as not planned.",
+		]);
+	});
+
+	it("Discard before an earlier issue changed closes only the new issues, and the earlier ones stay as they were", async () => {
+		const { s, first, before , marker } = await recompiling(earlierPlan, everyStep);
+		s.github.failNext("editIssue", "HTTP 502");
+		const report = await compile(s.options({ recompile: first }), ["discard"]);
+		expect(report.status).toBe("failed");
+		expect(s.github.issues.map((i) => [`${i.repo}#${i.number}`, i.title, i.state])).toEqual([
+			["api#1", "Ship the big thing", "open"],
+			["api#2", "Change one", "open"],
+			["web#3", "Change two", "open"],
+			["api#4", "Change three", "open"],
+			["web#5", "Ship it again", "closed"],
+			["web#6", "Change five", "closed"],
+		]);
+		expect(await marker()).toBe("earlier");
+		expect(first).toEqual(before);
+	});
+
+	it("offers no Discard once an earlier issue changed: Discard does nothing, and Cancel stops without closing", async () => {
+		const { s, first , marker } = await recompiling(earlierPlan, everyStep);
+		s.github.failNext("commentIssue", "HTTP 502");
+		let run: Awaited<ReturnType<typeof startCompile>>;
+		let asked = false;
+		run = await startCompile(s.options({ recompile: first }), (report) => {
+			if (!report.issueFailure || asked) return;
+			asked = true;
+			setTimeout(() => {
+				run.discardIssues();
+				setTimeout(() => {
+					expect(report.status).toBe("running");
+					run.cancel();
+				}, 20);
+			}, 0);
+		});
+		const report = await run.done;
+		expect(report.status).toBe("cancelled");
+		expect(s.github.issues.every((i) => i.state === "open")).toBe(true);
+		expect(s.github.issue("api", 2).title).toBe("Change one better");
+		const text = report.problems.map((p) => p.text).join("\n");
+		expect(text).toContain("Couldn't update the continued issues: HTTP 502 GitHub doesn't match the plan yet, and the last compile marker didn't move. Still to do: Update api#2.");
+		expect(await marker()).toBe("earlier");
+	});
+
+	it("leaves the earlier compile's issues and report as they were when a recompile fails (CMP-82)", async () => {
+		const { s, first, before , marker } = await recompiling(earlierPlan, answer({ issues: [] }, "failed"));
+		const issues = structuredClone(s.github.issues);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("failed");
+		expect(s.github.calls.filter((c) => SYNC.test(c))).toEqual([]);
+		expect(s.github.issues).toEqual(issues);
+		expect(first).toEqual(before);
+		// The marker follows CMP-22: Claude ran.
+		expect(await marker()).toBe("head");
 	});
 });

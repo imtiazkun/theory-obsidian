@@ -9,7 +9,7 @@ import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./an
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { IssueRecord, PLAN_SCHEMA, createIssues, discardIssues, isEmptyPlan, issueRecords, readPlan } from "./plan";
+import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { toolPath } from "./tool-path";
 import { git, isInDotFolder } from "./vault";
@@ -160,8 +160,10 @@ export interface CompileReport {
 	agent?: CompileAgent;
 	/** The issues this compile planned, the epic first, as far as they were created (REP-40). */
 	issues?: IssueRecord[];
-	/** Set while creating an issue failed and the report waits for Retry or Discard (CMP-68). */
+	/** Set while creating an issue failed and the report waits for Retry or Discard (CMP-68, CMP-81). */
 	issueFailure?: string;
+	/** In a recompile: the earlier compile's open issues its plan doesn't continue, closed in step 4 (CMP-80). */
+	closing?: ClosingIssue[];
 	/** The build of this compile's issues, once one started (BLD-3). */
 	build?: BuildRecord;
 	/** Pull requests for this compile's work: those a build opened, and those opened with Create PR. */
@@ -905,9 +907,12 @@ export interface CompileRun {
 	requests: PermissionRequest[];
 	answer(id: string, answer: PermissionAnswer): void;
 	cancel(): void;
-	/** After creating an issue failed: Retry creates the issues still missing (CMP-68). */
+	/** After a GitHub step failed: Retry carries on from there (CMP-68, CMP-81). */
 	retryIssues(): void;
-	/** After creating an issue failed: Discard closes the issues already created as not planned (CMP-68). */
+	/**
+	 * After a GitHub step failed: Discard closes the issues already created as not planned (CMP-68). Does nothing
+	 * once an earlier issue changed on GitHub (CMP-81).
+	 */
 	discardIssues(): void;
 }
 
@@ -1032,7 +1037,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 
 	let cancelled = false;
 	// Set while the report waits for Retry or Discard (CMP-68).
-	let choose: ((choice: "retry" | "discard") => void) | null = null;
+	let choose: ((choice: "retry" | "discard" | "stop") => void) | null = null;
 	const markCompiled = () => git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
 
 	const done = (async () => {
@@ -1115,34 +1120,47 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				return report;
 			}
 
-			if (isEmptyPlan(plan)) {
+			const empty = isEmptyPlan(plan);
+			// The plugin, never Claude, brings GitHub in line with the plan, only once it passed CMP-70 (CMP-63, CMP-80).
+			// A recompile's records are copies: the earlier report stays as it was (CMP-82).
+			report.issues = empty ? [] : issueRecords(plan, new Map(repos.map((r) => [r.name, r.path])), earlier?.issues ?? []);
+			if (openEarlier) report.closing = closingIssues(openEarlier, report.issues);
+			if (report.issues.length === 0 && !report.closing?.length) {
 				// Nothing to build: the code already matches the model. No issue, no Build, and the marker moves (CMP-71).
-				report.issues = [];
 				report.status = "succeeded";
 				await markCompiled();
 				return report;
 			}
-
-			// The plugin, never Claude, creates the plan on GitHub, only once the plan passed CMP-70 (CMP-63).
-			report.issues = issueRecords(plan, new Map(repos.map((r) => [r.name, r.path])));
 			onUpdate(report);
+			const what = earlier ? "recompile" : "compile";
 			for (;;) {
 				try {
-					await createIssues(github, report.issues, revisions, options.githubProject.trim(), () => onUpdate(report));
+					await syncIssues(github, report.issues, report.closing ?? [], revisions, head, options.githubProject.trim(), () => onUpdate(report));
 					delete report.issueFailure;
 					break;
 				} catch (failure) {
-					report.issueFailure = `Couldn't create the issues: ${failure instanceof Error ? failure.message : String(failure)}`;
+					const prefix = failure instanceof SyncError ? SYNC_FAILURE[failure.step] : SYNC_FAILURE.create;
+					report.issueFailure = `${prefix}: ${failure instanceof Error ? failure.message : String(failure)}`;
 					onUpdate(report);
-					const choice = cancelled ? "discard" : await new Promise<"retry" | "discard">((resolve) => (choose = resolve));
+					const choice = cancelled ? "stop" : await new Promise<"retry" | "discard" | "stop">((resolve) => (choose = resolve));
 					choose = null;
 					if (choice === "retry" && !cancelled) continue;
-					// A GitHub failure says nothing about the model: the revisions stay pending (CMP-68).
 					const reason = report.issueFailure;
 					delete report.issueFailure;
+					if (!canDiscard(report.issues, report.closing)) {
+						// An edit on GitHub can't be undone, so nothing is closed, and the marker waits for every step (CMP-81).
+						const left = stepsLeft(report.issues, report.closing);
+						report.status = cancelled ? "cancelled" : "failed";
+						if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
+						report.problems.push(
+							plainProblem(`${reason} GitHub doesn't match the plan yet, and the last compile marker didn't move. Still to do: ${left.join(" ")}`),
+						);
+						return report;
+					}
+					// A GitHub failure says nothing about the model: the revisions stay pending (CMP-68).
 					const notClosed = await discardIssues(github, report.issues);
 					report.status = cancelled ? "cancelled" : "failed";
-					if (cancelled) report.summary = "You cancelled this compile. The last compile marker didn't move.";
+					if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
 					report.problems.push(
 						plainProblem(`${reason} The issues already created were closed as not planned, and the last compile marker didn't move.`),
 						...notClosed.map(plainProblem),
@@ -1168,12 +1186,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		cancel() {
 			if (report.status !== "running" || cancelled) return;
 			cancelled = true;
-			// Waiting for Retry or Discard, Cancel discards (CMP-18: a cancelled compile creates no issue).
-			if (choose) return choose("discard");
+			// Waiting for Retry or Discard, Cancel discards (CMP-18: a cancelled compile creates no issue), unless an
+			// earlier issue already changed, which can't be undone (CMP-81).
+			if (choose) return choose("stop");
 			session.cancel();
 		},
 		retryIssues: () => choose?.("retry"),
-		discardIssues: () => choose?.("discard"),
+		discardIssues: () => {
+			if (canDiscard(report.issues ?? [], report.closing)) choose?.("discard");
+		},
 	};
 }
 

@@ -216,7 +216,13 @@ export interface GitHub {
 	createIssue(repoPath: string, issue: { title: string; body: string; labels: string[] }): Promise<IssueRef>;
 	/** Links `sub` as a native sub-issue of the epic. */
 	addSubIssue(epicRepoPath: string, epicNumber: number, subRepoPath: string, subNumber: number): Promise<void>;
+	/** Removes `sub` from the epic's native sub-issues. */
+	removeSubIssue(epicRepoPath: string, epicNumber: number, subRepoPath: string, subNumber: number): Promise<void>;
 	addToProject(projectUrl: string, issueUrl: string, cwd: string): Promise<void>;
+	/** Replaces the issue's title and body. */
+	editIssue(repoPath: string, number: number, issue: { title: string; body: string }): Promise<void>;
+	/** Posts a comment on the issue. */
+	commentIssue(repoPath: string, number: number, body: string): Promise<void>;
 	closeIssue(repoPath: string, number: number, reason: "completed" | "not planned"): Promise<void>;
 	issueState(repoPath: string, number: number): Promise<"open" | "closed">;
 	/** Opens a pull request for a branch already pushed. Returns its web address. */
@@ -266,6 +272,19 @@ export const ghGitHub: GitHub = {
 		if (!sub || !epic) throw new Error("The repository has no GitHub origin.");
 		const { stdout } = await gh(subRepoPath, ["api", `repos/${sub}/issues/${subNumber}`, "--jq", ".id"]);
 		await gh(epicRepoPath, ["api", "-X", "POST", `repos/${epic}/issues/${epicNumber}/sub_issues`, "-F", `sub_issue_id=${stdout.trim()}`]);
+	},
+	async removeSubIssue(epicRepoPath, epicNumber, subRepoPath, subNumber) {
+		const sub = await ghGitHub.repoName(subRepoPath);
+		const epic = await ghGitHub.repoName(epicRepoPath);
+		if (!sub || !epic) throw new Error("The repository has no GitHub origin.");
+		const { stdout } = await gh(subRepoPath, ["api", `repos/${sub}/issues/${subNumber}`, "--jq", ".id"]);
+		await gh(epicRepoPath, ["api", "-X", "DELETE", `repos/${epic}/issues/${epicNumber}/sub_issue`, "-F", `sub_issue_id=${stdout.trim()}`]);
+	},
+	async editIssue(repoPath, number, issue) {
+		await gh(repoPath, ["issue", "edit", String(number), "--title", issue.title, "--body", issue.body]);
+	},
+	async commentIssue(repoPath, number, body) {
+		await gh(repoPath, ["issue", "comment", String(number), "--body", body]);
 	},
 	async addToProject(projectUrl, issueUrl, cwd) {
 		const { owner, number } = projectOf(projectUrl);
