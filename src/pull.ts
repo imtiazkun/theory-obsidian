@@ -268,7 +268,7 @@ export async function pullRepos(repos: CodeRepo[]): Promise<RepoPull[]> {
 export function compileGate(
 	vault: VaultPull | null,
 	repos: RepoPull[],
-	action: "compile" | "build" = "compile",
+	action: "compile" | "recompile" | "build" = "compile",
 ): { error: string | null; offline: boolean } {
 	if (vault?.kind === "diverged") {
 		return { error: `The vault and its remote both have new commits. Pull with rebase in git, then ${action} again.`, offline: false };

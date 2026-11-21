@@ -11,6 +11,7 @@ import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
 import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
+import { recompileProblem } from "./recompile";
 import { toolPath } from "./tool-path";
 import { git, isInDotFolder } from "./vault";
 
@@ -108,6 +109,8 @@ export interface CompileOptions extends AgentSettings {
 	 * gets its issues that are still open, which the plan may continue (CMP-77, CMP-78).
 	 */
 	recompile?: CompileReport;
+	/** Every saved report, to check again at start that `recompile` can still be recompiled (CMP-73, CMP-75). */
+	reports?: CompileReport[];
 }
 
 export interface Revision {
@@ -978,6 +981,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 	const repos = projectRepos(projectFolder);
 	await requireGitHub(github, projectFolder, repos, options.githubProject);
+	// A build may have started since the report was drawn: CMP-73 is checked again, last (CMP-75).
+	if (options.recompile) {
+		const reason = await recompileProblem(options.recompile, options.reports ?? []);
+		if (reason) throw new Error(reason);
+	}
 
 	// A recompile starts where the earlier compile started, and gets its issues that are still open (CMP-76).
 	const earlier = options.recompile;

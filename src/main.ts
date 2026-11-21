@@ -16,6 +16,7 @@ import {
 	rulesToSave,
 	withAllowedRules,
 } from "./compile";
+import { failedPrefix, startFailure } from "./recompile";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
@@ -441,6 +442,20 @@ export default class TheoryPlugin extends Plugin {
 
 	/** Compiles every revision committed since the last compile. */
 	async compile() {
+		await this.startCompileRun();
+	}
+
+	/**
+	 * Recompiles one compile, from Recompile in its report, the only way to start a recompile (CMP-72). The CMP-3
+	 * lock applies as for any compile, and CMP-73 is checked again once the other checks pass (CMP-75).
+	 */
+	async recompile(reportId: string) {
+		const earlier = this.reports.find((r) => r.id === reportId);
+		if (!earlier) return;
+		await this.startCompileRun(earlier);
+	}
+
+	private async startCompileRun(earlier?: CompileReport) {
 		if (this.isCompiling()) {
 			new Notice("A compile or build is already running.");
 			await this.showReportView();
@@ -448,7 +463,7 @@ export default class TheoryPlugin extends Plugin {
 		}
 		this.compileStarting = true;
 		try {
-			await this.runCompile();
+			await this.runCompile(earlier);
 		} finally {
 			this.compileStarting = false;
 			this.compileRun = null;
@@ -458,16 +473,19 @@ export default class TheoryPlugin extends Plugin {
 		}
 	}
 
-	private async runCompile() {
+	private async runCompile(earlier?: CompileReport) {
+		// "Recompile failed" for a recompile, as BLD-5 does for a build (CMP-75).
+		const recompile = earlier !== undefined;
+		const failed = failedPrefix(recompile);
 		let vaultPath: string;
 		let author: string;
 		try {
 			vaultPath = this.getVaultPath();
 			// The newest model into the newest code, even when automatic pulls are off (PULL-15).
 			const pull = await this.puller.pull("compile");
-			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? []);
+			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? [], earlier ? "recompile" : "compile");
 			if (gate.error) {
-				new Notice(`Compile failed: ${gate.error}`, 10000);
+				new Notice(`${failed}: ${gate.error}`, 10000);
 				return;
 			}
 			if (gate.offline) new Notice("Couldn't reach the remote, so this compile uses the local vault and code.", 8000);
@@ -482,7 +500,7 @@ export default class TheoryPlugin extends Plugin {
 			}
 			author = (await requireIdentity(vaultPath)).name;
 		} catch (error) {
-			new Notice(failure("Compile failed", error), 10000);
+			new Notice(startFailure(recompile, error), 10000);
 			return;
 		}
 
@@ -498,6 +516,7 @@ export default class TheoryPlugin extends Plugin {
 					...agentSettings,
 					author,
 					githubProject,
+					...(earlier ? { recompile: earlier, reports: this.reports } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
@@ -512,7 +531,7 @@ export default class TheoryPlugin extends Plugin {
 			);
 		} catch (error) {
 			new Notice(
-				error instanceof NothingToCompileError ? error.message : `Compile failed: ${errorMessage(error)}`,
+				error instanceof NothingToCompileError ? error.message : startFailure(recompile, error),
 				error instanceof NothingToCompileError ? 4000 : 10000,
 			);
 			return;

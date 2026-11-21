@@ -8,6 +8,8 @@ import {
 	DivergedError,
 	branchCommits,
 	branchExists,
+	epicBranchName,
+	issueBranchName,
 	currentBranch,
 	defaultBranch,
 	dirtyRepos,
@@ -114,15 +116,7 @@ export interface BuildRun {
 	choose(choice: BuildChoice): void;
 }
 
-/** The issue branch's name before BLD-12 adds a number: `theory/{number}-{short name}` (BLD-10). */
-export function issueBranchName(issue: { number?: number; shortName: string }): string {
-	return `theory/${issue.number}-${issue.shortName}`;
-}
-
-/** The epic branch's name before BLD-12 adds a number: `theory/epic-{number}-{short name}` (BLD-11). */
-export function epicBranchName(epic: { number?: number; shortName: string }): string {
-	return `theory/epic-${epic.number}-${epic.shortName}`;
-}
+export { epicBranchName, issueBranchName } from "./branches";
 
 /** The newest report whose compile created issues, which the command "Build" builds (BLD-1). */
 export function buildableReport(reports: CompileReport[]): CompileReport | null {

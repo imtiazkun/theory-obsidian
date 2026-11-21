@@ -69,6 +69,7 @@ theory.md is a desktop-only Obsidian plugin (plugin id `theory-md`). Humans writ
 | `src/agent-rows.ts` | The task rows (Compile, Build, Expand, Writing): migration from older data and resolving "Same as Compile" |
 | `src/project.ts` | Finds the git repos in the project folder; native folder picker |
 | `src/branches.ts` | Git helpers for builds: uncommitted-change check, the default branch, fast-forwarding a branch to its upstream, unique branch names (`-2`, `-3`), merged checks, pushing a branch |
+| `src/recompile.ts` | When a compile can be recompiled (`recompileBlocker`, CMP-73, plus `recompileProblem`'s branch check at start), how the report draws Recompile (`recompileButton`, CMP-72 to CMP-74), and the "Compile failed" / "Recompile failed" prefix (`failedPrefix`, `startFailure`, CMP-75) |
 | `src/plan.ts` | The plan in a compile's answer: its shape, its checks (CMP-59 to CMP-62), where the epic goes, creating, linking, adding to the project and discarding the issues, and a recompile's update, relink and close steps (`syncIssues`) |
 | `src/build.ts` | Build: its checks, the issue and epic branches, running Claude for each issue, pushing, opening and merging pull requests, Retry/Skip/Stop and Cancel, and the epic's Create PR candidates |
 | `src/pr-states.ts` | Refreshes pull request states: only draft and open ones, across every report, side by side, one refresh at a time, focus refreshes at most every 30 seconds |
@@ -151,7 +152,9 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 - **Past commits:** clicking a commit in commit history opens it read-only on the Commit page, in its own tab that the next click reuses: full message, author, date, short hash, then every file the commit changed with its own diff against its first parent (the empty tree for the first commit), the clicked note first. No checkboxes, message box or Commit button.
 
 ### W4. Compile (the core pipeline)
-**Trigger:** the compile button, the ribbon hammer or the command "Compile".
+**Trigger:** the compile button, the ribbon hammer, the command "Compile", or Recompile in a compile report (CMP-1, `TheoryPlugin.recompile(reportId)`, the only way to start a recompile, CMP-72).
+
+**Recompile in the report** (`recompileButton`, drawn next to Build in "Build them now?" and in the build row). It shows for a succeeded compile that created issues while `recompileBlocker` finds nothing (CMP-73): no recompile of it succeeded or changed an earlier issue on GitHub (`!canDiscard`), no later compile succeeded, no issue has a recorded build branch, no epic branch was recorded and no pull request was opened. It is disabled with the tooltip "Commit your answers to the model first." while no revision is pending (CMP-74; the view counts them with `pendingRevisionCount` on each draw), and while a compile or build runs. A recompile runs every check below, with "Recompile failed:" in place of "Compile failed:" (`startFailure`, CMP-75).
 
 **Phase A: checks in `main.ts`** (if one fails, it shows a notice and does nothing else)
 1. If a compile or build is already running (or starting), show "A compile or build is already running." and open the report. This is an in-memory lock, one compile or build per app.
@@ -166,6 +169,7 @@ Compile button states (`src/compile-button.ts`, `readState`), checked in this or
 7. If `from === head`, or every revision in `from..head` changes only dot folders, it throws `NothingToCompileError` ("Every committed revision is already compiled.").
 7a. Every repository in the project folder must have a clean working tree (`git status --porcelain`), else "These repositories have uncommitted changes: {repos}. Commit or stash them first."
 7b. GitHub (`requireGitHub`, with the `GitHub` interface in `src/github.ts`; tests pass a fake): `gh` must be logged in ("Log in to GitHub first. Run gh auth login in a terminal."), every repository must have a GitHub `origin` ("These repositories have no GitHub origin: {repos}."), and the GitHub Project setting must be set ("Choose the GitHub Project in theory.md settings first.") and reachable with `gh project view` ("Couldn't reach the GitHub Project {url}: {reason}").
+7c. In a recompile, CMP-73 again (`recompileProblem`, with `options.reports`): `recompileBlocker`, then whether `theory/{n}-{short name}` or the epic's `theory/epic-{n}-{short name}` exists for any of its issues, locally or under `refs/remotes/origin/`. A reason throws, shown as "Recompile failed: {reason}" (CMP-75), and the marker stays.
 8. `revisions` = `git log --reverse from..head -- <DOT_FOLDERS>` (hash, author, ISO date, subject), so revisions that change only dot folders aren't listed.
 9. `diff` = `git diff --stat --patch <from or EMPTY_TREE> head -- <NOT_SENT>`, cut at 200,000 characters. `notes` = the `.md` files changed in that range (`git diff --name-only`, same pathspecs), kept as suspects for the overlay. `NOT_SENT` excludes dot folders, hidden folders, hidden notes and `Instructions.md`.
 10. Snapshot: `git archive head -- <NOT_SENT>` into a new temp folder, extract it, then `chmod -R a-w`.
@@ -301,6 +305,7 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 | Nothing new since the marker | startCompile | No | "Every committed revision is already compiled." |
 | A repository has uncommitted changes | startCompile | No | "Compile failed: These repositories have uncommitted changes: …" |
 | `gh` logged out, a repository without a GitHub origin, or no GitHub Project | startCompile | No | "Compile failed: …" |
+| A recompile's compile can no longer be recompiled (CMP-73) | startCompile | No | "Recompile failed: {reason}" (every other check also says "Recompile failed:" in a recompile) |
 | The plan breaks CMP-59 to CMP-62 | done | Yes | Failed report naming each reason, no issue created |
 | Creating an issue fails | done | Retry: when it works; Discard: No | The report asks Retry or Discard |
 | A recompile's GitHub step fails (CMP-81) | done | Retry: when every step is done; Discard or Cancel: No | The report lists what's still to do and asks Retry, or Discard while no earlier issue has changed |

@@ -52,6 +52,16 @@ export async function dirtyRepos(projectFolder: string, repos: CodeRepo[] = proj
 	return dirty;
 }
 
+/** The issue branch's name before BLD-12 adds a number: `theory/{number}-{short name}` (BLD-10). */
+export function issueBranchName(issue: { number?: number; shortName: string }): string {
+	return `theory/${issue.number}-${issue.shortName}`;
+}
+
+/** The epic branch's name before BLD-12 adds a number: `theory/epic-{number}-{short name}` (BLD-11). */
+export function epicBranchName(epic: { number?: number; shortName: string }): string {
+	return `theory/epic-${epic.number}-${epic.shortName}`;
+}
+
 export function isCompileBranch(branch: string | null): boolean {
 	return branch?.startsWith(COMPILE_BRANCH_PREFIX) === true;
 }
