@@ -14,6 +14,8 @@ export interface FakeIssue {
 	/** The epic it was linked to, as "{repo}#{number}". */
 	parent?: string;
 	inProject?: string;
+	/** Comments posted on it, in order. */
+	comments: string[];
 }
 
 export interface FakePullRequest {
@@ -56,6 +58,11 @@ export class FakeGitHub implements GitHub {
 		}
 	}
 
+	/** Makes the next call of a method fail once with this message. */
+	failNext(name: string, message: string) {
+		this.failures.set(name, { at: (this.counts.get(name) ?? 0) + 1, message });
+	}
+
 	private repo(repoPath: string) {
 		return basename(repoPath);
 	}
@@ -89,7 +96,7 @@ export class FakeGitHub implements GitHub {
 		this.call("createIssue", `${repo} ${issue.title}`);
 		const number = this.next++;
 		const url = `https://github.com/team/${repo}/issues/${number}`;
-		this.issues.push({ repo, number, url, ...issue, state: "open" });
+		this.issues.push({ repo, number, url, ...issue, state: "open", comments: [] });
 		return { number, url };
 	}
 
@@ -101,7 +108,28 @@ export class FakeGitHub implements GitHub {
 
 	async addSubIssue(epicRepoPath: string, epicNumber: number, subRepoPath: string, subNumber: number) {
 		this.call("addSubIssue", `${this.repo(subRepoPath)}#${subNumber} to ${this.repo(epicRepoPath)}#${epicNumber}`);
-		this.issue(this.repo(subRepoPath), subNumber).parent = `${this.repo(epicRepoPath)}#${epicNumber}`;
+		const sub = this.issue(this.repo(subRepoPath), subNumber);
+		const parent = `${this.repo(epicRepoPath)}#${epicNumber}`;
+		// GitHub refuses a sub-issue that already has another parent.
+		if (sub.parent && sub.parent !== parent) throw new Error(`It is already a sub-issue of ${sub.parent}.`);
+		sub.parent = parent;
+	}
+
+	async removeSubIssue(epicRepoPath: string, epicNumber: number, subRepoPath: string, subNumber: number) {
+		this.call("removeSubIssue", `${this.repo(subRepoPath)}#${subNumber} from ${this.repo(epicRepoPath)}#${epicNumber}`);
+		const sub = this.issue(this.repo(subRepoPath), subNumber);
+		if (sub.parent !== `${this.repo(epicRepoPath)}#${epicNumber}`) throw new Error("It isn't a sub-issue of that epic.");
+		delete sub.parent;
+	}
+
+	async editIssue(repoPath: string, number: number, edit: { title: string; body: string }) {
+		this.call("editIssue", `${this.repo(repoPath)}#${number} ${edit.title}`);
+		Object.assign(this.issue(this.repo(repoPath), number), edit);
+	}
+
+	async commentIssue(repoPath: string, number: number, body: string) {
+		this.call("commentIssue", `${this.repo(repoPath)}#${number}`);
+		this.issue(this.repo(repoPath), number).comments.push(body);
 	}
 
 	async addToProject(projectUrl: string, issueUrl: string) {
