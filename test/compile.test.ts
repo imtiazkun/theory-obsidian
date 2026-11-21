@@ -11,6 +11,8 @@ import {
 	startCompile,
 } from "../src/compile";
 import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
+import { COMMIT_ANSWERS_FIRST, failedPrefix, recompileBlocker, recompileButton, startFailure } from "../src/recompile";
+import { IdentityError } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -852,5 +854,207 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		expect(first).toEqual(before);
 		// The marker follows CMP-22: Claude ran.
 		expect(await marker()).toBe("head");
+	});
+});
+
+describe("offering Recompile (CMP-72 to CMP-74)", () => {
+	const record = (n: number, extra: Partial<IssueRecord> = {}): IssueRecord => ({
+		kind: "issue",
+		repo: "api",
+		repoPath: "/project/api",
+		title: `Change ${n}`,
+		body: "Build it.",
+		rules: ["R-1"],
+		shortName: `change-${n}`,
+		number: n,
+		...extra,
+	});
+	const report = (id: string, startedAt: string, extra: Partial<CompileReport> = {}): CompileReport => ({
+		id,
+		status: "succeeded",
+		startedAt,
+		fromCommit: null,
+		toCommit: "abc",
+		revisions: [],
+		summary: "",
+		changes: [],
+		questions: [],
+		problems: [],
+		log: [],
+		issues: [record(1)],
+		...extra,
+	});
+	const earlier = () => report("1", "2026-11-01T10:00:00.000Z");
+
+	it("is offered for a compile that created issues, nothing built and no later compile", () => {
+		const r = earlier();
+		expect(recompileBlocker(r, [r])).toBeNull();
+		expect(recompileButton(r, [r], 1, false)).toEqual({ shown: true, disabled: false });
+	});
+
+	it("is hidden for a compile that created no issue", () => {
+		for (const r of [
+			report("1", "2026-11-01T10:00:00.000Z", { issues: [] }),
+			report("1", "2026-11-01T10:00:00.000Z", { status: "failed" }),
+			report("1", "2026-11-01T10:00:00.000Z", { issues: [record(1, { number: undefined })] }),
+		]) {
+			expect(recompileButton(r, [r], 1, false)).toEqual({ shown: false });
+		}
+	});
+
+	it("is hidden once a later compile succeeded, and not for a later one that failed", () => {
+		const r = earlier();
+		const failed = report("2", "2026-11-02T10:00:00.000Z", { status: "failed", issues: [] });
+		expect(recompileBlocker(r, [failed, r])).toBeNull();
+		const later = report("2", "2026-11-02T10:00:00.000Z", { issues: [] });
+		expect(recompileBlocker(r, [later, r])).toMatch(/^A later compile succeeded/);
+		expect(recompileButton(r, [later, r], 1, false)).toEqual({ shown: false });
+		// An older compile that succeeded doesn't count.
+		const older = report("0", "2026-10-01T10:00:00.000Z");
+		expect(recompileBlocker(r, [r, older])).toBeNull();
+	});
+
+	it("is hidden once an issue of its plan has a build branch or a pull request", () => {
+		const branch = report("1", "2026-11-01T10:00:00.000Z", { issues: [record(1, { branch: "theory/1-change-1" })] });
+		expect(recompileBlocker(branch, [branch])).toBe("api#1 has been built on theory/1-change-1.");
+		const epicBranch = report("1", "2026-11-01T10:00:00.000Z", {
+			build: { status: "stopped", startedAt: "x", epicBranches: [{ repo: "api", repoPath: "/project/api", branch: "theory/epic-1-big", base: "main" }] },
+		});
+		expect(recompileBlocker(epicBranch, [epicBranch])).toBe("A build made the epic branch theory/epic-1-big.");
+		const pr = report("1", "2026-11-01T10:00:00.000Z", {
+			pullRequests: [{ repo: "api", repoPath: "/project/api", branch: "theory/1-change-1", base: "main", url: "https://github.com/team/api/pull/9", state: "open" }],
+		});
+		expect(recompileBlocker(pr, [pr])).toBe("A pull request was opened for this compile: https://github.com/team/api/pull/9");
+		for (const r of [branch, epicBranch, pr]) expect(recompileButton(r, [r], 1, false)).toEqual({ shown: false });
+	});
+
+	it("is hidden once recompiled, but not after a recompile that failed without changing an earlier issue (CMP-82)", () => {
+		const r = earlier();
+		const done = report("2", "2026-11-02T10:00:00.000Z", { recompileOf: "1", status: "succeeded" });
+		// A recompile is a later compile too; the reason names the recompile.
+		expect(recompileBlocker(r, [done, r])).toBe("This compile has been recompiled already.");
+		const failedEarly = report("2", "2026-11-02T10:00:00.000Z", { recompileOf: "1", status: "failed", issues: [] });
+		expect(recompileBlocker(r, [failedEarly, r])).toBeNull();
+		const touched = report("2", "2026-11-02T10:00:00.000Z", {
+			recompileOf: "1",
+			status: "failed",
+			issues: [record(1, { continued: { title: "Change 1", body: "Build it.", updated: true, touched: true } })],
+		});
+		expect(recompileBlocker(r, [touched, r])).toBe("This compile has been recompiled already.");
+		expect(recompileButton(r, [touched, r], 1, false)).toEqual({ shown: false });
+	});
+
+	it("is disabled with no pending revision, and says to commit the answers first (CMP-74)", () => {
+		const r = earlier();
+		expect(recompileButton(r, [r], 0, false)).toEqual({ shown: true, disabled: true, tooltip: COMMIT_ANSWERS_FIRST });
+		expect(COMMIT_ANSWERS_FIRST).toBe("Commit your answers to the model first.");
+		// Disabled while the count is unknown, and while a compile or build runs (CMP-3).
+		expect(recompileButton(r, [r], null, false)).toEqual({ shown: true, disabled: true });
+		expect(recompileButton(r, [r], 2, true)).toEqual({ shown: true, disabled: true });
+	});
+});
+
+describe("the checks before a recompile (CMP-75)", () => {
+	/** A compile that created api#1, then a committed answer, so a recompile has a pending revision. */
+	async function compiled() {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "one")] }) }, { answer: answer({ issues: [{ ...issue("api", "one"), continues: 1, changed: "Now says more." }] }) }]);
+		const first = await compile(s.options());
+		expect(first.status).toBe("succeeded");
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		s.github.calls = [];
+		const markerAt = async () => (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+		const before = await markerAt();
+		const recompile = (extra: Partial<CompileOptions> = {}) => s.options({ recompile: first, reports: [first], ...extra });
+		/** The notice a recompile that can't start shows, as runCompile builds it. */
+		const notice = async (options: CompileOptions) => {
+			const error = await startCompile(options, () => {}).then(
+				() => null,
+				(e: unknown) => e,
+			);
+			expect(error).not.toBeNull();
+			return startFailure(true, error);
+		};
+		return { s, first, markerAt, before, recompile, notice };
+	}
+
+	it("starts its messages with Recompile failed, and a compile's with Compile failed", () => {
+		expect(failedPrefix(true)).toBe("Recompile failed");
+		expect(failedPrefix(false)).toBe("Compile failed");
+		expect(startFailure(true, new Error("Something."))).toBe("Recompile failed: Something.");
+		expect(startFailure(false, new Error("Something."))).toBe("Compile failed: Something.");
+		expect(startFailure(true, new IdentityError("Tell git who you are first."))).toBe("Tell git who you are first.");
+	});
+
+	it("stops on the project folder first: not set, then missing (CMP-6, CMP-7)", async () => {
+		const c = await compiled();
+		expect(await c.notice(c.recompile({ projectFolder: "" }))).toBe("Recompile failed: Choose the project folder in theory.md settings first.");
+		const gone = join(c.s.root, "gone");
+		expect(await c.notice(c.recompile({ projectFolder: gone }))).toBe(`Recompile failed: The project folder doesn't exist: ${gone}`);
+		expect(await c.markerAt()).toBe(c.before);
+	});
+
+	it("stops on each code check in order, with its message, and the marker stays (CMP-36, CMP-55 to CMP-57)", async () => {
+		const c = await compiled();
+		// Every check fails, and CMP-73 too: each is fixed in turn to reach the next.
+		await out(join(c.s.project, "api"), ["branch", "theory/1-one"]);
+		write(join(c.s.project, "web"), { "wip.ts": "wip\n" });
+		c.s.github.loggedIn = false;
+		c.s.github.noOrigin.add("web");
+		const project = { githubProject: "" };
+		expect(await c.notice(c.recompile(project))).toBe(
+			"Recompile failed: These repositories have uncommitted changes: web. Commit or stash them first.",
+		);
+		await out(join(c.s.project, "web"), ["clean", "-fdq"]);
+		expect(await c.notice(c.recompile(project))).toBe(`Recompile failed: ${GH_LOGIN}`);
+		c.s.github.loggedIn = true;
+		expect(await c.notice(c.recompile(project))).toBe("Recompile failed: These repositories have no GitHub origin: web.");
+		c.s.github.noOrigin.clear();
+		expect(await c.notice(c.recompile(project))).toBe(`Recompile failed: ${NO_PROJECT}`);
+		c.s.github.projectError = "HTTP 404";
+		expect(await c.notice(c.recompile())).toBe(`Recompile failed: Couldn't reach the GitHub Project ${PROJECT_URL}: HTTP 404`);
+		c.s.github.projectError = null;
+		// CMP-73 last of all: a build branch made since the report was drawn.
+		expect(await c.notice(c.recompile())).toBe("Recompile failed: The build branch theory/1-one exists in api.");
+		expect(c.s.claude.calls()).toHaveLength(1);
+		expect(await c.markerAt()).toBe(c.before);
+	});
+
+	it("stops when CMP-73 no longer holds at start, and the marker stays", async () => {
+		const c = await compiled();
+		// A build branch only on origin, as git last fetched it.
+		const api = join(c.s.project, "api");
+		await out(api, ["update-ref", "refs/remotes/origin/theory/1-one", "HEAD"]);
+		expect(await c.notice(c.recompile())).toBe("Recompile failed: The build branch theory/1-one exists in api.");
+		await out(api, ["update-ref", "-d", "refs/remotes/origin/theory/1-one"]);
+
+		// A pull request opened since the report was drawn.
+		const withPr: CompileReport = {
+			...c.first,
+			pullRequests: [{ repo: "api", repoPath: api, branch: "theory/1-one", base: "main", url: "https://github.com/team/api/pull/5", state: "open" }],
+		};
+		expect(await c.notice(c.recompile({ recompile: withPr, reports: [withPr] }))).toBe(
+			"Recompile failed: A pull request was opened for this compile: https://github.com/team/api/pull/5",
+		);
+
+		// A later compile that succeeded.
+		const later: CompileReport = { ...c.first, id: "later", startedAt: new Date(Date.now() + 1000).toISOString(), issues: [] };
+		expect(await c.notice(c.recompile({ reports: [later, c.first] }))).toMatch(/^Recompile failed: A later compile succeeded/);
+
+		// Recompiled already.
+		const again: CompileReport = { ...c.first, id: "again", recompileOf: c.first.id, startedAt: c.first.startedAt };
+		expect(await c.notice(c.recompile({ reports: [again, c.first] }))).toBe("Recompile failed: This compile has been recompiled already.");
+
+		expect(c.s.claude.calls()).toHaveLength(1);
+		// Nothing changed on GitHub: the earlier issues stay as they were (CMP-82).
+		expect(c.s.github.calls.filter((call) => /^(createIssue|editIssue|commentIssue|closeIssue|addSubIssue|removeSubIssue) /.test(call))).toEqual([]);
+		expect(await c.markerAt()).toBe(c.before);
+	});
+
+	it("runs once every check passes", async () => {
+		const c = await compiled();
+		const report = await compile(c.recompile());
+		expect(report.status).toBe("succeeded");
+		expect(report.recompileOf).toBe(c.first.id);
 	});
 });
