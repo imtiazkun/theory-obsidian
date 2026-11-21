@@ -11,6 +11,10 @@ export interface PlannedIssue {
 	rules: string[];
 	/** Says what changes, like `commit-page-diffs`. Branches are named from it (CMP-61). */
 	shortName: string;
+	/** In a recompile: the number of the earlier issue this one continues (CMP-77). */
+	continues?: number;
+	/** In a recompile: one sentence on what changed in the issue it continues, and why (CMP-79). */
+	changed?: string;
 }
 
 /** The epic of a plan with several pieces of work. It has no repository of its own: CMP-64 places it. */
@@ -19,6 +23,10 @@ export interface PlannedEpic {
 	body: string;
 	rules: string[];
 	shortName: string;
+	/** In a recompile: the number of the earlier epic this one continues (CMP-77). */
+	continues?: number;
+	/** In a recompile: one sentence on what changed in the epic it continues, and why (CMP-79). */
+	changed?: string;
 }
 
 /** A compile's plan: one issue, or an epic with its sub-issues in build order (CMP-15, CMP-59, CMP-60). */
@@ -70,6 +78,14 @@ const ISSUE_SCHEMA = {
 		body: { type: "string", description: "What to build and why, in the model's words." },
 		rules: { type: "array", items: { type: "string" }, description: "The rule IDs the issue covers, like CMP-12. They are its acceptance criteria." },
 		shortName: { type: "string", description: "Says what changes, like commit-page-diffs: lowercase letters, digits and dashes, at most 40 characters." },
+		continues: {
+			type: "integer",
+			description: "Only in a recompile: the number of the earlier open issue this one continues. Leave it out for new work.",
+		},
+		changed: {
+			type: "string",
+			description: "Only with continues: one sentence on what changed and why, like \"Now names the description of each check, answered in STAT-10.\"",
+		},
 	},
 	required: ["repo", "title", "body", "rules", "shortName"],
 };
@@ -87,6 +103,8 @@ export const PLAN_SCHEMA = {
 				body: ISSUE_SCHEMA.properties.body,
 				rules: ISSUE_SCHEMA.properties.rules,
 				shortName: ISSUE_SCHEMA.properties.shortName,
+				continues: { ...ISSUE_SCHEMA.properties.continues, description: "Only in a recompile: the number of the earlier open epic this one continues. Leave it out for a new epic." },
+				changed: ISSUE_SCHEMA.properties.changed,
 			},
 			required: ["title", "body", "rules", "shortName"],
 		},
@@ -130,25 +148,103 @@ function named(kind: "epic" | "issue", item: { title: string; shortName: string 
 	return `An ${kind === "epic" ? "epic" : "issue"} with no title and no short name`;
 }
 
+/** The optional CMP-77 fields of a planned issue or epic: kept only when Claude set them. `bad` when `continues` isn't an issue number. */
+function continuation(raw: Record<string, unknown>): { continues?: number; changed?: string; bad?: true } {
+	const result: { continues?: number; changed?: string; bad?: true } = {};
+	if (raw.continues !== undefined && raw.continues !== null) {
+		if (typeof raw.continues === "number" && Number.isInteger(raw.continues) && raw.continues > 0) result.continues = raw.continues;
+		else result.bad = true;
+	}
+	const changed = text(raw.changed);
+	if (changed) result.changed = changed;
+	return result;
+}
+
+/** How a problem names an earlier issue: `repo#number`. */
+function earlierName(record: IssueRecord): string {
+	return `${record.repo}#${record.number}`;
+}
+
+/**
+ * The CMP-78 limits on continuing earlier issues, as problems. `earlier` is the earlier compile's issues that are
+ * still open, or null when the compile isn't a recompile, where nothing may be continued. Each problem names the
+ * issue it is about. An epic's repository isn't checked: CMP-64 keeps a continued epic where it is.
+ */
+function continuationProblems(
+	items: [kind: "epic" | "issue", item: PlannedEpic | PlannedIssue][],
+	earlier: IssueRecord[] | null,
+): string[] {
+	const problems: string[] = [];
+	const used = new Map<IssueRecord, string[]>();
+	for (const [kind, item] of items) {
+		if (item.continues === undefined) continue;
+		const who = named(kind, item);
+		const n = item.continues;
+		if (!earlier) {
+			problems.push(`${who} continues #${n}, but this compile isn't a recompile, so it can't continue an earlier issue.`);
+			continue;
+		}
+		const candidates = earlier.filter((r) => r.number === n);
+		if (candidates.length === 0) {
+			problems.push(`${who} continues #${n}, which isn't an open issue of the earlier compile.`);
+			continue;
+		}
+		let match: IssueRecord | undefined;
+		if (kind === "epic") {
+			match = candidates.find((r) => r.kind === "epic");
+			if (!match) {
+				problems.push(`${who} continues ${earlierName(candidates[0])}, which is an issue. An epic can only continue an epic.`);
+				continue;
+			}
+		} else {
+			const repo = (item as PlannedIssue).repo;
+			match = candidates.find((r) => r.kind === "issue" && r.repo === repo);
+			if (!match) {
+				const sameRepo = candidates.find((r) => r.repo === repo);
+				const otherIssue = candidates.find((r) => r.kind === "issue");
+				if (sameRepo || !otherIssue) {
+					problems.push(`${who} continues ${earlierName(sameRepo ?? candidates[0])}, which is an epic. An issue can only continue an issue.`);
+				} else {
+					problems.push(`${who} continues ${earlierName(otherIssue)}, which is in another repository. An issue must stay in its repository: "${repo}" isn't "${otherIssue.repo}".`);
+				}
+				continue;
+			}
+		}
+		used.set(match, [...(used.get(match) ?? []), who]);
+	}
+	for (const [record, users] of used) {
+		if (users.length > 1) problems.push(`${earlierName(record)} is continued more than once: ${users.join(", ")}.`);
+	}
+	return problems;
+}
+
 /**
  * Reads the plan from Claude's answer and checks it (CMP-70): one issue, or an epic with at least two sub-issues
  * (CMP-59), every issue in a repository of the project folder, every issue (the epic included) with at least one
- * rule ID, every short name and title as CMP-61 and CMP-62 say, and no short name used twice. Each problem names
- * the issue it is about. The sub-issues keep Claude's order, which is the build order (CMP-60). A plan with no
- * epic and no issues is empty: the code already matches the model (CMP-71).
+ * rule ID, every short name and title as CMP-61 and CMP-62 say, and no short name used twice. In a recompile,
+ * `earlier` is the earlier compile's issues that are still open, and the CMP-78 limits on continuing them are
+ * checked too; without it, a plan that continues anything is refused. Each problem names the issue it is about.
+ * The sub-issues keep Claude's order, which is the build order (CMP-60). A plan with no epic and no issues is
+ * empty: the code already matches the model (CMP-71).
  */
-export function readPlan(value: unknown, repos: string[]): { plan: Plan | null; problems: string[] } {
+export function readPlan(value: unknown, repos: string[], earlier: IssueRecord[] | null = null): { plan: Plan | null; problems: string[] } {
 	const problems: string[] = [];
 	if (!value || typeof value !== "object" || Array.isArray(value)) return { plan: null, problems: ["Claude's answer has no plan."] };
 	const raw = value as Record<string, unknown>;
+	const badNumbers: [kind: "epic" | "issue", item: PlannedEpic | PlannedIssue][] = [];
 	const issues: PlannedIssue[] = (Array.isArray(raw.issues) ? raw.issues : []).map((i) => {
 		const issue = (i ?? {}) as Record<string, unknown>;
-		return { repo: text(issue.repo), title: text(issue.title), body: text(issue.body), rules: strings(issue.rules), shortName: text(issue.shortName) };
+		const { bad, ...more } = continuation(issue);
+		const planned: PlannedIssue = { repo: text(issue.repo), title: text(issue.title), body: text(issue.body), rules: strings(issue.rules), shortName: text(issue.shortName), ...more };
+		if (bad) badNumbers.push(["issue", planned]);
+		return planned;
 	});
 	let epic: PlannedEpic | null = null;
 	if (raw.epic && typeof raw.epic === "object" && !Array.isArray(raw.epic)) {
 		const e = raw.epic as Record<string, unknown>;
-		epic = { title: text(e.title), body: text(e.body), rules: strings(e.rules), shortName: text(e.shortName) };
+		const { bad, ...more } = continuation(e);
+		epic = { title: text(e.title), body: text(e.body), rules: strings(e.rules), shortName: text(e.shortName), ...more };
+		if (bad) badNumbers.unshift(["epic", epic]);
 	}
 	if (epic && issues.length < 2) problems.push(`${named("epic", epic)} has fewer than two sub-issues. One piece of work is one issue.`);
 	if (!epic && issues.length > 1) problems.push("The plan has several issues and no epic. Several pieces of work need an epic.");
@@ -175,6 +271,8 @@ export function readPlan(value: unknown, repos: string[]): { plan: Plan | null; 
 	for (const [name, users] of byName) {
 		if (users.length > 1) problems.push(`The short name "${name}" is used more than once in the plan: ${users.join(", ")}.`);
 	}
+	for (const [kind, item] of badNumbers) problems.push(`${named(kind, item)} continues something that isn't an issue number.`);
+	problems.push(...continuationProblems(items, earlier));
 	return problems.length > 0 ? { plan: null, problems } : { plan: { epic, issues }, problems };
 }
 

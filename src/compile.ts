@@ -103,6 +103,11 @@ export interface CompileOptions extends AgentSettings {
 	github?: GitHub;
 	/** Called when the agent asks for a tool call. A compile denies every one without a card (CMP-13), so this never fires for it. */
 	onPermissionRequest?: (request: PermissionRequest) => void;
+	/**
+	 * The earlier compile to recompile (CMP-76): the revisions and the diff start where it started, and Claude also
+	 * gets its issues that are still open, which the plan may continue (CMP-77, CMP-78).
+	 */
+	recompile?: CompileReport;
 }
 
 export interface Revision {
@@ -127,8 +132,13 @@ export interface CompileReport {
 	status: CompileStatus;
 	startedAt: string;
 	finishedAt?: string;
-	/** Last compiled commit before this run, or null on the first compile. */
+	/**
+	 * Last compiled commit before this run, or null on the first compile. A recompile starts where the compile it
+	 * recompiles started (CMP-76), so this is that compile's start.
+	 */
 	fromCommit: string | null;
+	/** For a recompile: the id of the compile it recompiles (CMP-76). */
+	recompileOf?: string;
 	toCommit: string;
 	revisions: Revision[];
 	summary: string;
@@ -393,6 +403,44 @@ function revisionListText(revisions: Revision[]): string {
 	return revisions.map((r) => `- ${r.hash.slice(0, 7)} ${r.date} ${r.author}: ${r.subject}`).join("\n");
 }
 
+/**
+ * The earlier compile's issues that are still open, for a recompile (CMP-76): those it created, not discarded, and
+ * open on GitHub now. Throws when GitHub can't say, so the recompile can't start rather than plan from a guess.
+ */
+export async function openEarlierIssues(github: GitHub, earlier: CompileReport): Promise<IssueRecord[]> {
+	const open: IssueRecord[] = [];
+	for (const record of earlier.issues ?? []) {
+		if (record.number === undefined || record.discarded) continue;
+		let state: "open" | "closed";
+		try {
+			state = await github.issueState(record.repoPath, record.number);
+		} catch (error) {
+			throw new Error(`Couldn't check ${record.repo}#${record.number} on GitHub: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (state === "open") open.push(record);
+	}
+	return open;
+}
+
+/** The earlier compile's open issues as the prompt lists them (CMP-76): number, repository, kind, title, body, rules and short name. */
+function earlierIssuesText(issues: IssueRecord[]): string {
+	if (issues.length === 0) return "None of the earlier compile's issues is still open, so every issue in your plan is new.";
+	return issues
+		.map((i) =>
+			[
+				`### #${i.number}: ${i.title}`,
+				"",
+				`- Repository: ${i.repo}`,
+				`- Kind: ${i.kind}`,
+				`- Rules: ${i.rules.join(", ")}`,
+				`- Short name: ${i.shortName}`,
+				"",
+				i.body.trim(),
+			].join("\n"),
+		)
+		.join("\n\n");
+}
+
 /** The prompt of a compile: the rules of CMP-12 and what CMP-10 says Claude receives. */
 export function compilePrompt(params: {
 	snapshot: string;
@@ -402,8 +450,10 @@ export function compilePrompt(params: {
 	revisions: Revision[];
 	diff: string;
 	instructions: { repo: string; path: string; text: string }[];
+	/** For a recompile: the earlier compile's issues that are still open (CMP-76). `from` is then that compile's start. */
+	earlier?: IssueRecord[];
 }): string {
-	const { snapshot, projectFolder, head, from, revisions, diff, instructions } = params;
+	const { snapshot, projectFolder, head, from, revisions, diff, instructions, earlier } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
@@ -427,6 +477,7 @@ Rules:
 - List sub-issues in build order: work that other sub-issues depend on comes first. They are built one at a time, each on top of the last.
 - Every issue says what to build and why, in the model's words. It lists the rule IDs it covers in \`rules\`. Those rules are its acceptance criteria.
 - Every issue changes exactly one repository. Name it in \`repo\` as it is named above.
+- In a recompile, continue an earlier issue whenever the same work is still asked for in the same repository, even when its title, body or rules change: plan all the work again, then match it to the earlier issues. To continue one, set \`continues\` to its number, and say in \`changed\`, in one sentence, what changed and why, like "Now names the description of each check, answered in STAT-10." An epic continues only an earlier epic, and an issue (a sub-issue too) only an earlier issue in the same repository. Each earlier issue is continued at most once. A new issue is only for work no earlier issue covers. Outside a recompile, never set \`continues\`.
 - A title is a short sentence in the imperative, under 70 characters, like "Show a diff for each file on the Commit page".
 - A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it.
 - Put anything that went wrong (steps you couldn't do) in \`problems\`.
@@ -434,9 +485,23 @@ Rules:
 - Set \`status\` to "failed" if you can't plan the work.
 - Never create issues, branches or pull requests, and never touch GitHub.
 ${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}
-## Revisions since the last compile
+${
+		earlier
+			? `## This is a recompile
 
-${from ? `Last compiled revision: ${from}` : "This is the first compile, so the whole model is new."}
+It plans again the work of an earlier compile, whose issues haven't been built yet. The revisions and the changes below start where that compile started, so they cover its revisions and every revision since.
+
+${from ? `The earlier compile started from revision ${from}.` : "The earlier compile was the first compile, so the whole model is new."}
+
+## The earlier compile's open issues
+
+${earlierIssuesText(earlier)}
+
+## Revisions since the earlier compile started`
+			: `## Revisions since the last compile
+
+${from ? `Last compiled revision: ${from}` : "This is the first compile, so the whole model is new."}`
+	}
 
 ${revisionListText(revisions)}
 
@@ -897,8 +962,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 
 	const head = await headCommit(vaultPath);
-	const from = await tagCommit(vaultPath);
-	if (from === head || (await pendingRevisionCount(vaultPath)) === 0) {
+	const marker = await tagCommit(vaultPath);
+	if (marker === head || (await pendingRevisionCount(vaultPath)) === 0) {
 		throw new NothingToCompileError("Every committed revision is already compiled.");
 	}
 	// Claude plans from the committed code, never from the engineer's unfinished work (CMP-36).
@@ -908,6 +973,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 	const repos = projectRepos(projectFolder);
 	await requireGitHub(github, projectFolder, repos, options.githubProject);
+
+	// A recompile starts where the earlier compile started, and gets its issues that are still open (CMP-76).
+	const earlier = options.recompile;
+	const from = earlier ? earlier.fromCommit : marker;
+	const openEarlier = earlier ? await openEarlierIssues(github, earlier) : undefined;
 
 	const revisions = await revisionsBetween(vaultPath, from, head);
 	const diff = await modelDiff(vaultPath, from, head);
@@ -927,6 +997,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		status: "running",
 		startedAt: new Date().toISOString(),
 		fromCommit: from,
+		...(earlier ? { recompileOf: earlier.id } : {}),
 		toCommit: head,
 		revisions,
 		summary: "",
@@ -945,7 +1016,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			cwd: projectFolder,
 			snapshot,
 			protectedPaths: [vaultPath, snapshot],
-			prompt: compilePrompt({ snapshot, projectFolder, head, from, revisions, diff, instructions }),
+			prompt: compilePrompt({ snapshot, projectFolder, head, from, revisions, diff, instructions, earlier: openEarlier }),
 			schema: COMPILE_SCHEMA,
 			readOnly: true,
 			what: "compile",
@@ -1015,7 +1086,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.summary = structured.summary;
 				claimedProblems = structured.problems;
 				if (verdict === "succeeded") {
-					const read = readPlan(structured.plan, repos.map((r) => r.name));
+					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null);
 					plan = read.plan;
 					planProblems.push(...read.problems);
 					if (!plan) verdict = "failed";
