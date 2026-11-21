@@ -1,7 +1,8 @@
 import { resolveTask } from "./agent-rows";
-import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type { Anchor } from "./anchor";
 import {
+	pendingRevisionCount,
 	timeLeft,
 	type CompileReport,
 	type CompileStatus,
@@ -11,9 +12,11 @@ import {
 } from "./compile";
 import { buildPromptText, pullRequestCandidates, type BuildStatus } from "./build";
 import type { BuildState, IssueRecord } from "./plan";
+import { canDiscard, stepsLeft } from "./plan";
 import type { PullRequestState } from "./github";
 import type TheoryPlugin from "./main";
 import type { BuildChoice } from "./build";
+import { recompileButton } from "./recompile";
 import { startSuggest, type SuggestRun } from "./suggest";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -86,6 +89,8 @@ export class CompileReportView extends ItemView {
 	private drawnId: string | null = null;
 	// Reports whose "Build them now?" got Later. Only on screen: the Build button stays (BLD-1).
 	private later = new Set<string>();
+	// Pending revisions as last counted, for Recompile (CMP-74). Null until counted.
+	private pending: number | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -174,6 +179,7 @@ export class CompileReportView extends ItemView {
 		}
 		this.renderReport(report);
 		this.checkPullRequests(report);
+		this.countPending();
 		if (editing?.key) {
 			const box = contentEl.querySelector<HTMLTextAreaElement>(`textarea[data-suggestion="${editing.key}"]`);
 			box?.focus();
@@ -342,18 +348,54 @@ export class CompileReportView extends ItemView {
 		if (found.length > 0) this.refresh();
 	}
 
-	/** CMP-68: creating an issue failed, and the compile waits for Retry or Discard. */
+	/** CMP-68, CMP-81: a GitHub step failed, and the compile waits for Retry, or Discard while it is still offered. */
 	private renderIssueFailure(report: CompileReport) {
 		if (!report.issueFailure || report.status !== "running") return;
 		const card = this.contentEl.createDiv({ cls: "theory-permission-card theory-build-question" });
 		card.createDiv({ cls: "theory-permission-title", text: report.issueFailure });
+		const discard = canDiscard(report.issues ?? [], report.closing);
+		const left = stepsLeft(report.issues ?? [], report.closing);
+		if (left.length > 0) {
+			card.createDiv({ cls: "theory-report-meta", text: "Still to do on GitHub:" });
+			const list = card.createEl("ul");
+			for (const line of left) list.createEl("li", { text: line });
+		}
 		card.createDiv({
 			cls: "theory-report-meta",
-			text: "Retry creates the issues still missing. Discard closes the issues already created as not planned, and the last compile marker doesn't move.",
+			text: discard
+				? "Retry carries on from there. Discard closes the issues already created as not planned, and the last compile marker doesn't move."
+				: "Retry carries on from there. An earlier issue has already changed on GitHub, which can't be undone, so there is no Discard.",
 		});
 		const buttons = card.createDiv({ cls: "theory-permission-buttons" });
 		buttons.createEl("button", { cls: "mod-cta", text: "Retry" }).addEventListener("click", () => this.plugin.retryIssues());
-		buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
+		if (discard) buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
+	}
+
+	/** Counts the pending revisions again, and redraws when the count changed, so Recompile follows commits (CMP-74). */
+	private countPending() {
+		let vaultPath: string;
+		try {
+			vaultPath = this.plugin.getVaultPath();
+		} catch {
+			return;
+		}
+		pendingRevisionCount(vaultPath)
+			.catch(() => 0)
+			.then((pending) => {
+				if (pending === this.pending) return;
+				this.pending = pending;
+				this.refresh();
+			});
+	}
+
+	/** Recompile next to Build, while the compile can be recompiled (CMP-72 to CMP-74). Its checks run on click (CMP-75). */
+	private addRecompile(buttons: HTMLElement, report: CompileReport) {
+		const state = recompileButton(report, this.plugin.reports, this.pending, this.plugin.isCompiling());
+		if (!state.shown) return;
+		const button = buttons.createEl("button", { text: "Recompile" });
+		button.disabled = state.disabled;
+		if (state.tooltip) setTooltip(button, state.tooltip);
+		button.addEventListener("click", () => this.plugin.recompile(report.id));
 	}
 
 	/** The build: "Build them now?", the Build button, its status and message, and what it waits on (BLD-1, BLD-17, BLD-22, BLD-23, BLD-28). */
@@ -370,6 +412,7 @@ export class CompileReportView extends ItemView {
 			const now = buttons.createEl("button", { cls: "mod-cta", text: "Build" });
 			now.disabled = busy;
 			now.addEventListener("click", () => this.plugin.build(report.id));
+			this.addRecompile(buttons, report);
 			buttons.createEl("button", { text: "Later" }).addEventListener("click", () => {
 				this.later.add(report.id);
 				this.refresh();
@@ -384,6 +427,7 @@ export class CompileReportView extends ItemView {
 			button.disabled = busy;
 			button.addEventListener("click", () => this.plugin.build(report.id));
 		}
+		this.addRecompile(row, report);
 		if (build?.message) section.createEl("p", { cls: "theory-report-summary", text: build.message });
 		// BLD-28: the sub-issues a finished epic build skipped, still open.
 		if (build?.skippedLine) section.createEl("p", { cls: "theory-report-summary", text: build.skippedLine });
