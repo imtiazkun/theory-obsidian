@@ -10,10 +10,10 @@ import {
 	claudeArgs,
 	startCompile,
 } from "../src/compile";
-import { compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, titleProblem } from "../src/plan";
+import { IssueRecord, PLAN_SCHEMA, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, titleProblem } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
-import { initRepo, out, tempFolder, write } from "./helpers";
+import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
 
 const PROJECT_URL = "https://github.com/orgs/team/projects/1";
 
@@ -420,5 +420,163 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 			"Couldn't create the issues: HTTP 403 The issues already created were closed as not planned, and the last compile marker didn't move.",
 		);
 		expect(await s.marker()).toBe("");
+	});
+});
+
+describe("a recompile (CMP-76 to CMP-79)", () => {
+	const CONTINUE_RULE = "In a recompile, continue an earlier issue whenever the same work is still asked for in the same repository";
+
+	it("starts the revisions and the diff where the earlier compile started, and lists its open issues in the prompt (CMP-10, CMP-76)", async () => {
+		const s = await setup();
+		const start = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
+		await out(s.vault, ["tag", COMPILED_TAG, start]);
+		const first = await commitFiles(s.vault, { "Note.md": "# Note\n\nThe first rule.\n" }, "Write the first rule");
+		s.claude.setSteps([
+			{ answer: answer({ epic, issues: [issue("api", "one"), issue("web", "two")] }) },
+			{
+				answer: answer({
+					epic: { ...epic, continues: 1, changed: "Now covers R-3, answered in the note." },
+					issues: [{ ...issue("api", "one"), continues: 2, changed: "Now names R-3." }, issue("api", "three")],
+				}),
+			},
+		]);
+		const earlier = await compile(s.options());
+		expect(earlier.status).toBe("succeeded");
+		expect(earlier.fromCommit).toBe(start);
+		// An issue closed since then is no longer open, so it isn't offered (CMP-76).
+		s.github.issue("web", 3).state = "closed";
+		const second = await commitFiles(s.vault, { "Note.md": "# Note\n\nThe answered rule.\n" }, "Answer the question");
+
+		const report = await compile(s.options({ recompile: earlier }));
+		expect(report.status).toBe("succeeded");
+		expect(report.fromCommit).toBe(start);
+		expect(report.recompileOf).toBe(earlier.id);
+		expect(report.revisions.map((r) => r.hash)).toEqual([first, second]);
+
+		const [plain, recompile] = s.claude.calls().map((c) => c.prompt);
+		expect(plain).toContain(CONTINUE_RULE);
+		expect(plain).not.toContain("This is a recompile");
+		expect(plain).toContain(`Last compiled revision: ${start}`);
+		expect(recompile).toContain(CONTINUE_RULE);
+		expect(recompile).toContain("## This is a recompile");
+		expect(recompile).toContain(`The earlier compile started from revision ${start}.`);
+		expect(recompile).toContain(`- ${first.slice(0, 7)} `);
+		expect(recompile).toContain(`- ${second.slice(0, 7)} `);
+		// The diff covers the earlier compile's revisions too: from its start, not from the marker.
+		expect(recompile).toContain("-The rule.");
+		expect(recompile).toContain("+The answered rule.");
+		expect(recompile).toContain("### #1: Ship the big thing\n\n- Repository: api\n- Kind: epic\n- Rules: R-1, R-2\n- Short name: big-thing\n\nSeveral pieces.");
+		expect(recompile).toContain("### #2: Change one\n\n- Repository: api\n- Kind: issue\n- Rules: R-1\n- Short name: one\n\nBuild one.");
+		expect(recompile).not.toContain("Change two");
+	});
+
+	it("lets the plan's epic and issues name the issue they continue and what changed (CMP-15)", () => {
+		const props = PLAN_SCHEMA.properties;
+		expect(Object.keys(props.epic.properties)).toEqual(expect.arrayContaining(["continues", "changed"]));
+		expect(Object.keys(props.issues.items.properties)).toEqual(expect.arrayContaining(["continues", "changed"]));
+		expect(props.issues.items.required).not.toContain("continues");
+		expect(props.epic.required).not.toContain("changed");
+	});
+
+	describe("the limits on continuing (CMP-78)", () => {
+		const repos = ["api", "web"];
+		const record = (kind: "epic" | "issue", repo: string, number: number, shortName = `old-${number}`): IssueRecord => ({
+			kind,
+			repo,
+			repoPath: `/project/${repo}`,
+			title: `Old ${number}`,
+			body: "Old body.",
+			rules: ["R-1"],
+			shortName,
+			number,
+		});
+		const earlier = [record("epic", "api", 1), record("issue", "api", 2), record("issue", "web", 3)];
+		const continuing = (item: object, continues: number) => ({ ...item, continues, changed: "Now covers R-2." });
+
+		it("keeps a plan that continues open earlier issues of the same kind in the same repository", () => {
+			const { plan, problems } = readPlan(
+				{ epic: continuing(epic, 1), issues: [continuing(issue("api", "a"), 2), continuing(issue("web", "b"), 3)] },
+				repos,
+				earlier,
+			);
+			expect(problems).toEqual([]);
+			expect(plan?.epic).toEqual({ ...epic, continues: 1, changed: "Now covers R-2." });
+			expect(plan?.issues.map((i) => i.continues)).toEqual([2, 3]);
+		});
+
+		it("keeps an epic continued while most of its new sub-issues are in another repository (CMP-64)", () => {
+			const plan = { epic: continuing(epic, 1), issues: [issue("web", "a"), issue("web", "b"), issue("api", "c")] };
+			expect(readPlan(plan, repos, earlier).problems).toEqual([]);
+		});
+
+		it("refuses to continue an issue that isn't an open issue of the earlier compile", () => {
+			expect(readPlan({ issues: [continuing(issue("api", "a"), 9)] }, repos, earlier).problems).toEqual([
+				'The issue "Change a" continues #9, which isn\'t an open issue of the earlier compile.',
+			]);
+		});
+
+		it("refuses an issue that moves to another repository", () => {
+			expect(readPlan({ issues: [continuing(issue("web", "a"), 2)] }, repos, earlier).problems).toEqual([
+				'The issue "Change a" continues api#2, which is in another repository. An issue must stay in its repository: "web" isn\'t "api".',
+			]);
+		});
+
+		it("refuses an epic that continues an issue, and an issue that continues an epic", () => {
+			expect(readPlan({ epic: continuing(epic, 2), issues: [issue("api", "a"), issue("web", "b")] }, repos, earlier).problems).toEqual([
+				'The epic "Ship the big thing" continues api#2, which is an issue. An epic can only continue an epic.',
+			]);
+			expect(readPlan({ issues: [continuing(issue("api", "a"), 1)] }, repos, earlier).problems).toEqual([
+				'The issue "Change a" continues api#1, which is an epic. An issue can only continue an issue.',
+			]);
+		});
+
+		it("counts a sub-issue as an issue", () => {
+			expect(readPlan({ epic, issues: [continuing(issue("api", "a"), 2), issue("web", "b")] }, repos, earlier).problems).toEqual([]);
+			expect(readPlan({ epic, issues: [continuing(issue("api", "a"), 1), issue("web", "b")] }, repos, earlier).problems).toEqual([
+				'The issue "Change a" continues api#1, which is an epic. An issue can only continue an issue.',
+			]);
+		});
+
+		it("refuses an earlier issue continued twice", () => {
+			expect(readPlan({ epic, issues: [continuing(issue("api", "a"), 2), continuing(issue("api", "b"), 2)] }, repos, earlier).problems).toEqual([
+				'api#2 is continued more than once: The issue "Change a", The issue "Change b".',
+			]);
+		});
+
+		it("tells apart earlier issues in different repositories that share a number", () => {
+			const shared = [record("issue", "api", 4), record("issue", "web", 4)];
+			expect(readPlan({ epic, issues: [continuing(issue("api", "a"), 4), continuing(issue("web", "b"), 4)] }, repos, shared).problems).toEqual([]);
+		});
+
+		it("refuses a plan that continues anything when the compile isn't a recompile", () => {
+			expect(readPlan({ issues: [continuing(issue("api", "a"), 2)] }, repos).problems).toEqual([
+				'The issue "Change a" continues #2, but this compile isn\'t a recompile, so it can\'t continue an earlier issue.',
+			]);
+			expect(readPlan({ epic: continuing(epic, 1), issues: [issue("api", "a"), issue("web", "b")] }, repos).problems).toEqual([
+				'The epic "Ship the big thing" continues #1, but this compile isn\'t a recompile, so it can\'t continue an earlier issue.',
+			]);
+		});
+
+		it("refuses a continued number that isn't an issue number", () => {
+			expect(readPlan({ issues: [{ ...issue("api", "a"), continues: "2" }] }, repos, earlier).problems).toEqual([
+				'The issue "Change a" continues something that isn\'t an issue number.',
+			]);
+		});
+
+		it("fails a recompile whose plan breaks a limit, as CMP-17 says", async () => {
+			const s = await setup();
+			s.claude.setSteps([
+				{ answer: answer({ issues: [issue("api", "one")] }) },
+				{ answer: answer({ issues: [continuing(issue("web", "one"), 1)] }) },
+			]);
+			const first = await compile(s.options());
+			await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer");
+			const report = await compile(s.options({ recompile: first }));
+			expect(report.status).toBe("failed");
+			expect(report.problems.map((p) => p.text)).toContain(
+				'The issue "Change one" continues api#1, which is in another repository. An issue must stay in its repository: "web" isn\'t "api".',
+			);
+			expect(s.github.issues).toHaveLength(1);
+		});
 	});
 });
