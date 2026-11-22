@@ -319,5 +319,5 @@ A second right-sidebar tab, beside the commit history, lists the reports in plug
 
 ## 9. Not yet built
 
-- Single user and local only: one engineer, one vault and one project folder on one machine.
-- Planned: a server with a shared git remote, the `theory/compiled` tag pushed for the whole team and a shared compile lock.
+- Team-wide marker and lock: several engineers share the model through the vault's `origin` (signed commits, push, pull, hooks), but the `theory/compiled` tag and the compile lock stay on each machine.
+- Planned: a server that pushes the `theory/compiled` tag for the whole team and holds a shared compile lock.
