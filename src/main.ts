@@ -44,6 +44,7 @@ import {
 	buildStartDetails,
 	commitDetails,
 	compileEndDetails,
+	compileStartDetails,
 	headCommitDetails,
 	permissionDetails,
 	pushDetails,
@@ -539,7 +540,7 @@ export default class TheoryPlugin extends Plugin {
 
 		this.compileRun = run;
 		this.compileStarting = false;
-		this.hooks.fire("compile-start", { status: "running", revisions: run.report.revisions.length });
+		this.hooks.fire("compile-start", compileStartDetails(run.report));
 		this.reports = [run.report, ...this.reports].slice(0, MAX_REPORTS);
 		this.statusBar?.setText("Compiling…");
 		this.statusBar?.show();

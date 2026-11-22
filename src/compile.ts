@@ -142,6 +142,11 @@ export interface CompileReport {
 	fromCommit: string | null;
 	/** For a recompile: the id of the compile it recompiles (CMP-76). */
 	recompileOf?: string;
+	/**
+	 * For a recompile: the earlier compile's date and revision range, kept here so the report and the hooks can
+	 * name it even once its own report is gone (REP-42, HOOK-3).
+	 */
+	earlier?: { startedAt: string; fromCommit: string | null; toCommit: string };
 	toCommit: string;
 	revisions: Revision[];
 	summary: string;
@@ -1010,7 +1015,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		status: "running",
 		startedAt: new Date().toISOString(),
 		fromCommit: from,
-		...(earlier ? { recompileOf: earlier.id } : {}),
+		...(earlier
+			? { recompileOf: earlier.id, earlier: { startedAt: earlier.startedAt, fromCommit: earlier.fromCommit, toCommit: earlier.toCommit } }
+			: {}),
 		toCommit: head,
 		revisions,
 		summary: "",

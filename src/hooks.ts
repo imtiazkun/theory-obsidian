@@ -246,15 +246,46 @@ function issueDetails(issue: IssueRecord): Record<string, unknown> {
 	return { repo: issue.repo, number: issue.number ?? null, title: issue.title, url: issue.url ?? null };
 }
 
-/** The details of a `compile-end` event: the status, the summary, the number of questions and the issues it created (HOOK-3). */
+/** For a recompile: that it is one, and the earlier compile's date and revision range (HOOK-3). Nothing for a compile. */
+function recompileDetails(report: CompileReport): Record<string, unknown> {
+	if (report.recompileOf === undefined) return {};
+	const earlier = report.earlier;
+	return { recompile: true, earlier: { date: earlier?.startedAt ?? null, from: earlier?.fromCommit ?? null, to: earlier?.toCommit ?? null } };
+}
+
+/** The details of a `compile-start` event: the number of revisions, and for a recompile the earlier compile (HOOK-3). */
+export function compileStartDetails(report: CompileReport): Record<string, unknown> {
+	return { status: "running", revisions: report.revisions.length, ...recompileDetails(report) };
+}
+
+/**
+ * The details of a `compile-end` event: the status, the summary, the number of questions and the issues it created
+ * (HOOK-3). A recompile also names the earlier compile, and lists the issues it created, continued and closed, each
+ * in its own list, as far as it got on GitHub. `issues` and `epic` are then every issue its report owns (CMP-83).
+ */
 export function compileEndDetails(report: CompileReport): Record<string, unknown> {
-	const created = (report.issues ?? []).filter((i) => i.number !== undefined && !i.discarded);
-	return {
+	const owned = (report.issues ?? []).filter((i) => i.number !== undefined && !i.discarded);
+	const details: Record<string, unknown> = {
 		status: report.status,
 		summary: report.summary,
 		questions: report.questions.length,
-		issues: created.filter((i) => i.kind === "issue").map(issueDetails),
-		epic: created.filter((i) => i.kind === "epic").map(issueDetails)[0] ?? null,
+		issues: owned.filter((i) => i.kind === "issue").map(issueDetails),
+		epic: owned.filter((i) => i.kind === "epic").map(issueDetails)[0] ?? null,
+	};
+	if (report.recompileOf === undefined) return details;
+	const withKind = (i: { kind: string; repo: string; number?: number; title: string; url?: string }) => ({
+		kind: i.kind,
+		repo: i.repo,
+		number: i.number ?? null,
+		title: i.title,
+		url: i.url ?? null,
+	});
+	return {
+		...details,
+		...recompileDetails(report),
+		created: owned.filter((i) => !i.continued).map(withKind),
+		continued: owned.filter((i) => i.continued?.updated).map(withKind),
+		closed: (report.closing ?? []).filter((c) => c.closed).map(withKind),
 	};
 }
 

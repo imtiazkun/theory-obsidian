@@ -7,6 +7,7 @@ import {
 	BuildOptions,
 	NOTHING_LEFT,
 	NothingLeftError,
+	RECOMPILED,
 	buildPromptText,
 	buildableReport,
 	epicBranchName,
@@ -19,7 +20,7 @@ import {
 	pullRequestCandidates,
 	startBuild,
 } from "../src/build";
-import { COMPILED_TAG, CompileReport, GH_LOGIN, NO_PROJECT } from "../src/compile";
+import { COMPILED_TAG, CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
 import type { IssueRecord } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { FakeStep, fakeClaude, repoWithOrigin } from "./fake-claude";
@@ -642,5 +643,68 @@ describe("a build after Obsidian closed, and which compile Build builds (BLD-1, 
 		];
 		expect(buildableReport(reports)?.id).toBe("2");
 		expect(buildableReport([withIssues("1", "succeeded", [])])).toBeNull();
+	});
+
+	it("never builds a recompiled compile: the command Build picks the recompile's report (CMP-83)", () => {
+		const withIssues = (id: string, status: CompileReport["status"], issues: Partial<IssueRecord>[], extra: Partial<CompileReport> = {}) =>
+			({ id, status, issues, ...extra }) as unknown as CompileReport;
+		const earlier = withIssues("1", "succeeded", [{ kind: "issue", number: 1 }]);
+		// A recompile that failed before step 1 leaves the earlier compile buildable (CMP-82).
+		expect(buildableReport([withIssues("2", "failed", [], { recompileOf: "1" }), earlier])?.id).toBe("1");
+		// A recompile with nothing left to build: the earlier compile's issues are closed, and nothing is buildable.
+		expect(buildableReport([withIssues("2", "succeeded", [], { recompileOf: "1" }), earlier])).toBeNull();
+		// A recompile that changed an earlier issue and then stopped still owns it.
+		const touched = withIssues("2", "failed", [{ kind: "issue", number: 1, continued: { title: "", body: "", updated: true, touched: true } }], {
+			recompileOf: "1",
+		});
+		expect(buildableReport([touched, earlier])).toBeNull();
+		expect(buildableReport([withIssues("2", "succeeded", [{ kind: "issue", number: 1 }], { recompileOf: "1" }), earlier])?.id).toBe("2");
+	});
+
+	it("builds a recompile's issues from the new report, in the new plan's order (CMP-83)", async () => {
+		const s = await setup();
+		// Earlier: the epic api#1 with one (api#2) and two (web#3).
+		const first = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "one" },
+				{ repo: "web", shortName: "two" },
+			],
+			true,
+		);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		const item = (repo: string, shortName: string) => ({ repo, title: `Change ${shortName}`, body: `Build ${shortName}.`, rules: ["R-1"], shortName });
+		// The new plan: three (web, new) first, then one (continued), under the same epic. Two is closed.
+		const plan = {
+			epic: { title: "Ship the big thing", body: "Build big-thing.", rules: ["R-1"], shortName: "big-thing", continues: 1, changed: "Covers the same." },
+			issues: [item("web", "three"), { ...item("api", "one"), continues: 2, changed: "Covers the same." }],
+		};
+		s.claude.setSteps([
+			{ answer: { status: "succeeded", summary: "Planned again.", plan, questions: [], problems: [] } },
+			{ commit: "three.txt", answer: built("Three.") },
+			{ commit: "one.txt", answer: built("One.") },
+		]);
+		const run = await startCompile({ ...s.options(), author: "Test Author", recompile: first, reports: [first] }, () => {});
+		const second = await run.done;
+		expect(second.status).toBe("succeeded");
+		expect(s.github.issue("web", 3).state).toBe("closed");
+		const reports = [second, first];
+
+		// The recompiled report is never built, by the command or from its own report.
+		expect(buildableReport(reports)).toBe(second);
+		await expect(startBuild(s.options(), first, reports, () => {})).rejects.toThrow(RECOMPILED);
+		expect(first.build).toBeUndefined();
+		expect(await branches(s.api.repo)).toEqual(["main"]);
+
+		await build(s, second, { reports });
+		expect(second.build?.status).toBe("finished");
+		// Claude ran once to plan, then built web#4 before api#2: the new plan's order.
+		expect(s.claude.calls().slice(1).map((c) => c.cwd)).toEqual([s.web.repo, s.api.repo]);
+		expect(second.issues?.slice(1).map((i) => [i.repo, i.number, i.branch, i.build])).toEqual([
+			["web", 4, "theory/4-three", "built"],
+			["api", 2, "theory/2-one", "built"],
+		]);
+		// The issue the recompile closed was never built.
+		expect((await branches(s.web.repo)).filter((b) => b.includes("two"))).toEqual([]);
 	});
 });

@@ -16,7 +16,7 @@ import { canDiscard, stepsLeft } from "./plan";
 import type { PullRequestState } from "./github";
 import type TheoryPlugin from "./main";
 import type { BuildChoice } from "./build";
-import { recompileButton } from "./recompile";
+import { issueFate, issueOrigin, recompileButton, recompiledBy, recompiledReport } from "./recompile";
 import { startSuggest, type SuggestRun } from "./suggest";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
@@ -87,8 +87,6 @@ export class CompileReportView extends ItemView {
 	private candidates = new Map<string, number>();
 	// The report last drawn. Switching to another report refreshes the pull request states.
 	private drawnId: string | null = null;
-	// Reports whose "Build them now?" got Later. Only on screen: the Build button stays (BLD-1).
-	private later = new Set<string>();
 	// Pending revisions as last counted, for Recompile (CMP-74). Null until counted.
 	private pending: number | null = null;
 
@@ -216,6 +214,7 @@ export class CompileReportView extends ItemView {
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
 
+		this.renderRecompileLinks(report);
 		this.renderIssueFailure(report);
 		this.renderBuild(report);
 		this.renderIssues(report);
@@ -371,6 +370,35 @@ export class CompileReportView extends ItemView {
 		if (discard) buttons.createEl("button", { text: "Discard" }).addEventListener("click", () => this.plugin.discardIssues());
 	}
 
+	/**
+	 * "Recompiled on {date}" with a link to the new report (REP-41), and "Recompiles the compile of {date}" with a
+	 * link to the earlier one (REP-42). The links are read from the reports, never from the vault (REP-10).
+	 */
+	private renderRecompileLinks(report: CompileReport) {
+		const line = (text: string, date: string, target: CompileReport | null) => {
+			const el = this.contentEl.createEl("p", { cls: "theory-report-meta theory-report-recompile" });
+			el.appendText(text);
+			const when = new Date(date).toLocaleString();
+			if (!target) {
+				el.appendText(when);
+				return;
+			}
+			const link = el.createEl("a", { text: when, href: "#" });
+			link.setAttr("aria-label", "Open that compile's report");
+			link.addEventListener("click", (event) => {
+				event.preventDefault();
+				this.show(target.id);
+			});
+		};
+		if (report.recompileOf !== undefined) {
+			const earlier = recompiledReport(report, this.plugin.reports);
+			const date = earlier?.startedAt ?? report.earlier?.startedAt;
+			if (date) line("Recompiles the compile of ", date, earlier);
+		}
+		const recompile = recompiledBy(report, this.plugin.reports);
+		if (recompile) line("Recompiled on ", recompile.startedAt, recompile);
+	}
+
 	/** Counts the pending revisions again, and redraws when the count changed, so Recompile follows commits (CMP-74). */
 	private countPending() {
 		let vaultPath: string;
@@ -402,10 +430,12 @@ export class CompileReportView extends ItemView {
 	private renderBuild(report: CompileReport) {
 		const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
 		if (report.status !== "succeeded" || issues.length === 0) return;
+		// A recompiled compile offers no Build and no Recompile: the recompile's report owns its issues (REP-41, CMP-83).
+		if (recompiledBy(report, this.plugin.reports)) return;
 		const build = report.build;
 		const busy = this.plugin.isCompiling();
 		const section = this.contentEl.createDiv({ cls: "theory-report-build" });
-		if (!build && !this.later.has(report.id)) {
+		if (!build) {
 			const ask = section.createDiv({ cls: "theory-permission-card theory-build-question" });
 			ask.createDiv({ cls: "theory-permission-title", text: buildPromptText(report) });
 			const buttons = ask.createDiv({ cls: "theory-permission-buttons" });
@@ -413,10 +443,6 @@ export class CompileReportView extends ItemView {
 			now.disabled = busy;
 			now.addEventListener("click", () => this.plugin.build(report.id));
 			this.addRecompile(buttons, report);
-			buttons.createEl("button", { text: "Later" }).addEventListener("click", () => {
-				this.later.add(report.id);
-				this.refresh();
-			});
 			return;
 		}
 		const row = section.createDiv({ cls: "theory-report-build-row" });
@@ -459,15 +485,32 @@ export class CompileReportView extends ItemView {
 		}
 	}
 
-	/** REP-40: the issues this compile created, the epic first, with their build state. */
+	/**
+	 * REP-40: the issues this compile created, the epic first, with their build state. A recompiled compile's issues
+	 * show where they went (REP-41). A recompile's are marked new or continued, with the closed ones after (REP-42).
+	 */
 	private renderIssues(report: CompileReport) {
 		const issues = report.issues ?? [];
-		if (issues.length === 0) return;
+		const closed = report.recompileOf !== undefined ? (report.closing ?? []).filter((c) => c.closed) : [];
+		if (issues.length === 0 && closed.length === 0) return;
+		const recompile = recompiledBy(report, this.plugin.reports);
 		const section = this.section("Issues", issues.length);
-		for (const issue of issues) this.issueRow(section, issue);
+		for (const issue of issues) {
+			const mark = recompile ? issueFate(issue, recompile) : report.recompileOf !== undefined ? issueOrigin(issue) : null;
+			this.issueRow(section, issue, mark);
+		}
+		if (closed.length === 0) return;
+		section.createDiv({ cls: "theory-report-meta", text: "Closed as not planned:" });
+		for (const issue of closed) {
+			const item = section.createDiv({ cls: `theory-report-issue is-${issue.kind}` });
+			item.createSpan({ cls: "theory-report-pr-repo", text: `${issue.repo}#${issue.number}` });
+			if (issue.url) item.createEl("a", { text: issue.title, href: issue.url });
+			else item.createSpan({ text: issue.title });
+			item.createSpan({ cls: "theory-pr-state is-closed", text: "closed" });
+		}
 	}
 
-	private issueRow(container: HTMLElement, issue: IssueRecord) {
+	private issueRow(container: HTMLElement, issue: IssueRecord, mark: "new" | "continued" | "closed" | null = null) {
 		const item = container.createDiv({ cls: `theory-report-issue is-${issue.kind}` });
 		item.createSpan({ cls: "theory-report-pr-repo", text: issue.number !== undefined ? `${issue.repo}#${issue.number}` : issue.repo });
 		if (issue.url) item.createEl("a", { text: issue.title, href: issue.url });
@@ -475,6 +518,7 @@ export class CompileReportView extends ItemView {
 		if (issue.kind === "epic") item.createSpan({ cls: "theory-pr-state is-epic", text: "Epic" });
 		else if (issue.discarded) item.createSpan({ cls: "theory-pr-state is-closed", text: "Discarded" });
 		else if (issue.build) item.createSpan({ cls: `theory-pr-state is-build-${issue.build}`, text: BUILD_STATE_TEXT[issue.build] });
+		if (mark) item.createSpan({ cls: `theory-pr-state is-${mark === "closed" ? "closed" : "none"}`, text: mark });
 		if (issue.branch) item.createEl("code", { cls: "theory-report-meta", text: issue.branch });
 	}
 

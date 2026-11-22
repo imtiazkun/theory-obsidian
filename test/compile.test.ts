@@ -11,7 +11,19 @@ import {
 	startCompile,
 } from "../src/compile";
 import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
-import { COMMIT_ANSWERS_FIRST, failedPrefix, recompileBlocker, recompileButton, startFailure } from "../src/recompile";
+import { compileEndDetails, compileStartDetails } from "../src/hooks";
+import {
+	COMMIT_ANSWERS_FIRST,
+	buildBranch,
+	failedPrefix,
+	issueFate,
+	issueOrigin,
+	recompileBlocker,
+	recompileButton,
+	recompiledBy,
+	recompiledReport,
+	startFailure,
+} from "../src/recompile";
 import { IdentityError } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
@@ -844,6 +856,89 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		expect(await marker()).toBe("earlier");
 	});
 
+	it("links the two reports, and says where each issue went (REP-41, REP-42)", async () => {
+		const { s, first } = await recompiling(
+			earlierPlan,
+			answer({
+				epic: { ...epic, continues: 1, changed: "Covers the same." },
+				issues: [{ ...issue("api", "one"), continues: 2, changed: "Covers the same." }, issue("web", "four")],
+			}),
+		);
+		// Before the recompile, the earlier report has no link and its issues went nowhere.
+		expect(recompiledBy(first, [first])).toBeNull();
+		const report = await compile(s.options({ recompile: first }));
+		const reports = [report, first];
+		// The links live in the reports themselves (REP-10): the recompile names the earlier compile.
+		expect(report.recompileOf).toBe(first.id);
+		expect(report.earlier).toEqual({ startedAt: first.startedAt, fromCommit: first.fromCommit, toCommit: first.toCommit });
+		expect(recompiledBy(first, reports)).toBe(report);
+		expect(recompiledReport(report, reports)).toBe(first);
+		expect(recompiledBy(report, reports)).toBeNull();
+		expect(recompiledReport(first, reports)).toBeNull();
+		// The earlier report's issues: the epic and one continued, two and three closed (REP-41).
+		expect(first.issues?.map((i) => [i.repo, i.number, issueFate(i, report)])).toEqual([
+			["api", 1, "continued"],
+			["api", 2, "continued"],
+			["web", 3, "closed"],
+			["api", 4, "closed"],
+		]);
+		// The recompile's issues: new or continued, and the closed ones after (REP-42).
+		expect(report.issues?.map((i) => [i.repo, i.number, issueOrigin(i)])).toEqual([
+			["api", 1, "continued"],
+			["api", 2, "continued"],
+			["web", 5, "new"],
+		]);
+		expect(report.closing?.filter((c) => c.closed).map((c) => [c.repo, c.number])).toEqual([
+			["web", 3],
+			["api", 4],
+		]);
+		// An issue the recompile hasn't closed yet went nowhere so far.
+		const pending = { ...report, closing: report.closing?.map((c) => ({ ...c, closed: false })) };
+		expect(issueFate(first.issues![2], pending)).toBeNull();
+	});
+
+	it("says in compile-start and compile-end that it is a recompile, with the issues created, continued and closed (HOOK-3)", async () => {
+		const { s, first } = await recompiling(
+			earlierPlan,
+			answer({
+				epic: { ...epic, continues: 1, changed: "Covers the same." },
+				issues: [{ ...issue("api", "one", "Change one better"), continues: 2, changed: "Now says more." }, issue("web", "four")],
+			}),
+		);
+		// A compile's events say nothing of a recompile.
+		expect(compileStartDetails(first)).toEqual({ status: "running", revisions: 1 });
+		expect(compileEndDetails(first)).not.toHaveProperty("recompile");
+		expect(compileEndDetails(first)).not.toHaveProperty("continued");
+
+		const report = await compile(s.options({ recompile: first }));
+		const earlier = { date: first.startedAt, from: first.fromCommit, to: first.toCommit };
+		expect(compileStartDetails(report)).toEqual({ status: "running", revisions: 2, recompile: true, earlier });
+		const details = (kind: string, repo: string, number: number, title: string) => ({ kind, repo, number, title, url: url(repo, number) });
+		expect(compileEndDetails(report)).toEqual({
+			status: "succeeded",
+			summary: "Planned.",
+			questions: 0,
+			issues: [
+				{ repo: "api", number: 2, title: "Change one better", url: url("api", 2) },
+				{ repo: "web", number: 5, title: "Change four", url: url("web", 5) },
+			],
+			epic: { repo: "api", number: 1, title: "Ship the big thing", url: url("api", 1) },
+			recompile: true,
+			earlier,
+			created: [details("issue", "web", 5, "Change four")],
+			continued: [details("epic", "api", 1, "Ship the big thing"), details("issue", "api", 2, "Change one better")],
+			closed: [details("issue", "web", 3, "Change two"), details("issue", "api", 4, "Change three")],
+		});
+	});
+
+	it("lists nothing as created, continued or closed in compile-end when the recompile failed before step 1 (CMP-82, HOOK-3)", async () => {
+		const { s, first } = await recompiling(earlierPlan, answer({ issues: [] }, "failed"));
+		const report = await compile(s.options({ recompile: first }));
+		expect(compileEndDetails(report)).toMatchObject({ status: "failed", recompile: true, issues: [], epic: null, created: [], continued: [], closed: [] });
+		// The earlier compile doesn't count as recompiled (CMP-82).
+		expect(recompiledBy(first, [report, first])).toBeNull();
+	});
+
 	it("leaves the earlier compile's issues and report as they were when a recompile fails (CMP-82)", async () => {
 		const { s, first, before , marker } = await recompiling(earlierPlan, answer({ issues: [] }, "failed"));
 		const issues = structuredClone(s.github.issues);
@@ -1027,6 +1122,20 @@ describe("the checks before a recompile (CMP-75)", () => {
 		await out(api, ["update-ref", "refs/remotes/origin/theory/1-one", "HEAD"]);
 		expect(await c.notice(c.recompile())).toBe("Recompile failed: The build branch theory/1-one exists in api.");
 		await out(api, ["update-ref", "-d", "refs/remotes/origin/theory/1-one"]);
+
+		// The name was taken, so the build made `-2` (BLD-12), here or only on origin.
+		await out(api, ["branch", "theory/1-one-2"]);
+		expect(await buildBranch(api, "theory/1-one")).toBe("theory/1-one-2");
+		expect(await c.notice(c.recompile())).toBe("Recompile failed: The build branch theory/1-one-2 exists in api.");
+		await out(api, ["branch", "-D", "theory/1-one-2"]);
+		await out(api, ["update-ref", "refs/remotes/origin/theory/1-one-3", "HEAD"]);
+		expect(await c.notice(c.recompile())).toBe("Recompile failed: The build branch theory/1-one-3 exists in api.");
+		await out(api, ["update-ref", "-d", "refs/remotes/origin/theory/1-one-3"]);
+		// Another issue's branch is not this one's: a longer short name, or another number.
+		await out(api, ["branch", "theory/1-one-more"]);
+		await out(api, ["branch", "theory/11-one"]);
+		expect(await buildBranch(api, "theory/1-one")).toBeNull();
+		await out(api, ["branch", "-D", "theory/1-one-more", "theory/11-one"]);
 
 		// A pull request opened since the report was drawn.
 		const withPr: CompileReport = {
