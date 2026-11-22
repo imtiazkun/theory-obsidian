@@ -52,7 +52,7 @@ theory.md enforces this in three ways:
 
 ## Status
 
-theory.md currently runs **locally for a single user**: one engineer, one vault and one project folder on the same machine. A server for team sync comes later.
+theory.md runs on each engineer's own machine, and a **team shares one model** through the vault's git remote. Every commit is signed and pushed, and every engineer pulls the others' revisions. The issues and pull requests a compile and build create are shared on GitHub. Hooks can post comments, commits and compiles to a shared channel, like Slack, so the team discusses each decision where everyone sees it. Until the server comes, the last-compile marker and the compile lock stay on each machine, so the team agrees who compiles.
 
 | Feature | Status |
 | --- | --- |
@@ -91,7 +91,7 @@ theory.md currently runs **locally for a single user**: one engineer, one vault 
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Hooks: your own shell commands run after a comment, a commit, a push, a compile or build starting or ending, or a permission request, with the event as JSON on stdin, like posting to Slack | Done |
-| Server: shared remote, team-wide marker and lock | Planned |
+| Server: team-wide marker and compile lock | Planned |
 
 ## Install
 

@@ -10,7 +10,7 @@ Peter Naur's *Programming as Theory Building* explains why this matters. A progr
 
 theory.md keeps the theory on the page, where the team can read it, review it and own it.
 
-- **Humans write the theoretical model.** It's a set of notes saying what the software does, why, and in some cases how. It should be detailed enough for an AI to rebuild the whole software from it, and plain enough for a new recruit to understand.
+- **Humans write the theoretical model.** It's a set of notes saying what the software does and why, and how only where the how is itself a decision. It should be detailed enough for an AI to rebuild every outcome the software has, with the code's guardrails deciding the rest, and plain enough for a new recruit to understand.
 - **AI builds the code from the model.** It reads the model and changes the code to match.
 - **The AI never writes to the model.** The people who understand the system stay the source of truth.
 
@@ -20,7 +20,7 @@ theory.md keeps the theory on the page, where the team can read it, review it an
 - **The model is human-only.** AI may help a person think, ask questions or point out gaps. The words in the model are always written by a person.
 - **Every change has an author.** Each revision of the model is signed by the engineer who wrote it, so the history shows who holds which part of the theory.
 - **Unclear means ask, not guess.** When the model is vague or contradicts itself, the AI asks a question and leaves that part alone. People answer by improving the model, so the answer is there for the next reader.
-- **The model is closed.** Behaviour the model doesn't describe shouldn't exist in the code. Something new goes into the model first.
+- **The model is closed over outcomes, open over implementation.** Every outcome a user or another system can see comes from the model, with the reason behind it. How the code reaches that outcome is left to the code and its guardrails: tests, style rules, `README.md` and `AGENTS.md`. A new outcome goes into the model first.
 - **Failures point back to the theory.** When building fails, the app shows which part of the model it came from. Fixing it is a decision a person makes.
 - **Writing ahead is allowed.** A note may describe something not yet built. It's marked as not realized, and the AI leaves it for later.
 
