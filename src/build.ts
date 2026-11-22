@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { recompiledBy } from "./recompile";
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { plainProblem } from "./anchor";
@@ -118,9 +119,19 @@ export interface BuildRun {
 
 export { epicBranchName, issueBranchName } from "./branches";
 
-/** The newest report whose compile created issues, which the command "Build" builds (BLD-1). */
+/** What a build of a recompiled compile is refused with: its issues are the recompile's now (CMP-83, REP-41). */
+export const RECOMPILED = "This compile has been recompiled. Build the issues of the new compile.";
+
+/**
+ * The newest report whose compile created issues, which the command "Build" builds (BLD-1). Never a recompiled
+ * compile: the recompile's report owns its issues (CMP-83).
+ */
 export function buildableReport(reports: CompileReport[]): CompileReport | null {
-	return reports.find((r) => r.status === "succeeded" && r.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) ?? null;
+	return (
+		reports.find(
+			(r) => r.status === "succeeded" && r.issues?.some((i) => i.kind === "issue" && i.number !== undefined) && !recompiledBy(r, reports),
+		) ?? null
+	);
 }
 
 /** "{n} issues are ready. Build them now?" (BLD-1). */
@@ -235,6 +246,8 @@ export async function startBuild(
 	onUpdate: (report: CompileReport) => void,
 ): Promise<BuildRun> {
 	const github = options.github ?? ghGitHub;
+	// A recompiled compile's issues are built from the recompile's report, in the new plan's order (CMP-83).
+	if (recompiledBy(report, reports)) throw new Error(RECOMPILED);
 	const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
 	const epic = report.issues?.find((i) => i.kind === "epic" && i.number !== undefined) ?? null;
 	if (issues.length === 0) throw new Error("This compile created no issues to build.");
