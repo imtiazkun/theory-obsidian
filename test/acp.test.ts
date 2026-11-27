@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import { describe, expect, it } from "vitest";
 import {
 	AcpPermissionOption,
@@ -161,7 +161,7 @@ describe("ACP settings (AGT-5, AGT-6)", () => {
 
 const FAKE_AGENT = `
 import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 const [plan, record] = process.argv.slice(2);
 const steps = JSON.parse(readFileSync(plan, "utf8"));
 let nextId = 1000;
@@ -328,7 +328,12 @@ describe("compiling with an ACP agent", () => {
 		expect(prompt).toContain("You are compiling a theoretical model into a plan of work.");
 		expect(prompt).toContain('"required": [\n    "status",');
 		const session = records.find((r) => r.received === "session/new")?.params;
-		expect(session.cwd).toBe(s.project);
+		// It runs in the code snapshot, as Claude Code does (CMP-13), which is gone once the compile ended (CMP-89).
+		expect(session.cwd).not.toBe(s.project);
+		expect(basename(session.cwd)).toMatch(/^theory-code-/);
+		expect(prompt).toContain(`one folder per repository under the same name: ${session.cwd}`);
+		expect(prompt).toMatch(/- app: main at [0-9a-f]{7}/);
+		expect(existsSync(session.cwd)).toBe(false);
 		expect(session.additionalDirectories).toHaveLength(1);
 		expect(records.find((r) => r.received === "initialize")?.params.clientCapabilities.terminal).toBe(false);
 		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);

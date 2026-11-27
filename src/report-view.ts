@@ -1,4 +1,5 @@
 import { resolveTask } from "./agent-rows";
+import { codeSourceText } from "./code-snapshot";
 import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type { Anchor } from "./anchor";
 import {
@@ -293,6 +294,21 @@ export class CompileReportView extends ItemView {
 				cls: "theory-report-meta",
 				text: `${r.author} · ${new Date(r.date).toLocaleString()} · ${r.hash.slice(0, 7)}`,
 			});
+		}
+
+		// The code each repository was read at, linked to its commit on GitHub (REP-43).
+		if (report.code && report.code.length > 0) {
+			const code = this.section("Code read", report.code.length);
+			for (const read of report.code) {
+				const item = code.createDiv({ cls: "theory-report-revision" });
+				const line = item.createDiv();
+				line.createSpan({ text: `${read.repo}: ${read.branch} at ` });
+				const short = read.commit.slice(0, 7);
+				if (read.url) line.createEl("a", { text: short, href: read.url });
+				else line.createSpan({ text: short });
+				const source = codeSourceText(read);
+				if (source) line.createSpan({ cls: "theory-report-meta", text: ` · ${source}` });
+			}
 		}
 
 		if (report.log.length === 0 && report.status !== "running" && !building) return;

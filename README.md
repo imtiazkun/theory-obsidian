@@ -136,10 +136,10 @@ To update, replace the three files with the ones from a newer release.
 ## Disclosures
 
 - **Network use.** theory.md makes no network requests itself and has no telemetry. It runs two command-line tools that do:
-  - The [Claude Code CLI](https://claude.com/claude-code), for Compile, Suggest, Expand and the sparkle buttons that write commit messages and pull request bodies. These send Anthropic the model's text and diffs, and Compile also sends whatever Claude reads in the project folder.
+  - The [Claude Code CLI](https://claude.com/claude-code), for Compile, Suggest, Expand and the sparkle buttons that write commit messages and pull request bodies. These send Anthropic the model's text and diffs, and Compile also sends whatever Claude reads of each repository's default branch.
   - The [GitHub CLI](https://cli.github.com) (`gh`) and `git push`, for the issues a compile creates, Build's branches and pull requests, Create PR, pull request states and New repository.
 - **Accounts.** The Claude features need Claude Code signed in to an Anthropic account, which is a paid service. The GitHub features, Compile and Build included, need `gh` signed in to GitHub with access to your GitHub Project (`gh auth refresh -s project`). Commits, history and the rest of the plugin work without either.
-- **Files outside the vault.** theory.md reads and writes the project folder you pick in the settings: Compile only reads it, Build creates `theory/*` branches there, pushes them and Claude edits the code on them, and New repository creates a folder with a `README.md` and an `AGENTS.md`. Compile also copies the model into a temp folder (`$TMPDIR/theory-model-*`) and deletes it afterwards.
+- **Files outside the vault.** theory.md reads and writes the project folder you pick in the settings: Compile only reads it, Build creates `theory/*` branches there, pushes them and Claude edits the code on them, and New repository creates a folder with a `README.md` and an `AGENTS.md`. Compile also copies the model into a temp folder (`$TMPDIR/theory-model-*`), and each repository's default branch as `origin` has it into another (`$TMPDIR/theory-code-*`), and deletes both afterwards. Claude reads the code only there, so a checkout on another branch, unpushed commits and uncommitted work never shape a compile, and the compile report lists the commit each repository was read at.
 - **License.** theory.md is open source under the [GPL-3.0](LICENSE).
 
 ## Install for development

@@ -209,6 +209,8 @@ export interface GitHub {
 	authProblem(cwd: string): Promise<string | null>;
 	/** `owner/name` of the repository's GitHub `origin`, or null when it has none. */
 	repoName(repoPath: string): Promise<string | null>;
+	/** The branch GitHub names as the repository's default (CMP-84). */
+	defaultBranch(repoPath: string): Promise<string>;
 	/** Throws with the reason when the GitHub Project can't be reached. */
 	checkProject(projectUrl: string, cwd: string): Promise<void>;
 	/** Creates the label in the repository when it is missing. */
@@ -246,6 +248,12 @@ export const ghGitHub: GitHub = {
 	async repoName(repoPath) {
 		const url = await githubOrigin(repoPath);
 		return url ? url.replace("https://github.com/", "") : null;
+	},
+	async defaultBranch(repoPath) {
+		const { stdout } = await gh(repoPath, ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+		const name = stdout.trim();
+		if (!name) throw new Error("GitHub named no default branch.");
+		return name;
 	},
 	async checkProject(projectUrl, cwd) {
 		const { owner, number } = projectOf(projectUrl);

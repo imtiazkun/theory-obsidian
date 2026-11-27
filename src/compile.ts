@@ -1,10 +1,10 @@
 import { ChildProcess, spawn } from "child_process";
-import { createHash } from "crypto";
 import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
+import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool } from "./code-snapshot";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
@@ -14,6 +14,8 @@ import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
 import { toolPath } from "./tool-path";
 import { git, isInDotFolder } from "./vault";
+
+export { removeSnapshot };
 
 /** Tag in the vault repository that marks the last compiled commit. */
 export const COMPILED_TAG = "theory/compiled";
@@ -94,8 +96,16 @@ export interface AgentSettings {
 
 export interface CompileOptions extends AgentSettings {
 	vaultPath: string;
-	/** Folder holding the project's code: one repository, or several side by side. Claude reads it here. */
+	/**
+	 * Folder holding the project's code: one repository, or several side by side. Claude never reads it here: it
+	 * reads each repository's default branch in the code snapshot (CMP-84).
+	 */
 	projectFolder: string;
+	/**
+	 * Paths of the repositories the pull before this compile fetched. The code of the others is read as of their last
+	 * fetch (CMP-87). Unset means every repository was just fetched.
+	 */
+	fetched?: string[];
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
 	/** The GitHub Project every issue is added to, as its URL (CFG-40). */
@@ -150,6 +160,8 @@ export interface CompileReport {
 	toCommit: string;
 	revisions: Revision[];
 	summary: string;
+	/** The code each repository was read at: its default branch and commit in the code snapshot (CMP-84, REP-43). */
+	code?: CodeRead[];
 	/** Changes a build made to the code, from Claude's answer for each issue. A compile makes none. */
 	changes: string[];
 	questions: Question[];
@@ -355,40 +367,6 @@ export async function createSnapshot(vaultPath: string, commit: string): Promise
 	return dir;
 }
 
-export async function removeSnapshot(dir: string) {
-	await runTool("chmod", ["-R", "u+w", dir]).catch(() => {});
-	await rm(dir, { recursive: true, force: true });
-}
-
-/** A hash of every path and file in `dir`, to check nothing in the snapshot changed. */
-async function hashTree(dir: string): Promise<string> {
-	const hash = createHash("sha256");
-	const walk = async (sub: string) => {
-		const entries = await readdir(join(dir, sub), { withFileTypes: true });
-		entries.sort((a, b) => a.name.localeCompare(b.name));
-		for (const entry of entries) {
-			const path = join(sub, entry.name);
-			hash.update(path + "\0");
-			if (entry.isDirectory()) await walk(path);
-			else if (entry.isFile()) hash.update(await readFile(join(dir, path)));
-		}
-	};
-	await walk("");
-	return hash.digest("hex");
-}
-
-function runTool(command: string, args: string[]): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, { env: { ...process.env, PATH: toolPath() } });
-		let stderr = "";
-		child.stderr.on("data", (chunk) => (stderr += chunk));
-		child.on("error", reject);
-		child.on("close", (code) =>
-			code === 0 ? resolve() : reject(new Error(`${command} failed: ${stderr.trim() || `exit ${code}`}`)),
-		);
-	});
-}
-
 /** The `instructions.md` in a repository's model folder, matched ignoring case, or null when it has none. */
 async function modelInstructions(snapshot: string, repo: string): Promise<{ path: string; text: string } | null> {
 	const folder = join(snapshot, repo);
@@ -455,6 +433,9 @@ function earlierIssuesText(issues: IssueRecord[]): string {
 export function compilePrompt(params: {
 	snapshot: string;
 	projectFolder: string;
+	/** The code snapshot, and what each repository in it was read at (CMP-10, CMP-84). */
+	codeSnapshot: string;
+	code: CodeRead[];
 	head: string;
 	from: string | null;
 	revisions: Revision[];
@@ -463,24 +444,32 @@ export function compilePrompt(params: {
 	/** For a recompile: the earlier compile's issues that are still open (CMP-76). `from` is then that compile's start. */
 	earlier?: IssueRecord[];
 }): string {
-	const { snapshot, projectFolder, head, from, revisions, diff, instructions, earlier } = params;
+	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
 	return `You are compiling a theoretical model into a plan of work.
 
-The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to read the model and the code in the project folder (the current directory), and plan the work that makes the code match the model. You don't change any code: the plugin creates your plan as GitHub issues, and a later build writes the code, one issue at a time.
+The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to read the model and the code in the code snapshot (the current directory), and plan the work that makes the code match the model. You don't change any code: the plugin creates your plan as GitHub issues, and a later build writes the code, one issue at a time.
 
 The model at revision ${head} is in this directory: ${snapshot}
 
 ${repoListText(projectFolder)}
+
+${
+		code.length > 0
+			? `The code is in this directory, one folder per repository under the same name: ${codeSnapshot}
+It is each repository's default branch as \`origin\` has it, read at:
+${code.map((read) => `- ${codeReadText(read)}`).join("\n")}`
+			: `The code snapshot is empty, because the project folder has no git repositories yet: ${codeSnapshot}`
+	}
 
 Rules:
 - The model is read-only. Never create, edit, move or delete anything in the model directory, and never write to the Obsidian vault it came from. Writing to the model is forbidden.
 - The model is the source of truth. If the code disagrees with the model, the code changes.
 - A note whose front matter has \`realized: false\` is written ahead of the code. Don't plan what it describes yet, and don't count it as a mismatch.
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
-- Read the code in the project folder to plan the work. Never change a file anywhere: you can only read, search and list.
+- Read the code only in the code snapshot. It is each repository's default branch as \`origin\` has it. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
 - Before planning work in a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in that repository's folder in the model directory, so the issues fit how that repository is built and tested.
 - Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
@@ -945,6 +934,9 @@ export async function requireGitHub(github: GitHub, cwd: string, repos: { name: 
 	}
 }
 
+/** The problem when the code snapshot changed while the agent ran (INV-14). */
+export const CODE_SNAPSHOT_CHANGED = "Claude tried to change the code snapshot. Those changes were thrown away.";
+
 /** Each repository's branch and commit, to check a compile changed none of them (CMP-69). */
 async function codeState(projectFolder: string): Promise<Map<string, string>> {
 	const state = new Map<string, string>();
@@ -1000,15 +992,30 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const revisions = await revisionsBetween(vaultPath, from, head);
 	const diff = await modelDiff(vaultPath, from, head);
 	const notes = await changedNotes(vaultPath, from, head);
-	const snapshot = await createSnapshot(vaultPath, head);
-	const guard = await guardModel(vaultPath, snapshot);
 	const codeBefore = await codeState(projectFolder);
-
+	// Claude reads each repository's default branch as origin has it, never the checkout (CMP-84). Throws when one
+	// can't be read, before anything else is made (CMP-88).
+	const fetched = new Set(options.fetched ?? repos.map((r) => r.path));
+	const code: CodeSnapshot = await createCodeSnapshot(repos, github, fetched);
+	let snapshot: string | null = null;
+	let guard: ModelGuard;
+	let codeHash: string;
 	const instructions: { repo: string; path: string; text: string }[] = [];
-	for (const repo of repos) {
-		const file = await modelInstructions(snapshot, repo.name);
-		if (file) instructions.push({ repo: repo.name, ...file });
+	try {
+		snapshot = await createSnapshot(vaultPath, head);
+		guard = await guardModel(vaultPath, snapshot);
+		codeHash = await hashTree(code.dir);
+		for (const repo of repos) {
+			const file = await modelInstructions(snapshot, repo.name);
+			if (file) instructions.push({ repo: repo.name, ...file });
+		}
+	} catch (error) {
+		// Both snapshots go whatever the outcome (INV-7, CMP-89).
+		if (snapshot) await removeSnapshot(snapshot);
+		await removeSnapshot(code.dir);
+		throw error;
 	}
+	const modelSnapshot = snapshot;
 
 	const report: CompileReport = {
 		id: `${Date.now()}`,
@@ -1020,6 +1027,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			: {}),
 		toCommit: head,
 		revisions,
+		code: code.code,
 		summary: "",
 		changes: [],
 		questions: [],
@@ -1033,10 +1041,22 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	try {
 		session = startSession({
 			settings: options,
-			cwd: projectFolder,
-			snapshot,
-			protectedPaths: [vaultPath, snapshot],
-			prompt: compilePrompt({ snapshot, projectFolder, head, from, revisions, diff, instructions, earlier: openEarlier }),
+			// The agent runs in the code snapshot, whichever agent it is (CMP-13), and may write to none of these (INV-4, INV-14).
+			cwd: code.dir,
+			snapshot: modelSnapshot,
+			protectedPaths: [vaultPath, modelSnapshot, code.dir],
+			prompt: compilePrompt({
+				snapshot: modelSnapshot,
+				projectFolder,
+				codeSnapshot: code.dir,
+				code: code.code,
+				head,
+				from,
+				revisions,
+				diff,
+				instructions,
+				earlier: openEarlier,
+			}),
 			schema: COMPILE_SCHEMA,
 			readOnly: true,
 			what: "compile",
@@ -1045,7 +1065,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			onPermissionRequest: options.onPermissionRequest,
 		});
 	} catch (error) {
-		await removeSnapshot(snapshot);
+		await removeSnapshot(modelSnapshot);
+		await removeSnapshot(code.dir);
 		throw error;
 	}
 	const agentName = agent === "acp" ? "The agent" : "Claude Code";
@@ -1062,10 +1083,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		const dropSnapshot = async () => {
 			if (snapshotGone) return;
 			snapshotGone = true;
-			await removeSnapshot(snapshot);
+			await removeSnapshot(modelSnapshot);
 		};
 		try {
 			const checked = await checkModel(guard);
+			// The code snapshot is checked as the model snapshot is, after every run in which the agent started (INV-14).
+			const codeIntact = (await hashTree(code.dir).catch(() => "")) === codeHash;
+			if (!codeIntact) checked.problems.push(plainProblem(CODE_SNAPSHOT_CHANGED));
 			// A compile never changes code (CMP-69): anything that did is the agent's own shell, and the engineer must hear.
 			const codeAfter = await codeState(projectFolder).catch(() => codeBefore);
 			const changedRepos = [...codeBefore.keys()].filter((name) => codeBefore.get(name) !== codeAfter.get(name));
@@ -1117,13 +1141,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.problems.push(plainProblem(noAnswerProblem(outcome, options)));
 			}
 
-			const { intact } = checked;
-			// Anchors are only checked against a snapshot that is still the compiled revision.
-			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			// Anchors are only checked when neither snapshot changed (INV-5, INV-14).
+			const intact = checked.intact && codeIntact;
+			report.problems.push(...(await checkProblems(intact ? modelSnapshot : null, claimedProblems)));
 			report.problems.push(...planProblems.map(plainProblem));
 			// The engineer must know which steps didn't run, whatever Claude reported.
 			report.problems.push(...outcome.skipped.map(plainProblem));
-			report.questions = await checkedQuestions(structured, intact ? snapshot : null);
+			report.questions = await checkedQuestions(structured, intact ? modelSnapshot : null);
 			if (!intact || changedRepos.length > 0) verdict = "failed";
 			report.problems.unshift(...checked.problems, ...codeProblems);
 			await dropSnapshot();
@@ -1189,6 +1213,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		} finally {
 			report.finishedAt = new Date().toISOString();
 			await dropSnapshot();
+			// The code snapshot goes whatever the outcome (CMP-89).
+			await removeSnapshot(code.dir).catch(() => {});
 			onUpdate(report);
 		}
 	})();

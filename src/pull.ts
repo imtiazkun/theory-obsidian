@@ -279,9 +279,8 @@ export function compileGate(
 			offline: false,
 		};
 	}
-	// Offline, only what git already knew is local; a repository whose fetch failed never stops the compile.
-	const stuck = repos.filter((r) => r.stuck && r.fetchError === null).map((r) => r.name);
-	if (stuck.length > 0) return { error: `Pull these repositories first: ${stuck.join(", ")}.`, offline: false };
+	// A code repository that is behind, on any branch, never stops a compile: it reads origin's default branch, not
+	// the checkout (PULL-16, CMP-84). A build checks its default branches itself (BLD-7).
 	const offline = vault?.kind === "offline" || repos.some((r) => r.fetchError !== null);
 	return { error: null, offline };
 }

@@ -1,6 +1,8 @@
-import { join } from "path";
-import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync, readdirSync } from "fs";
+import { basename, join } from "path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	CODE_SNAPSHOT_CHANGED,
 	COMPILED_TAG,
 	CompileOptions,
 	CompileReport,
@@ -24,7 +26,7 @@ import {
 	recompiledReport,
 	startFailure,
 } from "../src/recompile";
-import { IdentityError } from "../src/vault";
+import { IdentityError, git } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -174,10 +176,186 @@ describe("a read-only compile (CMP-13, CMP-69)", () => {
 		expect(report.status).toBe("succeeded");
 		expect(await state()).toEqual(before);
 		const [call] = s.claude.calls();
-		expect(call.cwd).toBe(s.project);
+		// Claude runs in the code snapshot, never in the project folder (CMP-13, CMP-84).
+		expect(call.cwd).not.toBe(s.project);
+		expect(basename(call.cwd)).toMatch(/^theory-code-/);
 		expect(call.args[call.args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep");
+		expect(call.prompt).toContain("Read the code only in the code snapshot. It is each repository's default branch as `origin` has it.");
 		expect(call.prompt).toContain("Never change a file anywhere");
 		expect(call.prompt).toContain("Never create issues, branches or pull requests, and never touch GitHub.");
+	});
+});
+
+describe("the code snapshot (CMP-84 to CMP-89, INV-14)", () => {
+	// Each test gets its own temp folder for snapshots, so it can see that every one was deleted (CMP-89).
+	let temp: string | undefined;
+	let saved: string | undefined;
+	beforeEach(() => {
+		saved = process.env.TMPDIR;
+		temp = tempFolder();
+		process.env.TMPDIR = temp;
+	});
+	afterEach(() => {
+		if (saved === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = saved;
+	});
+	const codeSnapshots = () => readdirSync(temp as string).filter((name) => name.startsWith("theory-code-"));
+
+	/** Gives the repository a bare `origin` holding its main, as a clone would have it. Returns a second clone to push from. */
+	async function addOrigin(root: string, repo: string): Promise<string> {
+		const name = basename(repo);
+		const bare = join(root, `${name}.git`);
+		await git(root, ["init", "--bare", "-b", "main", bare]);
+		await git(repo, ["remote", "add", "origin", bare]);
+		await git(repo, ["push", "--quiet", "-u", "origin", "main"]);
+		await git(repo, ["remote", "set-head", "origin", "main"]);
+		const teammate = join(root, `${name}-teammate`);
+		await git(root, ["clone", "--quiet", bare, teammate]);
+		return teammate;
+	}
+
+	/** Everything in a repository a compile must never change (CMP-85): refs, HEAD, working tree, stashes and config. */
+	const repoState = async (repo: string) => [
+		await out(repo, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+		await out(repo, ["symbolic-ref", "-q", "HEAD"]).catch(() => "detached"),
+		await out(repo, ["status", "--porcelain", "--untracked-files=all", "--ignored"]),
+		await out(repo, ["stash", "list"]),
+		readFileSync(join(repo, ".git", "config"), "utf8"),
+	];
+
+	it("holds origin's default branch: not the checkout, an unpushed commit or an ignored file, and the agent runs in it", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const teammate = await addOrigin(s.root, api);
+		// The team merged more; the pull before the compile fetched it, but the checkout can't fast-forward.
+		const merged = await commitFiles(teammate, { "merged.ts": "merged\n" }, "Merged work");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		await commitFiles(api, { "unpushed.ts": "mine\n" }, "Not pushed");
+		await git(api, ["fetch", "--quiet"]);
+		// The checkout sits on an old compile branch, with an ignored file the engineer keeps.
+		await git(api, ["checkout", "--quiet", "-b", "theory/1-old"]);
+		await commitFiles(api, { "old.ts": "old\n" }, "Old compile work");
+		write(api, { ".gitignore": "secret.env\n" });
+		await git(api, ["add", ".gitignore"]);
+		await git(api, ["commit", "--quiet", "-m", "Ignore secrets"]);
+		write(api, { "secret.env": "KEY=1\n" });
+		const before = await repoState(api);
+
+		const report = await compile(s.options({ fetched: [api] }));
+		expect(report.status).toBe("succeeded");
+		const [call] = s.claude.calls();
+		expect(basename(call.cwd)).toMatch(/^theory-code-/);
+		expect(call.cwd.startsWith(s.project)).toBe(false);
+		expect(call.files).toEqual(["api/README.md", "api/merged.ts"]);
+		expect(call.prompt).toContain(`one folder per repository under the same name: ${call.cwd}`);
+		expect(call.prompt).toContain(`- api: main at ${merged.slice(0, 7)}\n`);
+		// Every write to it is denied (INV-14).
+		expect(call.args).toContain(`Write(//${call.cwd.replace(/^\//, "")}/**)`);
+		expect(report.code).toEqual([
+			{ repo: "api", branch: "main", commit: merged, source: "origin", url: `https://github.com/team/api/commit/${merged}` },
+		]);
+		// Nothing in the repository changed (CMP-85), and the snapshot is gone (CMP-89).
+		expect(await repoState(api)).toEqual(before);
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("uses the branch GitHub names as the default", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const teammate = await addOrigin(s.root, api);
+		await git(teammate, ["checkout", "--quiet", "-b", "trunk"]);
+		const trunk = await commitFiles(teammate, { "trunk.ts": "trunk\n" }, "Trunk work");
+		await git(teammate, ["push", "--quiet", "origin", "trunk"]);
+		await git(api, ["fetch", "--quiet"]);
+		s.github.defaultBranches.set("api", "trunk");
+		const report = await compile(s.options({ fetched: [api] }));
+		expect(report.code?.[0]).toMatchObject({ branch: "trunk", commit: trunk, source: "origin" });
+		expect(s.claude.calls()[0].files).toContain("api/trunk.ts");
+	});
+
+	it("reads the last fetch when the fetch failed, and the local default branch when never fetched (CMP-87)", async () => {
+		const s = await setup(["api", "web"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const web = join(s.project, "web");
+		const teammate = await addOrigin(s.root, api);
+		const fetchedCommit = await commitFiles(teammate, { "fetched.ts": "f\n" }, "Fetched");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		await git(api, ["fetch", "--quiet"]);
+		// Pushed after the last fetch, which this compile's pull couldn't repeat.
+		await commitFiles(teammate, { "unseen.ts": "u\n" }, "Not fetched");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		// web was never fetched: it has no origin/main at all.
+		const local = await commitFiles(web, { "web.ts": "w\n" }, "Local web");
+		s.github.offline = true;
+
+		const report = await compile(s.options({ fetched: [] }));
+		expect(report.status).toBe("succeeded");
+		expect(report.code?.map((c) => [c.repo, c.branch, c.commit, c.source])).toEqual([
+			["api", "main", fetchedCommit, "last-fetch"],
+			["web", "main", local, "local"],
+		]);
+		const [call] = s.claude.calls();
+		expect(call.files).toEqual(["api/README.md", "api/fetched.ts", "web/README.md", "web/web.ts"]);
+		expect(call.prompt).toContain(`- api: main at ${fetchedCommit.slice(0, 7)} (origin/main as of the last fetch)`);
+		expect(call.prompt).toContain(`- web: main at ${local.slice(0, 7)} (the local main: it was never fetched)`);
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("doesn't start when the default branch can't be read, and the marker stays (CMP-88)", async () => {
+		const s = await setup(["api", "web"]);
+		const before = await repoState(join(s.project, "web"));
+		s.github.defaultBranches.set("web", "trunk");
+		await expect(startCompile(s.options(), () => {})).rejects.toThrow("Couldn't read trunk of web: Neither origin/trunk nor trunk is in it");
+		expect(startFailure(false, new Error("Couldn't read trunk of web: x"))).toBe("Compile failed: Couldn't read trunk of web: x");
+		expect(s.claude.calls()).toEqual([]);
+		expect(await s.marker()).toBe("");
+		expect(await repoState(join(s.project, "web"))).toEqual(before);
+		// Neither snapshot is left behind.
+		expect(readdirSync(temp as string).filter((name) => /^theory-(model|code)-/.test(name))).toEqual([]);
+	});
+
+	it("is deleted when the compile fails or is cancelled (CMP-89)", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{}]);
+		expect((await compile(s.options())).status).toBe("failed");
+		expect(codeSnapshots()).toEqual([]);
+
+		s.claude.setSteps([{ hang: true }]);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnother rule.\n" }, "Another rule");
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(codeSnapshots()).toHaveLength(1);
+		run.cancel();
+		expect((await run.done).status).toBe("cancelled");
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("fails the compile when the code snapshot changed, and says so after a cancel too (INV-14)", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ tamper: "api/evil.ts", answer: answer({ issues: [issue("api", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("failed");
+		expect(CODE_SNAPSHOT_CHANGED).toBe("Claude tried to change the code snapshot. Those changes were thrown away.");
+		expect(report.problems.map((p) => p.text)).toContain(CODE_SNAPSHOT_CHANGED);
+		expect(report.issues).toBeUndefined();
+		expect(s.github.calls.filter((c) => c.startsWith("createIssue"))).toEqual([]);
+		expect(existsSync(join(s.project, "api", "evil.ts"))).toBe(false);
+		expect(codeSnapshots()).toEqual([]);
+
+		// INV-12: checked after a cancelled run too, which stays cancelled.
+		s.claude.setSteps([{ tamper: "api/evil.ts", hang: true }]);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnother rule.\n" }, "Another rule");
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		run.cancel();
+		const cancelled = await run.done;
+		expect(cancelled.status).toBe("cancelled");
+		expect(cancelled.problems.map((p) => p.text)).toContain(CODE_SNAPSHOT_CHANGED);
+		expect(codeSnapshots()).toEqual([]);
 	});
 });
 

@@ -480,16 +480,21 @@ export default class TheoryPlugin extends Plugin {
 		const failed = failedPrefix(recompile);
 		let vaultPath: string;
 		let author: string;
+		let fetched: string[];
 		try {
 			vaultPath = this.getVaultPath();
 			// The newest model into the newest code, even when automatic pulls are off (PULL-15).
 			const pull = await this.puller.pull("compile");
+			// The code of a repository this pull didn't fetch is read as of its last fetch (CMP-87).
+			fetched = (pull?.repos ?? []).filter((r) => r.fetchError === null).map((r) => r.path);
 			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? [], earlier ? "recompile" : "compile");
 			if (gate.error) {
 				new Notice(`${failed}: ${gate.error}`, 10000);
 				return;
 			}
-			if (gate.offline) new Notice("Couldn't reach the remote, so this compile uses the local vault and code.", 8000);
+			if (gate.offline) {
+				new Notice("Couldn't reach the remote, so this compile uses the local vault and code. Code is read as of the last fetch.", 8000);
+			}
 			if (!this.isVaultSetUp()) {
 				new Notice("Set up the vault before compiling.");
 				return;
@@ -517,6 +522,7 @@ export default class TheoryPlugin extends Plugin {
 					...agentSettings,
 					author,
 					githubProject,
+					fetched,
 					...(earlier ? { recompile: earlier, reports: this.reports } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
