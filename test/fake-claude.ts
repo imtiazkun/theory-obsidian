@@ -9,6 +9,10 @@ export interface FakeStep {
 	commit?: string;
 	/** Switches to another branch before answering, which Claude must never do. */
 	checkout?: string;
+	/** Records every file in the folder it runs in, relative to it, in its call (`files`). */
+	listFiles?: boolean;
+	/** Makes this file's folder writable and writes the file, relative to the folder it runs in, as an agent's own shell could. */
+	tamper?: string;
 	/** Waits until it is stopped, so a test can cancel it. */
 	hang?: boolean;
 	/** The structured answer. Without one, it answers with no structured output. */
@@ -16,9 +20,9 @@ export interface FakeStep {
 }
 
 const SCRIPT = `
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
-import { join } from "path";
+import { dirname, join } from "path";
 const dir = process.argv[2];
 const args = process.argv.slice(3);
 if (args.includes("--version")) { console.log("0.0.0 (fake)"); process.exit(0); }
@@ -38,12 +42,27 @@ process.stdin.on("data", (chunk) => {
 		const message = JSON.parse(line);
 		if (message.type !== "user" || started) continue;
 		started = true;
-		appendFileSync(join(dir, "calls.jsonl"), JSON.stringify({ cwd: process.cwd(), args, prompt: message.message.content }) + "\\n");
+		const files = step.listFiles ? listFiles(process.cwd(), "") : undefined;
+		appendFileSync(join(dir, "calls.jsonl"), JSON.stringify({ cwd: process.cwd(), args, prompt: message.message.content, files }) + "\\n");
 		act();
 	}
 });
 process.stdin.on("end", () => process.exit(0));
+function listFiles(root, sub) {
+	const found = [];
+	for (const entry of readdirSync(join(root, sub), { withFileTypes: true })) {
+		const path = sub ? sub + "/" + entry.name : entry.name;
+		if (entry.isDirectory()) found.push(...listFiles(root, path));
+		else found.push(path);
+	}
+	return found.sort();
+}
 function act() {
+	if (step.tamper) {
+		const file = join(process.cwd(), step.tamper);
+		chmodSync(dirname(file), 0o755);
+		writeFileSync(file, "tampered\\n");
+	}
 	if (step.hang) return setInterval(() => {}, 1000);
 	if (step.commit) {
 		writeFileSync(join(process.cwd(), step.commit), "built\\n");
@@ -71,7 +90,7 @@ export function fakeClaude(steps: FakeStep[]) {
 			writeFileSync(join(dir, "steps.json"), JSON.stringify(next));
 			rmSync(join(dir, "count"), { force: true });
 		},
-		calls: (): { cwd: string; args: string[]; prompt: string }[] =>
+		calls: (): { cwd: string; args: string[]; prompt: string; files?: string[] }[] =>
 			existsSync(join(dir, "calls.jsonl"))
 				? readFileSync(join(dir, "calls.jsonl"), "utf8")
 						.split("\n")
