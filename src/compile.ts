@@ -13,12 +13,11 @@ import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDis
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
 import { toolPath } from "./tool-path";
+import { type SharedBuild, type SharedPlace, markerCommit } from "./shared-report";
 import { git, isInDotFolder } from "./vault";
 
 export { removeSnapshot };
 
-/** Tag in the vault repository that marks the last compiled commit. */
-export const COMPILED_TAG = "theory/compiled";
 // Git's well-known empty tree, used to diff the whole model on the first compile.
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 // Larger diffs are cut; Claude can still read every file in the snapshot.
@@ -108,6 +107,8 @@ export interface CompileOptions extends AgentSettings {
 	fetched?: string[];
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
+	/** The email git signs with (CFG-34), for the shared report (REP-45). */
+	authorEmail?: string;
 	/** The GitHub Project every issue is added to, as its URL (CFG-40). */
 	githubProject: string;
 	/** How the plugin reaches GitHub. `gh` when unset; tests pass a fake (TEST-6). */
@@ -121,6 +122,12 @@ export interface CompileOptions extends AgentSettings {
 	recompile?: CompileReport;
 	/** Every saved report, to check again at start that `recompile` can still be recompiled (CMP-73, CMP-75). */
 	reports?: CompileReport[];
+	/**
+	 * Commits the shared report (REP-46): when creating an issue fails and the report waits for Retry or Discard, and
+	 * once the compile ends. Gets the snapshot folders, so the Activity log can name paths relative to them (REP-53).
+	 * Never throws. Unset means nothing is shared.
+	 */
+	share?: (report: CompileReport, snapshots: { model: string; code: string }) => Promise<void>;
 }
 
 export interface Revision {
@@ -188,6 +195,22 @@ export interface CompileReport {
 	build?: BuildRecord;
 	/** Pull requests for this compile's work: those a build opened, and those opened with Create PR. */
 	pullRequests?: PullRequest[];
+	/** The email git signed with for the engineer who compiled (CFG-34), for the shared report (REP-45). */
+	authorEmail?: string;
+	/** The model and effort (or an ACP agent's thinking level) the agent ran with. Unset or "" means its default. */
+	model?: string;
+	effort?: string;
+	/**
+	 * Whether this compile moved the last compile marker, once Claude ran (CMP-22). Unset when Claude never ran. The
+	 * marker moves only when the shared report is committed with it (REP-49).
+	 */
+	markerMoved?: boolean;
+	/** The report's file in `.compiles/` and its short id, once it was first shared (REP-44). */
+	shared?: SharedPlace;
+	/** Why the last commit or push of the shared report failed: it is then only in the data file (REP-48). */
+	notShared?: string;
+	/** Every build that ended, as the shared report keeps it (REP-45). */
+	builds?: SharedBuild[];
 }
 
 /**
@@ -197,7 +220,8 @@ export interface CompileReport {
 export async function pendingRevisionCount(vaultPath: string): Promise<number> {
 	const head = await headCommit(vaultPath).catch(() => null);
 	if (!head) return 0;
-	const from = await tagCommit(vaultPath);
+	// The marker as the committed shared reports set it, never a tag (REP-49, CMP-90).
+	const from = await markerCommit(vaultPath);
 	if (from === head) return 0;
 	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head, "--", DOT_FOLDERS]);
 	return Number(stdout.trim()) || 0;
@@ -291,15 +315,6 @@ export const BUILD_SCHEMA = {
 /** The fields an answer must have, else it counts as no structured answer (CMP-17, AGT-10). */
 export function requiredFields(schema: { required: string[] }): string[] {
 	return schema.required;
-}
-
-async function tagCommit(vaultPath: string): Promise<string | null> {
-	try {
-		const { stdout } = await git(vaultPath, ["rev-parse", "--verify", "--quiet", `refs/tags/${COMPILED_TAG}^{commit}`]);
-		return stdout.trim() || null;
-	} catch {
-		return null;
-	}
 }
 
 async function headCommit(vaultPath: string): Promise<string> {
@@ -967,7 +982,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 
 	const head = await headCommit(vaultPath);
-	const marker = await tagCommit(vaultPath);
+	// The marker as the shared reports set it after the pull before this compile (CMP-90).
+	const marker = await markerCommit(vaultPath);
 	if (marker === head || (await pendingRevisionCount(vaultPath)) === 0) {
 		throw new NothingToCompileError("Every committed revision is already compiled.");
 	}
@@ -1034,7 +1050,10 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		problems: [],
 		log: [],
 		author: options.author,
+		...(options.authorEmail ? { authorEmail: options.authorEmail } : {}),
 		...(agent === "acp" ? { agent } : {}),
+		model: agent === "acp" ? (options.agentModel ?? "") : options.model,
+		effort: agent === "acp" ? (options.agentThinkingLevel ?? "") : options.effort,
 	};
 
 	let session: AgentSession;
@@ -1074,7 +1093,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	let cancelled = false;
 	// Set while the report waits for Retry or Discard (CMP-68).
 	let choose: ((choice: "retry" | "discard" | "stop") => void) | null = null;
-	const markCompiled = () => git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
+	// The marker moves when the shared report is committed with `markerMoved: true` (CMP-22, REP-49).
+	const markCompiled = () => {
+		report.markerMoved = true;
+	};
+	const share = async () => {
+		await options.share?.(report, { model: modelSnapshot, code: code.dir }).catch(() => {});
+	};
 
 	const done = (async () => {
 		const outcome = await session.done;
@@ -1155,7 +1180,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			if (verdict !== "succeeded" || !plan) {
 				// A failed compile creates no issue, and the marker still moves (CMP-17, CMP-22).
 				report.status = "failed";
-				await markCompiled();
+				markCompiled();
 				return report;
 			}
 
@@ -1167,9 +1192,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			if (report.issues.length === 0 && !report.closing?.length) {
 				// Nothing to build: the code already matches the model. No issue, no Build, and the marker moves (CMP-71).
 				report.status = "succeeded";
-				await markCompiled();
+				markCompiled();
 				return report;
 			}
+			// Claude ran, so a compile's marker moves (CMP-22). A recompile's moves once every step is done (CMP-81).
+			if (!earlier) markCompiled();
 			onUpdate(report);
 			const what = earlier ? "recompile" : "compile";
 			for (;;) {
@@ -1180,8 +1207,14 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				} catch (failure) {
 					const prefix = failure instanceof SyncError ? SYNC_FAILURE[failure.step] : SYNC_FAILURE.create;
 					report.issueFailure = `${prefix}: ${failure instanceof Error ? failure.message : String(failure)}`;
+					const answered = cancelled
+						? Promise.resolve<"stop">("stop")
+						: new Promise<"retry" | "discard" | "stop">((resolve) => (choose = resolve));
 					onUpdate(report);
-					const choice = cancelled ? "stop" : await new Promise<"retry" | "discard" | "stop">((resolve) => (choose = resolve));
+					// The compile Claude ran is shared while it waits; Retry and Discard update it (REP-46). A recompile
+					// is shared once it ends.
+					if (!earlier && !cancelled) await share();
+					const choice = await answered;
 					choose = null;
 					if (choice === "retry" && !cancelled) continue;
 					const reason = report.issueFailure;
@@ -1189,6 +1222,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					if (!canDiscard(report.issues, report.closing)) {
 						// An edit on GitHub can't be undone, so nothing is closed, and the marker waits for every step (CMP-81).
 						const left = stepsLeft(report.issues, report.closing);
+						report.markerMoved = false;
 						report.status = cancelled ? "cancelled" : "failed";
 						if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
 						report.problems.push(
@@ -1198,6 +1232,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					}
 					// A GitHub failure says nothing about the model: the revisions stay pending (CMP-68).
 					const notClosed = await discardIssues(github, report.issues);
+					// Discard commits the report again with `markerMoved: false` (CMP-22, CMP-68).
+					report.markerMoved = false;
 					report.status = cancelled ? "cancelled" : "failed";
 					if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
 					report.problems.push(
@@ -1208,13 +1244,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				}
 			}
 			report.status = "succeeded";
-			await markCompiled();
+			markCompiled();
 			return report;
 		} finally {
 			report.finishedAt = new Date().toISOString();
 			await dropSnapshot();
 			// The code snapshot goes whatever the outcome (CMP-89).
 			await removeSnapshot(code.dir).catch(() => {});
+			// The compile ended: its shared report is committed when Claude ran (REP-46).
+			await share();
 			onUpdate(report);
 		}
 	})();

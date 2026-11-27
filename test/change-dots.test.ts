@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { COMPILED_TAG } from "../src/compile";
 import { DOT_TOOLTIPS, changeDots, isOrange, readDotState } from "../src/change-dots";
-import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
+import { commitFiles, initRepo, markCompiled, out, tempFolder, write } from "./helpers";
 
 describe("the change dots (UI-24 to UI-27)", () => {
 	it("gives uncommitted and untracked files orange, committed and waiting files the accent colour, and compiled files none", () => {
@@ -66,7 +65,7 @@ describe("the change dots (UI-24 to UI-27)", () => {
 	it("reads its state from git", async () => {
 		const vault = tempFolder();
 		await initRepo(vault, { "Compiled.md": "c\n", "Waiting.md": "w\n" });
-		await out(vault, ["tag", COMPILED_TAG]);
+		await markCompiled(vault, await out(vault, ["rev-parse", "HEAD"]));
 		await commitFiles(vault, { "Waiting.md": "w2\n" }, "Update Waiting");
 		write(vault, { "New.md": "n\n" });
 

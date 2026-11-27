@@ -1,4 +1,4 @@
-import { COMPILED_TAG } from "./compile";
+import { filesSinceMarker } from "./shared-report";
 import { changedFiles, git, isInDotFolder } from "./vault";
 
 /** Where a file stands: uncommitted (orange), waiting for a compile (accent colour), or both, shown orange (UI-24, UI-25). */
@@ -71,11 +71,7 @@ export async function readDotState(vaultPath: string): Promise<DotState> {
 	const uncommitted = await changedFiles(vaultPath);
 	const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 	const tracked = files.split("\0").filter(Boolean);
-	try {
-		const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", `refs/tags/${COMPILED_TAG}`, "HEAD"]);
-		return { uncommitted, tracked, pending: stdout.split("\0").filter(Boolean) };
-	} catch {
-		// No compile marker yet (HDR-6).
-		return { uncommitted, tracked, pending: "all" };
-	}
+	// The marker as the shared reports set it (REP-49). No marker yet means every file is pending (HDR-6).
+	const pending = await filesSinceMarker(vaultPath).catch(() => null);
+	return { uncommitted, tracked, pending: pending ?? "all" };
 }

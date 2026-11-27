@@ -4,7 +4,8 @@ import { join } from "path";
 import { TFile, TFolder } from "obsidian";
 import { CodeRepo, currentBranch, uncommittedCount } from "./branches";
 import { openBuildBranch } from "./build";
-import { COMPILED_TAG, type CompileReport } from "./compile";
+import type { CompileReport } from "./compile";
+import { filesSinceMarker } from "./shared-report";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
 import { REALIZED_KEY } from "./note-status";
@@ -66,12 +67,9 @@ async function aheadBehind(repoPath: string, branch: string | null): Promise<{ a
 async function pendingPaths(vaultPath: string): Promise<{ tracked: Set<string>; pending: Set<string> | "all" }> {
 	const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 	const tracked = new Set(files.split("\0").filter(Boolean));
-	try {
-		const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", `refs/tags/${COMPILED_TAG}`, "HEAD"]);
-		return { tracked, pending: new Set(stdout.split("\0").filter(Boolean)) };
-	} catch {
-		return { tracked, pending: "all" };
-	}
+	// The marker as the shared reports set it (REP-49). No marker yet means every file is pending.
+	const pending = await filesSinceMarker(vaultPath).catch(() => null);
+	return { tracked, pending: pending ? new Set(pending) : "all" };
 }
 
 /** Works out every card's numbers. Never fetches, and asks GitHub nothing, so it is fast and works offline. */

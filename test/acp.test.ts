@@ -13,7 +13,6 @@ import {
 } from "../src/acp";
 import {
 	BUILD_SCHEMA,
-	COMPILED_TAG,
 	CompileOptions,
 	CompileReport,
 	PermissionRequest,
@@ -23,6 +22,7 @@ import {
 	startCompile,
 	startSession,
 } from "../src/compile";
+import { markerCommit } from "../src/shared-report";
 import { FakeGitHub } from "./fake-github";
 import { initRepo, out, tempFolder, write } from "./helpers";
 
@@ -299,7 +299,7 @@ describe("compiling with an ACP agent", () => {
 		await expect(startCompile({ ...s.options([]), agentCommand: "  " }, () => {})).rejects.toThrow(
 			"Set the agent command in theory.md settings first.",
 		);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(await markerCommit(s.vault)).toBeNull();
 	});
 
 	it("fails with the agent's command when it isn't found, and the marker doesn't move (AGT-19)", async () => {
@@ -310,7 +310,7 @@ describe("compiling with an ACP agent", () => {
 		expect(problemTexts(report)).toContain(
 			`Couldn't find the agent ("theory-no-such-agent --acp"). Set its command in theory.md settings.`,
 		);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(report.markerMoved).not.toBe(true);
 	});
 
 	it("sends the prompt with the answer's shape and reads the answer from the last JSON block (AGT-9, AGT-10)", async () => {
@@ -336,7 +336,8 @@ describe("compiling with an ACP agent", () => {
 		expect(existsSync(session.cwd)).toBe(false);
 		expect(session.additionalDirectories).toHaveLength(1);
 		expect(records.find((r) => r.received === "initialize")?.params.clientCapabilities.terminal).toBe(false);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
+		// The marker moves once this report is committed with markerMoved: true (CMP-22, REP-49).
+		expect(report.markerMoved).toBe(true);
 	});
 
 	it("picks the agent model and thinking level from the agent's choices, never Claude Code's (AGT-6, AGT-23, AGT-24)", async () => {
@@ -377,7 +378,8 @@ describe("compiling with an ACP agent", () => {
 		const report = await (await compile(s.options([answerStep(), answerStep(partial)]))).done;
 		expect(report.status).toBe("failed");
 		expect(problemTexts(report).some((p) => p.startsWith("The agent gave no structured answer."))).toBe(true);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
+		// The marker moves once this report is committed with markerMoved: true (CMP-22, REP-49).
+		expect(report.markerMoved).toBe(true);
 	});
 
 	it("says why the agent stopped and the end of its error output, never the exit code (AGT-22)", async () => {
@@ -440,7 +442,7 @@ describe("compiling with an ACP agent", () => {
 		expect(problems.some((p) => p.startsWith("These vault files changed while the compile ran: Note.md."))).toBe(true);
 		expect(problems).toContain("Claude tried to change the model snapshot. Those changes were thrown away.");
 		expect(s.records().some((r) => r.received === "session/cancel")).toBe(true);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(report.markerMoved).not.toBe(true);
 		expect(s.github.issues).toEqual([]);
 	});
 });

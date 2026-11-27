@@ -46,3 +46,12 @@ export async function commitFiles(repo: string, files: Record<string, string>, m
 export async function out(repo: string, args: string[]): Promise<string> {
 	return (await git(repo, args)).stdout.trim();
 }
+
+/**
+ * Commits a shared report in `.compiles/` that moves the last compile marker to `to` (REP-49), as a compile that
+ * Claude ran would. Returns the new commit's hash.
+ */
+export async function markCompiled(vault: string, to: string, from: string | null = null, name = "2026-01-01T00-00-00Z-marker"): Promise<string> {
+	const report = { version: 1, id: name.slice(-6), from, to, markerMoved: true, status: "succeeded" };
+	return commitFiles(vault, { [`.compiles/${name}.json`]: JSON.stringify(report, null, 2) + "\n" }, `Compile ${to.slice(0, 7)}`);
+}

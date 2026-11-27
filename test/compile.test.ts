@@ -3,13 +3,13 @@ import { basename, join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	CODE_SNAPSHOT_CHANGED,
-	COMPILED_TAG,
 	CompileOptions,
 	CompileReport,
 	GH_LOGIN,
 	NO_PROJECT,
 	READ_ONLY_TOOLS,
 	claudeArgs,
+	pendingRevisionCount,
 	startCompile,
 } from "../src/compile";
 import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
@@ -29,7 +29,9 @@ import {
 import { IdentityError, git } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
-import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
+import { commitFiles, initRepo, markCompiled, out, tempFolder, write } from "./helpers";
+import { compileMoment, markerCommit, shareReport } from "../src/shared-report";
+import { pushVault } from "../src/push";
 
 const PROJECT_URL = "https://github.com/orgs/team/projects/1";
 
@@ -53,6 +55,13 @@ async function setup(repos = ["api", "web"]) {
 	const github = new FakeGitHub();
 	const claude = fakeClaude([{ answer: answer({ issues: [issue("api", "one")] }) }]);
 	const options = (extra: Partial<CompileOptions> = {}): CompileOptions => ({
+		// Each compile Claude ran is shared and committed, as the plugin does (REP-46).
+		share: async (report, snapshots) => {
+			const moment = compileMoment(report);
+			if (!moment) return;
+			const reports = [report, ...(extra.reports ?? [])];
+			await shareReport({ vaultPath: vault, reports, logPaths: { projectFolder: project, ...snapshots }, push: () => pushVault(vault) }, report, moment);
+		},
 		vaultPath: vault,
 		projectFolder: project,
 		claudeCommand: claude.command,
@@ -66,7 +75,8 @@ async function setup(repos = ["api", "web"]) {
 		github,
 		...extra,
 	});
-	const marker = () => out(vault, ["tag", "--list", COMPILED_TAG]);
+	// "moved" once a committed shared report moved the marker (REP-49).
+	const marker = async () => ((await markerCommit(vault)) === null ? "" : "moved");
 	return { root, vault, project, github, claude, options, marker };
 }
 
@@ -447,7 +457,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 			expect(report.problems.map((p) => p.text)).toContain(problem);
 			expect(s.github.issues).toEqual([]);
 			expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
-			expect(await s.marker()).toBe(COMPILED_TAG);
+			expect(await s.marker()).toBe("moved");
 		});
 	}
 
@@ -458,7 +468,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		expect(report.status).toBe("failed");
 		expect(report.problems.map((p) => p.text)).toContain("The plan has several issues and no epic. Several pieces of work need an epic.");
 		expect(s.github.issues).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("creates nothing when Claude reports failed, and the marker moves (CMP-17)", async () => {
@@ -467,7 +477,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		const report = await compile(s.options());
 		expect(report.status).toBe("failed");
 		expect(s.github.issues).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 });
 
@@ -481,7 +491,7 @@ describe("nothing to build (CMP-15, CMP-71)", () => {
 		expect(report.problems).toEqual([]);
 		expect(s.github.issues).toEqual([]);
 		expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 		expect(compileFinishedText(report.issues ?? [], 0)).toBe("Compile finished. The code already matches the model.");
 	});
 
@@ -510,11 +520,12 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		expect(s.github.issues.map((i) => [i.repo, i.title, i.labels, i.inProject])).toEqual([["web", "Add one thing", [], PROJECT_URL]]);
 		expect(s.github.calls.some((c) => c.startsWith("ensureLabel"))).toBe(false);
 		// The body ends with the revisions it was planned from (CMP-67).
-		const revision = (await out(s.vault, ["rev-parse", "--short=7", "HEAD"])).trim();
+		// HEAD is now the commit of the shared report, so the revision compiled is the one before it.
+		const revision = report.toCommit.slice(0, 7);
 		expect(s.github.issues[0].body).toBe(`Build one.\n\nRules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:\n- ${revision} Initial commit`);
 		expect(report.issues?.map((i) => [i.kind, i.repo, i.number, i.inProject])).toEqual([["issue", "web", 1, true]]);
 		expect(readyText(report.issues ?? [])).toBe("1 issue is ready to build.");
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("creates the epic first with the epic label, links each sub-issue to it, and adds every issue to the project", async () => {
@@ -561,7 +572,12 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		expect(report.issueFailure).toBeUndefined();
 		expect(s.github.issues.map((i) => i.title)).toEqual(["Ship the big thing", "Change first", "Change second"]);
 		expect(s.github.issues.map((i) => i.parent ?? null)).toEqual([null, "api#1", "api#1"]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
+		// The Retry updates the report shared while it waited, with every issue (REP-46).
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Update compile ${report.shared!.shortId}`);
+		const shared = JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]));
+		expect(shared.issues.map((i: { number: number }) => i.number)).toEqual([1, 2, 3]);
+		expect(shared.status).toBe("succeeded");
 	});
 
 	it("stays running while Retry or Discard waits, so the report can offer them, and succeeds once every issue exists", async () => {
@@ -578,7 +594,7 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		const report = await run.done;
 		expect(statuses).toEqual(["running"]);
 		expect(report.status).toBe("succeeded");
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("Cancel while Retry or Discard waits discards the issues and cancels the compile", async () => {
@@ -612,6 +628,11 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 			"Couldn't create the issues: HTTP 403 The issues already created were closed as not planned, and the last compile marker didn't move.",
 		);
 		expect(await s.marker()).toBe("");
+		// Shared once creating an issue failed, then committed again with markerMoved false (REP-46, CMP-22).
+		const id = report.shared!.shortId;
+		expect((await out(s.vault, ["log", "--format=%s", "-2"])).split("\n")).toEqual([`Update compile ${id}`, expect.stringMatching(/^Compile start\.\.[0-9a-f]{7}$/)]);
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]))).toMatchObject({ markerMoved: false, status: "failed" });
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD~1:${report.shared!.file}`]))).toMatchObject({ markerMoved: true });
 	});
 });
 
@@ -621,7 +642,7 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 	it("starts the revisions and the diff where the earlier compile started, and lists its open issues in the prompt (CMP-10, CMP-76)", async () => {
 		const s = await setup();
 		const start = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
-		await out(s.vault, ["tag", COMPILED_TAG, start]);
+		await markCompiled(s.vault, start);
 		const first = await commitFiles(s.vault, { "Note.md": "# Note\n\nThe first rule.\n" }, "Write the first rule");
 		s.claude.setSteps([
 			{ answer: answer({ epic, issues: [issue("api", "one"), issue("web", "two")] }) },
@@ -790,7 +811,7 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		const head = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
 		/** Where the marker is now: "earlier" where the first compile left it, "head" once moved. */
 		const marker = async () => {
-			const at = (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+			const at = (await markerCommit(s.vault)) ?? "";
 			return at === head ? "head" : at === first.toCommit ? "earlier" : at;
 		};
 		return { s, first, before, revision, marker };
@@ -1236,7 +1257,7 @@ describe("the checks before a recompile (CMP-75)", () => {
 		expect(first.status).toBe("succeeded");
 		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
 		s.github.calls = [];
-		const markerAt = async () => (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+		const markerAt = async () => (await markerCommit(s.vault)) ?? "";
 		const before = await markerAt();
 		const recompile = (extra: Partial<CompileOptions> = {}) => s.options({ recompile: first, reports: [first], ...extra });
 		/** The notice a recompile that can't start shows, as runCompile builds it. */
@@ -1343,5 +1364,65 @@ describe("the checks before a recompile (CMP-75)", () => {
 		const report = await compile(c.recompile());
 		expect(report.status).toBe("succeeded");
 		expect(report.recompileOf).toBe(c.first.id);
+	});
+});
+
+describe("the shared report of a compile (REP-46, CMP-22, CMP-90)", () => {
+	const filesIn = async (vault: string) => (await out(vault, ["show", "--name-only", "--format=", "HEAD"])).split("\n").filter(Boolean).sort();
+
+	it("commits the report and its Activity log once when a compile ends, which moves the marker", async () => {
+		const s = await setup();
+		const compiled = await out(s.vault, ["rev-parse", "HEAD"]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const file = report.shared!.file;
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Compile start..${compiled.slice(0, 7)}`);
+		expect(await out(s.vault, ["rev-list", "--count", `${compiled}..HEAD`])).toBe("1");
+		expect(await filesIn(s.vault)).toEqual([file.replace(/\.json$/, ".activity.log"), file].sort());
+		expect(await markerCommit(s.vault)).toBe(compiled);
+		// The shared report's own commit is in a dot folder, so nothing is pending (INV-13).
+		expect(await pendingRevisionCount(s.vault)).toBe(0);
+		await expect(startCompile(s.options(), () => {})).rejects.toThrow("Every committed revision is already compiled.");
+	});
+
+	it("commits nothing when the compile can't start", async () => {
+		const s = await setup();
+		const head = await out(s.vault, ["rev-parse", "HEAD"]);
+		await expect(startCompile(s.options({ githubProject: "" }), () => {})).rejects.toThrow(NO_PROJECT);
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(head);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+	});
+
+	it("commits nothing when the compile is cancelled while Claude runs, and the marker stays (CMP-23, REP-10)", async () => {
+		const s = await setup(["api"]);
+		const head = await out(s.vault, ["rev-parse", "HEAD"]);
+		s.claude.setSteps([{ hang: true }]);
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		run.cancel();
+		const report = await run.done;
+		expect(report.status).toBe("cancelled");
+		expect(report.shared).toBeUndefined();
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(head);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+		expect(await markerCommit(s.vault)).toBeNull();
+	});
+
+	it("commits both reports of a recompile in one commit, and the recompile moves the marker", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ answer: answer({ issues: [issue("api", "one")] }) },
+			{ answer: answer({ issues: [{ ...issue("api", "one"), continues: 1, changed: "Now says more." }] }) },
+		]);
+		const first = await compile(s.options());
+		const answered = await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		const second = await compile(s.options({ recompile: first, reports: [first] }));
+		expect(second.status).toBe("succeeded");
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Recompile ${first.shared!.shortId}`);
+		const files = await filesIn(s.vault);
+		expect(files).toContain(first.shared!.file);
+		expect(files).toContain(second.shared!.file);
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${first.shared!.file}`])).recompiledBy).toBe(second.shared!.file);
+		expect(await markerCommit(s.vault)).toBe(answered);
 	});
 });

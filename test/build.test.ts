@@ -20,7 +20,8 @@ import {
 	pullRequestCandidates,
 	startBuild,
 } from "../src/build";
-import { COMPILED_TAG, CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
+import { CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
+import { markerCommit } from "../src/shared-report";
 import type { IssueRecord } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { FakeStep, fakeClaude, repoWithOrigin } from "./fake-claude";
@@ -250,6 +251,7 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
 		expect(buildPromptText(report)).toBe("1 issue is ready. Build it now?");
 		const mainBefore = await out(s.api.repo, ["rev-parse", "main"]);
+		const markerBefore = await markerCommit(s.vault);
 		await build(s, report);
 
 		const [issue] = report.issues ?? [];
@@ -270,7 +272,8 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 		// The engineer merges it: the issue stays open and main doesn't move.
 		expect(s.github.issues[0].state).toBe("open");
 		expect(await remoteHead(s.api.bare, "main")).toBe(mainBefore);
-		expect(await out(s.vault, ["tag", "--list", COMPILED_TAG])).toBe("");
+		// A build never moves the marker (CMP-43, BLD-25).
+		expect(await markerCommit(s.vault)).toBe(markerBefore);
 	});
 });
 
@@ -292,6 +295,7 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 			true,
 		);
 		const mains = [await remoteHead(s.api.bare, "main"), await remoteHead(s.web.bare, "main")];
+		const markerBefore = await markerCommit(s.vault);
 		await build(s, report);
 
 		const epicBranch = "theory/epic-1-big-thing";
@@ -323,7 +327,8 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 		// Nothing reached a default branch.
 		expect([await remoteHead(s.api.bare, "main"), await remoteHead(s.web.bare, "main")]).toEqual(mains);
 		expect(report.build?.message).toBe(`Epic #1 is built on ${epicBranch}. Open a pull request into main when you're ready.`);
-		expect(await out(s.vault, ["tag", "--list", COMPILED_TAG])).toBe("");
+		// A build never moves the marker (CMP-43, BLD-25).
+		expect(await markerCommit(s.vault)).toBe(markerBefore);
 	});
 });
 
