@@ -17,6 +17,7 @@ import {
 	withAllowedRules,
 } from "./compile";
 import { failedPrefix, startFailure } from "./recompile";
+import { type ShareMoment, compileMoment, keptReports, notSharedNotice, shareReport, sharedBuild } from "./shared-report";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
@@ -480,6 +481,7 @@ export default class TheoryPlugin extends Plugin {
 		const failed = failedPrefix(recompile);
 		let vaultPath: string;
 		let author: string;
+		let authorEmail: string;
 		let fetched: string[];
 		try {
 			vaultPath = this.getVaultPath();
@@ -504,7 +506,7 @@ export default class TheoryPlugin extends Plugin {
 				const count = uncommitted.length;
 				new Notice(`${count} uncommitted ${count === 1 ? "file isn't" : "files aren't"} part of this compile.`);
 			}
-			author = (await requireIdentity(vaultPath)).name;
+			({ name: author, email: authorEmail } = await requireIdentity(vaultPath));
 		} catch (error) {
 			new Notice(startFailure(recompile, error), 10000);
 			return;
@@ -521,8 +523,14 @@ export default class TheoryPlugin extends Plugin {
 					projectFolder,
 					...agentSettings,
 					author,
+					authorEmail,
 					githubProject,
 					fetched,
+					// Each compile Claude ran is shared in `.compiles/` (REP-10, REP-46).
+					share: async (report, snapshots) => {
+						const moment = compileMoment(report);
+						if (moment) await this.shareReport(report, moment, snapshots);
+					},
 					...(earlier ? { recompile: earlier, reports: this.reports } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
@@ -547,7 +555,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileRun = run;
 		this.compileStarting = false;
 		this.hooks.fire("compile-start", compileStartDetails(run.report));
-		this.reports = [run.report, ...this.reports].slice(0, MAX_REPORTS);
+		this.reports = keptReports([run.report, ...this.reports], MAX_REPORTS);
 		this.statusBar?.setText("Compiling…");
 		this.statusBar?.show();
 		this.compileButton.refresh();
@@ -677,6 +685,11 @@ export default class TheoryPlugin extends Plugin {
 
 		await run.done;
 		this.buildRun = null;
+		// The shared report changes only once the build ended (REP-46, REP-47).
+		const builder = await gitIdentity(vaultPath).catch(() => null);
+		const entry = sharedBuild(report, builder?.kind === "found" ? { name: builder.name, email: builder.email } : { name: "", email: "" });
+		if (entry) report.builds = [...(report.builds ?? []), entry];
+		await this.shareReport(report, "build");
 		this.hooks.fire("build-end", buildEndDetails(report));
 		this.statusBar?.hide();
 		await this.saveSettings();
@@ -687,6 +700,32 @@ export default class TheoryPlugin extends Plugin {
 			new Notice(text);
 		}
 		else if (status === "stopped") new Notice("Build stopped. See the compile report.", 10000);
+	}
+
+	// Shared reports commit one at a time.
+	private shareQueue: Promise<unknown> = Promise.resolve();
+
+	/**
+	 * Writes and commits a compile's shared report at one of the REP-46 moments, then pushes (CMT-31). When the commit
+	 * or the push fails, the report stays in the data file with a notice (REP-48). Never throws.
+	 */
+	async shareReport(report: CompileReport, moment: ShareMoment, snapshots?: { model: string; code: string }): Promise<void> {
+		const run = async () => {
+			const vaultPath = this.getVaultPath();
+			const logPaths = snapshots ? { projectFolder: this.settings.projectFolder, ...snapshots } : undefined;
+			return shareReport({ vaultPath, reports: this.reports, logPaths, push: () => this.push() }, report, moment);
+		};
+		const next = this.shareQueue.then(run, run);
+		this.shareQueue = next.catch(() => {});
+		try {
+			const result = await next;
+			if (result.kind === "not-shared") new Notice(notSharedNotice(result.reason), 10000);
+		} catch (error) {
+			report.notShared = errorMessage(error);
+			new Notice(notSharedNotice(errorMessage(error)), 10000);
+		}
+		await this.saveSettings();
+		this.refreshGitState();
 	}
 
 	/** Permission requests from the running build that are waiting for an answer. A compile never asks (CMP-13). */

@@ -1,7 +1,7 @@
 import { chmodSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { COMPILED_TAG, SIGN_IN_SUMMARY, signInFailed, startCompile } from "../src/compile";
+import { SIGN_IN_SUMMARY, signInFailed, startCompile } from "../src/compile";
 import { FakeGitHub } from "./fake-github";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
 
@@ -51,7 +51,7 @@ describe("Claude Code that isn't signed in (CMP-54)", () => {
 		expect(report.status).toBe("failed");
 		expect(report.summary).toBe(SIGN_IN_SUMMARY);
 		expect(SIGN_IN_SUMMARY).toBe("Claude Code isn't signed in. Run claude in a terminal, then /login.");
-		expect(await out(vault, ["tag", "--list", COMPILED_TAG])).toBe("");
+		expect(report.markerMoved).not.toBe(true);
 	});
 
 	it("an ordinary failure without a report still moves the marker", async () => {
@@ -59,7 +59,8 @@ describe("Claude Code that isn't signed in (CMP-54)", () => {
 
 		expect(report.status).toBe("failed");
 		expect(report.summary).toBe("Something else went wrong.");
-		expect(await out(vault, ["tag", "--list", COMPILED_TAG])).toBe(COMPILED_TAG);
+		// The marker moves once this report is committed with markerMoved: true (CMP-22, REP-49).
+		expect(report.markerMoved).toBe(true);
 	});
 
 	it("knows Claude Code's sign-in failures", () => {

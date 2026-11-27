@@ -302,6 +302,8 @@ export class CreatePullRequestView extends ItemView {
 			section.creating = false;
 			this.render();
 		}
+		// Pull requests that Create PR opened are shared once it ends (REP-46, REP-47).
+		if (ready.some((s) => s.created)) await this.plugin.shareReport(report, "pull-requests");
 		this.plugin.pullRequestsChanged();
 		// A repository that can't get a pull request from here doesn't hold up the others.
 		if (this.sections.filter((s) => !s.blocked).every((s) => s.created)) await this.addFooters(report);
