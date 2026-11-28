@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { THEORY_COMMANDS, THEORY_RIBBON } from "../src/commands";
 import { ribbonOrder } from "../src/first-load";
 import { findProjectRepos } from "../src/project";
-import { NO_PROJECT_FOLDER, NO_REPOSITORIES, SINGLE_REPOSITORY, newRepositoryProblem, projectFolderProblem } from "../src/repositories";
+import type TheoryPlugin from "../src/main";
+import { MODEL_NAME_TAKEN, NO_PROJECT_FOLDER, NO_REPOSITORIES, SINGLE_REPOSITORY, nameProblem, newRepositoryProblem, projectFolderProblem } from "../src/repositories";
 import { initRepo, tempFolder } from "./helpers";
 
 describe("the commands (UI-10)", () => {
@@ -76,5 +77,27 @@ describe("New repository (REPO-8, REPO-9, REPO-14, REPO-25)", () => {
 
 	it("points an empty Repositories page at the command", () => {
 		expect(NO_REPOSITORIES).toBe("No repositories yet. Run New repository from the command palette to create one.");
+	});
+});
+
+describe("a new repository's name (REPO-14)", () => {
+	/** Just what `nameProblem` reads: the project folder and the vault. */
+	const plugin = (projectFolder: string) =>
+		({ settings: { projectFolder }, app: { vault: { getAbstractFileByPath: () => null } } }) as unknown as TheoryPlugin;
+
+	it("refuses model, which the Activity log keeps for the model's paths (REP-53)", () => {
+		expect(nameProblem(plugin(tempFolder()), "model")).toBe(MODEL_NAME_TAKEN);
+		expect(MODEL_NAME_TAKEN).toBe("model is kept for the model's paths in the Activity log (REP-53).");
+	});
+
+	it("still takes a name that only starts with model", () => {
+		expect(nameProblem(plugin(tempFolder()), "models")).toBeNull();
+		expect(nameProblem(plugin(tempFolder()), "model-api")).toBeNull();
+	});
+
+	it("still refuses a name that is taken", () => {
+		const folder = tempFolder();
+		mkdirSync(join(folder, "app"));
+		expect(nameProblem(plugin(folder), "app")).toBe("app already exists.");
 	});
 });

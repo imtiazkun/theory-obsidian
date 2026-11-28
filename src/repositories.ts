@@ -194,9 +194,13 @@ export interface NewRepository {
 
 export const REPO_NAME = /^[a-z0-9-]+$/;
 
-/** The reason the name can't be used, or null. */
+/** The text when the name is `model`, which the Activity log keeps for the model snapshot's paths (REPO-14, REP-53). */
+export const MODEL_NAME_TAKEN = "model is kept for the model's paths in the Activity log (REP-53).";
+
+/** The reason the name can't be used, or null (REPO-14). */
 export function nameProblem(plugin: TheoryPlugin, name: string): string | null {
 	if (!REPO_NAME.test(name)) return "Use lowercase letters, digits and dashes.";
+	if (name === "model") return MODEL_NAME_TAKEN;
 	if (existsSync(join(plugin.settings.projectFolder, name)) || plugin.app.vault.getAbstractFileByPath(name)) {
 		return `${name} already exists.`;
 	}
