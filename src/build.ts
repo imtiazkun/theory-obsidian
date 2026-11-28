@@ -706,10 +706,4 @@ export function epicPullRequestBody(report: CompileReport, repoName: string | nu
 	return ref === `#${epic.number}` ? `Closes ${ref}` : `Part of ${ref}`;
 }
 
-/** The shared Body's default on the Create PR page (REP-27): "Part of {owner}/{name}#{epic}", whatever the repository. */
-export function sharedEpicPullRequestBody(report: CompileReport, epicRepoName: string | null): string {
-	const epic = report.issues?.find((i) => i.kind === "epic");
-	if (!epic?.number) return "";
-	return `Part of ${issueRef(epic.number, epicRepoName, null, epic.url)}`;
-}
 

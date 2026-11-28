@@ -378,18 +378,46 @@ describe("the last compile marker (REP-49, CMP-22, CMP-90)", () => {
 		expect(await pendingRevisionCount(vault)).toBe(1);
 	});
 
-	it("never counts a file it can't read, or one that isn't committed", async () => {
+	it("never counts a file it can't read (REP-52)", async () => {
 		const vault = tempFolder();
 		await initRepo(vault, { "Index.md": "1\n" });
 		const first = await out(vault, ["rev-parse", "HEAD"]);
 		await commitFiles(vault, { ".compiles/2026-01-01T00-00-00Z-broken.json": `{"to": "${first}", "markerMoved": true` }, "Broken");
 		expect(await markerCommit(vault)).toBeNull();
+	});
+
+	it("moves when the report is written, before it is committed (CMP-22, REP-49)", async () => {
+		const vault = tempFolder();
+		await initRepo(vault, { "Index.md": "1\n" });
+		const first = await out(vault, ["rev-parse", "HEAD"]);
 		write(vault, { ".compiles/2026-01-02T00-00-00Z-local1.json": JSON.stringify({ version: 1, from: null, to: first, markerMoved: true }) });
-		expect(await markerCommit(vault)).toBeNull();
+		expect(await markerCommit(vault)).toBe(first);
+		expect(await pendingRevisionCount(vault)).toBe(0);
 		await git(vault, ["add", ".compiles"]);
-		expect(await markerCommit(vault)).toBeNull();
 		await git(vault, ["commit", "-q", "-m", "Compile"]);
 		expect(await markerCommit(vault)).toBe(first);
+	});
+
+	it("doesn't move back when a committed report is deleted from the working tree", async () => {
+		const vault = tempFolder();
+		await initRepo(vault, { "Index.md": "1\n" });
+		const first = await out(vault, ["rev-parse", "HEAD"]);
+		await markCompiled(vault, first, null, "2026-01-01T00-00-00Z-gone11");
+		rmSync(join(vault, ".compiles/2026-01-01T00-00-00Z-gone11.json"));
+		expect(await markerCommit(vault)).toBe(first);
+	});
+
+	it("stays moved when the commit or the push fails, so the same revisions aren't planned twice (REP-48)", async () => {
+		const v = await sharedVault();
+		// Git can't commit while another git holds the index.
+		const head = await out(v.vault, ["rev-parse", "HEAD"]);
+		write(v.vault, { ".git/index.lock": "" });
+		const report = makeReport({ toCommit: head });
+		const result = await shareReport(v.ctx([report]), report, "compile");
+		expect(result.kind).toBe("not-shared");
+		expect(await markerCommit(v.vault)).toBe(report.toCommit);
+		expect(await pendingRevisionCount(v.vault)).toBe(0);
+		rmSync(join(v.vault, ".git/index.lock"));
 	});
 
 	it("sets which files are pending: those changed since the marker, or every file without one (HDR-6)", async () => {
