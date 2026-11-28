@@ -3,7 +3,8 @@ import { CommitButtons } from "./commit";
 import { COMMIT_VIEW_TYPE, CommitView, PAST_COMMIT_VIEW_TYPE, PastCommitView } from "./commit-view";
 import { type PushResult, commitNotice, pushNotice, pushVault } from "./push";
 import { generateCommitMessage } from "./commit-message";
-import { OLD_AGENT_FIELDS, resolveTask, savedTaskRows, taskAgentSettings } from "./agent-rows";
+import { OLD_AGENT_FIELDS, resolveTask, savedAskQuestionsFirst, savedTaskRows, taskAgentSettings } from "./agent-rows";
+import { savedModelPrices } from "./costs";
 import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
 import {
@@ -77,6 +78,7 @@ import {
 } from "./hooks";
 import { BuildChoice, BuildRun, NothingLeftError, buildableReport, interruptedBuild, startBuild } from "./build";
 import { compileFinishedText, questionText } from "./plan";
+import { CHECKING_LABEL, checkingModel, questionsNotice } from "./question-pass";
 import {
 	IdentityError,
 	MissingStarters,
@@ -442,6 +444,11 @@ export default class TheoryPlugin extends Plugin {
 		return this.buildRun !== null || this.buildStarting;
 	}
 
+	/** True while the question pass of the running compile runs, before the compile proper (UI-3, CMP-99). */
+	isCheckingModel(): boolean {
+		return checkingModel(this.compileRun?.report);
+	}
+
 	/** The report of the compile or build running now, or null. */
 	activeReportId(): string | null {
 		return this.buildRun?.report.id ?? this.compileRun?.report.id ?? null;
@@ -463,7 +470,26 @@ export default class TheoryPlugin extends Plugin {
 		await this.startCompileRun(earlier);
 	}
 
-	private async startCompileRun(earlier?: CompileReport) {
+	/**
+	 * Compile anyway, from a report the question pass stopped (CMP-101) or ended as nothing to build (CMP-109): the
+	 * compile proper with that report's revisions, without a new question pass, and its questions sent along (CMP-102).
+	 * A recompile's report compiles anyway as a recompile of the same earlier compile. CMP-3 applies as for any compile.
+	 */
+	async compileAnyway(reportId: string) {
+		const report = this.findReport(reportId);
+		if (!report) return;
+		let earlier: CompileReport | undefined;
+		if (report.recompileOf !== undefined) {
+			earlier = this.adoptReport(report.recompileOf);
+			if (!earlier) {
+				new Notice("Recompile failed: this machine doesn't have the compile it recompiles. Pull, then try again.", 10000);
+				return;
+			}
+		}
+		await this.startCompileRun(earlier, report);
+	}
+
+	private async startCompileRun(earlier?: CompileReport, anyway?: CompileReport) {
 		if (this.isCompiling()) {
 			new Notice("A compile or build is already running.");
 			await this.showReportView();
@@ -473,7 +499,7 @@ export default class TheoryPlugin extends Plugin {
 		// The button shows the compile from the click, through the pull before it (CMP-48, UI-3).
 		this.compileButton.refresh();
 		try {
-			await this.runCompile(earlier);
+			await this.runCompile(earlier, anyway);
 		} finally {
 			this.compileStarting = false;
 			this.compileRun = null;
@@ -483,7 +509,7 @@ export default class TheoryPlugin extends Plugin {
 		}
 	}
 
-	private async runCompile(earlier?: CompileReport) {
+	private async runCompile(earlier?: CompileReport, anyway?: CompileReport) {
 		// A compile never starts from the empty marker the one-time import is about to fill (CFG-45).
 		await this.markerImport;
 		// "Recompile failed" for a recompile, as BLD-5 does for a build (CMP-75).
@@ -525,6 +551,8 @@ export default class TheoryPlugin extends Plugin {
 		const { projectFolder, githubProject, shareReports } = this.settings;
 		// Read once: a change to the row applies from the next compile (CFG-19, CMP-13).
 		const agentSettings = taskAgentSettings(this.settings, "compile");
+		// The question pass runs with the Check row, only while "Ask questions first" is on (CMP-99, CMP-105).
+		const questionPass = this.settings.askQuestionsFirst ? taskAgentSettings(this.settings, "check") : undefined;
 		let run: CompileRun;
 		try {
 			run = await startCompile(
@@ -544,6 +572,8 @@ export default class TheoryPlugin extends Plugin {
 						if (moment) await this.shareReport(report, moment, snapshots, shareReports);
 					},
 					...(earlier ? { recompile: earlier, reports: this.allReports() } : {}),
+					...(questionPass ? { questionPass } : {}),
+					...(anyway ? { compileAnyway: anyway } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
@@ -551,7 +581,8 @@ export default class TheoryPlugin extends Plugin {
 						this.showReportView();
 					},
 				},
-				() => {
+				(report) => {
+					this.statusBar?.setText(checkingModel(report) ? CHECKING_LABEL : "Compiling…");
 					this.refreshReportViews();
 					this.compileButton.render();
 				},
@@ -568,7 +599,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileStarting = false;
 		this.hooks.fire("compile-start", compileStartDetails(run.report));
 		this.reports = keptReports([run.report, ...this.reports], MAX_REPORTS);
-		this.statusBar?.setText("Compiling…");
+		this.statusBar?.setText(checkingModel(run.report) ? CHECKING_LABEL : "Compiling…");
 		this.statusBar?.show();
 		this.compileButton.refresh();
 		this.noteStatus.sync();
@@ -587,7 +618,9 @@ export default class TheoryPlugin extends Plugin {
 		this.noteStatus.sync();
 		this.changeDots.sync();
 		const questions = report.questions.length;
-		if (report.status === "succeeded") new Notice(compileFinishedText(report.issues ?? [], questions));
+		// The question pass stopped the compile: the revisions stay pending (CMP-101).
+		if (report.status === "questions") new Notice(questionsNotice(questions), 10000);
+		else if (report.status === "succeeded") new Notice(compileFinishedText(report.issues ?? [], questions));
 		else if (report.status === "failed") new Notice(`Compile failed. See the compile report.${questionText(questions)}`, 10000);
 	}
 
@@ -1190,6 +1223,9 @@ export default class TheoryPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
 		this.settings.tasks = savedTaskRows(saved);
 		this.settings.hooks = savedHooks(this.settings.hooks);
+		// CFG-47 and CFG-48: data saved before these settings existed gets their defaults.
+		this.settings.askQuestionsFirst = savedAskQuestionsFirst(saved.askQuestionsFirst);
+		this.settings.modelPrices = savedModelPrices(saved.modelPrices);
 		this.setupOnLoad = setupOnLoad === true;
 		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
 		// Earlier versions called the project folder the code repository, and briefly kept a list of repos.

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, symlinkSync } from "fs";
 import { basename, join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -13,7 +13,7 @@ import {
 	pendingRevisionCount,
 	startCompile,
 } from "../src/compile";
-import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
+import { IssueRecord, PLAN_SCHEMA, canDiscard, checkWhere, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
 import { compileEndDetails, compileStartDetails } from "../src/hooks";
 import {
 	COMMIT_ANSWERS_FIRST,
@@ -51,7 +51,7 @@ async function setup(repos = ["api", "web"]) {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	for (const repo of repos) await initRepo(join(project, repo));
 	const github = new FakeGitHub();
 	const claude = fakeClaude([{ answer: answer({ issues: [issue("api", "one")] }) }]);
@@ -497,6 +497,181 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 	});
 });
 
+describe("each issue's Where (CMP-15, CMP-107, CMP-108)", () => {
+	const repos = ["api", "web"];
+	const planOf = (where: string[]) => ({ epic: null, issues: [{ ...issue("api", "one"), where }] });
+
+	it("CMP-15: each issue in the answer's plan has a Where, and the epic has none", () => {
+		const props = PLAN_SCHEMA.properties;
+		expect(props.issues.items.properties.where.type).toBe("array");
+		expect(props.issues.items.required).toContain("where");
+		expect(Object.keys(props.epic.properties)).not.toContain("where");
+	});
+
+	it("CMP-107: reads each issue's Where, and still reads an answer from before, with none", () => {
+		const where = ["src/serve.ts:10-20", "src/where.ts (new)"];
+		expect(readPlan({ issues: [{ ...issue("api", "one"), where }] }, repos).plan?.issues[0].where).toEqual(where);
+		expect(readPlan({ issues: [{ ...issue("api", "one"), where: [" src/a.ts:1-2\n  (the schema) ", ""] }] }, repos).plan?.issues[0].where).toEqual(["src/a.ts:1-2 (the schema)"]);
+		const old = readPlan({ issues: [issue("api", "one")] }, repos);
+		expect(old.problems).toEqual([]);
+		expect(old.plan?.issues[0]).not.toHaveProperty("where");
+	});
+
+	it("CMP-108: keeps paths in the issue's repository, with line ranges or notes, and new files; drops and names the rest", async () => {
+		const code = tempFolder();
+		write(code, { "api/src/serve.ts": "x\n", "web/page.ts": "x\n" });
+		symlinkSync(join(code, "web", "page.ts"), join(code, "api", "out.ts"));
+		const plan = planOf([
+			"src/serve.ts:1-2",
+			"./src/serve.ts",
+			"src/serve.ts:3-4, 9-12 (serve)",
+			"src",
+			"src/where.ts (new)",
+			"src/gone.ts:4-9",
+			"page.ts",
+			"../web/page.ts",
+			"out.ts",
+			`${code}/api/src/serve.ts`,
+			"api/src/gone.ts",
+		]);
+		const problems = await checkWhere(plan, code);
+		expect(plan.issues[0].where).toEqual(["src/serve.ts:1-2", "./src/serve.ts", "src/serve.ts:3-4, 9-12 (serve)", "src", "src/where.ts (new)"]);
+		expect(problems).toEqual([
+			`The issue "Change one" names files in its Where that aren't in "api": "src/gone.ts:4-9", "page.ts", "../web/page.ts", "out.ts", "${code}/api/src/serve.ts", "api/src/gone.ts". They were left out of the issue.`,
+		]);
+	});
+
+	it("CMP-108: keeps a path that starts with the repository's folder, as the rule map writes it (CMP-93), without that folder", async () => {
+		const code = tempFolder();
+		write(code, { "api/src/serve.ts": "x\n", "web/page.ts": "x\n" });
+		const plan = planOf(["api/src/serve.ts:1-2", "./api/src/serve.ts (serve)", "api/src/log.ts (new)", "api/../web/page.ts", "web/page.ts"]);
+		const problems = await checkWhere(plan, code);
+		expect(plan.issues[0].where).toEqual(["src/serve.ts:1-2", "src/serve.ts (serve)", "src/log.ts (new)"]);
+		expect(problems).toEqual([
+			'The issue "Change one" names files in its Where that aren\'t in "api": "api/../web/page.ts", "web/page.ts". They were left out of the issue.',
+		]);
+	});
+
+	it("CMP-108: keeps a path as written when the repository has a folder of its own name", async () => {
+		const code = tempFolder();
+		write(code, { "api/api/lib.ts": "x\n", "api/src/serve.ts": "x\n" });
+		const plan = planOf(["api/lib.ts:3-9", "api/src/serve.ts", "api/new.ts (new)"]);
+		expect(await checkWhere(plan, code)).toEqual([]);
+		// The folder's own file stays as written; one only outside that folder loses the prefix; a new file may go in the folder.
+		expect(plan.issues[0].where).toEqual(["api/lib.ts:3-9", "src/serve.ts", "api/new.ts (new)"]);
+	});
+
+	it("CMP-107, CMP-108: keeps at most the first 15, names one missing file, and leaves no Where when nothing is left", async () => {
+		const code = tempFolder();
+		const files = Array.from({ length: 17 }, (_, n) => `f${n + 1}.ts`);
+		write(code, Object.fromEntries(files.map((f) => [`api/${f}`, "x\n"])));
+		const long = planOf(files);
+		expect(await checkWhere(long, code)).toEqual(['The issue "Change one" lists 17 files in its Where. Only the first 15 were kept: "f16.ts", "f17.ts" were left out.']);
+		expect(long.issues[0].where).toEqual(files.slice(0, 15));
+		const gone = planOf(["gone.ts"]);
+		expect(await checkWhere(gone, code)).toEqual(['The issue "Change one" names a file in its Where that isn\'t in "api": "gone.ts". It was left out of the issue.']);
+		expect(gone.issues[0]).not.toHaveProperty("where");
+		const none = { epic: null, issues: [issue("api", "one")] };
+		expect(await checkWhere(none, code)).toEqual([]);
+	});
+
+	it("CMP-108: a bad Where never fails the compile, and the issue body ends with what is left, before the revisions", async () => {
+		const s = await setup();
+		await commitFiles(join(s.project, "api"), { "src/serve.ts": "x\n" }, "Code");
+		s.claude.setSteps([{ answer: answer({ issues: [{ ...issue("api", "one"), where: ["src/serve.ts:1-2", "src/gone.ts", "src/log.ts (new)"] }] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		expect(report.problems.map((p) => p.text)).toEqual([
+			'The issue "Change one" names a file in its Where that isn\'t in "api": "src/gone.ts". It was left out of the issue.',
+		]);
+		expect(report.issues?.[0].where).toEqual(["src/serve.ts:1-2", "src/log.ts (new)"]);
+		const revision = report.toCommit.slice(0, 7);
+		expect(s.github.issues[0].body).toBe(
+			`Build one.\n\nRules: R-1\n\nWhere:\n- src/serve.ts:1-2\n- src/log.ts (new)\n\n---\nPlanned by theory.md from these revisions of the model:\n- ${revision} Initial commit`,
+		);
+		expect(await s.marker()).toBe("moved");
+	});
+
+	it("CMP-59, CMP-107: tells Claude to plan one issue per repository, split by intent only beyond 15 rules, each with a Where", () => {
+		const prompt = compilePrompt({ snapshot: "/model", projectFolder: "/project", codeSnapshot: "/code", code: [], head: "abc1234", from: null, revisions: [], diff: "", instructions: [] });
+		expect(prompt).toContain("Plan one issue for each repository the work changes. Split a repository's work into several issues only when one issue would cover more than 15 rules: then split it by intent, into as few issues as that allows. A plan with more than one issue is an epic, with one sub-issue for each of them.");
+		expect(prompt).not.toContain("one sub-issue for each repository and intent");
+		expect(prompt).toContain("Give every issue a `where`: the files and line ranges in its repository that the work starts from, like `src/main.ts:142-190`, at most 15. Paths are relative to the repository");
+		expect(prompt).toContain('Name a file the issue creates with "(new)"');
+		expect(prompt).toContain("In a recompile, a continued issue gets the Where of the new plan.");
+	});
+});
+
+describe("the rule map, scope and fixed context (CMP-92 to CMP-98, CMP-106)", () => {
+	it("CMP-98: the plan check refuses an issue whose repository is outside the scope", () => {
+		const repos = ["api", "web"];
+		expect(readPlan({ issues: [issue("api", "one")] }, repos, null, ["api"]).problems).toEqual([]);
+		expect(readPlan({ issues: [issue("web", "one")] }, repos, null, ["api"]).problems).toEqual([
+			'The issue "Change one" is in "web", which is outside this compile\'s scope: "api".',
+		]);
+		expect(readPlan({ issues: [issue("api", "one")] }, repos, null, []).problems).toEqual([
+			'The issue "Change one" is in "api", which is outside this compile\'s scope: no repository.',
+		]);
+		// Without a scope, as before.
+		expect(readPlan({ issues: [issue("web", "one")] }, repos).problems).toEqual([]);
+	});
+
+	it("CMP-96, CMP-98: a compile of one model folder fails when the plan has work in another repository, and the marker moves", async () => {
+		const s = await setup();
+		await markCompiled(s.vault, await out(s.vault, ["rev-parse", "HEAD"]));
+		const head = await commitFiles(s.vault, { "api/Server.md": "# Server\n\n**API-1.** Serve.\n" }, "Describe the server");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("web", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("failed");
+		expect(report.problems.map((p) => p.text)).toContain('The issue "Change one" is in "web", which is outside this compile\'s scope: "api".');
+		expect(s.github.issues).toEqual([]);
+		expect(await markerCommit(s.vault)).toBe(head);
+		expect(s.claude.calls()[0].prompt).toContain("## Scope\n\nThis compile may plan issues only in these repositories: api.");
+	});
+
+	it("CMP-94, CMP-97, CMP-106: the prompt holds the rule map, the scope and the fixed context of the repositories in scope", async () => {
+		const s = await setup();
+		await commitFiles(join(s.project, "api"), { "AGENTS.md": "Run the api tests.\n", "src/serve.ts": "x\n// Serve every request (API-1).\n" }, "Code");
+		await commitFiles(join(s.project, "web"), { "AGENTS.md": "Run the web tests.\n", "page.ts": "// API-1 from the web\n" }, "Code");
+		await markCompiled(s.vault, await out(s.vault, ["rev-parse", "HEAD"]));
+		await commitFiles(s.vault, { "Index.md": "# System\n\nThe whole system.\n", "api/Server.md": "# Server\n\n**API-1.** Serve.\n\n**API-2.** Log.\n" }, "Describe the server");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const prompt = s.claude.calls()[0].prompt;
+		expect(prompt).toContain("- API-1 (api/Server.md): api/src/serve.ts:2, web/page.ts:1");
+		expect(prompt).toContain("- API-2 (api/Server.md): Not found in the code");
+		expect(prompt).toContain("This compile may plan issues only in these repositories: api.");
+		expect(prompt).toContain("## Fixed context");
+		expect(prompt).toContain("### Index.md (in the model directory)\n\n# System\n\nThe whole system.");
+		expect(prompt).toContain("### api/AGENTS.md\n\nRun the api tests.");
+		expect(prompt).toContain("### Files git tracks in api\n\nAGENTS.md\nREADME.md\nsrc/serve.ts");
+		// web is outside the scope: Claude may read it, but it isn't fixed context.
+		expect(prompt).not.toContain("Run the web tests.");
+		expect(prompt).not.toContain("Files git tracks in web");
+	});
+
+	it("CMP-12: tells Claude to follow the AGENTS.md and CLAUDE.md given, read long files in part, and keep issue bodies short", () => {
+		const prompt = compilePrompt({
+			snapshot: "/model",
+			projectFolder: "/project",
+			codeSnapshot: "/code",
+			code: [],
+			head: "abc1234",
+			from: null,
+			revisions: [],
+			diff: "",
+			instructions: [],
+		});
+		expect(prompt).toContain("Before planning work in a repository, follow its AGENTS.md and CLAUDE.md, given below in the fixed context");
+		expect(prompt).not.toContain("read its AGENTS.md (and CLAUDE.md, if there is one)");
+		expect(prompt).toContain("Read only the lines you need of a file longer than 400 lines, starting from the rule map or a search.");
+		expect(prompt).toContain("never read the same lines twice");
+		expect(prompt).toContain("An issue's body says what changes and why, in the model's words, in at most 150 words. It lists the rule IDs it covers and never repeats their text");
+		expect(prompt).toContain("Each change is shown with the whole section it sits in");
+	});
+});
+
 describe("nothing to build (CMP-15, CMP-71)", () => {
 	it("succeeds with an empty plan, creates no issue, offers no Build and moves the marker", async () => {
 		const s = await setup();
@@ -692,7 +867,7 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 		expect(recompile).toContain(`- ${first.slice(0, 7)} `);
 		expect(recompile).toContain(`- ${second.slice(0, 7)} `);
 		// The diff covers the earlier compile's revisions too: from its start, not from the marker.
-		expect(recompile).toContain("-The rule.");
+		expect(recompile).toContain("-**R-1.** The rule.");
 		expect(recompile).toContain("+The answered rule.");
 		expect(recompile).toContain("### #1: Ship the big thing\n\n- Repository: api\n- Kind: epic\n- Rules: R-1, R-2\n- Short name: big-thing\n\nSeveral pieces.");
 		expect(recompile).toContain("### #2: Change one\n\n- Repository: api\n- Kind: issue\n- Rules: R-1\n- Short name: one\n\nBuild one.");
@@ -850,7 +1025,7 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		const first = await compile(s.options());
 		expect(first.status).toBe("succeeded");
 		const before = structuredClone(first);
-		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		await commitFiles(s.vault, { "Note.md": "# Note\n\n**R-1.** Answered.\n" }, "Answer the question");
 		const revision = (await out(s.vault, ["rev-parse", "--short=7", "HEAD"])).trim();
 		s.github.calls = [];
 		const head = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
@@ -908,6 +1083,23 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		expect(await marker()).toBe("head");
 		// The earlier report's records were never changed.
 		expect(first).toEqual(before);
+	});
+
+	it("gives a continued issue the new plan's Where, with no comment when only the Where changed (CMP-107, CMP-80)", async () => {
+		const { s, first } = await recompiling(
+			{ issues: [{ ...issue("api", "one"), where: ["README.md:1"] }] },
+			answer({ issues: [{ ...issue("api", "one"), where: ["src/new.ts (new)"], continues: 1, changed: "Starts elsewhere." }] }),
+		);
+		expect(first.issues?.[0].where).toEqual(["README.md:1"]);
+		const report = await compile(s.options({ recompile: first }));
+		expect(report.status).toBe("succeeded");
+		expect(report.issues?.map((i) => [i.number, i.where])).toEqual([[1, ["src/new.ts (new)"]]]);
+		const body = s.github.issue("api", 1).body;
+		expect(body).toContain("Rules: R-1\n\nWhere:\n- src/new.ts (new)\n\n---\n");
+		expect(body).not.toContain("README.md:1");
+		expect(s.github.issue("api", 1).comments).toEqual([]);
+		// The earlier report keeps its own Where (CMP-82).
+		expect(first.issues?.[0].where).toEqual(["README.md:1"]);
 	});
 
 	it("keeps a continued epic in its repository when another repository now has more sub-issues (CMP-64)", async () => {
@@ -1502,5 +1694,32 @@ describe("the shared report of a compile (REP-46, CMP-22, CMP-90)", () => {
 		expect(files).toContain(second.shared!.file);
 		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${first.shared!.file}`])).recompiledBy).toBe(second.shared!.file);
 		expect(await markerCommit(s.vault)).toBe(answered);
+	});
+});
+
+describe("a compile's tokens (REP-56)", () => {
+	it("keeps the tokens in four parts with the model that ran, in the report and in its shared file", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{
+				answer: answer({ issues: [issue("api", "one")] }),
+				model: "claude-opus-5-5",
+				usage: { input_tokens: 1200, output_tokens: 340, cache_creation_input_tokens: 5000, cache_read_input_tokens: 90000 },
+			},
+		]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const parts = { input: 1200, output: 340, cacheWrites: 5000, cacheReads: 90000, model: "claude-opus-5-5" };
+		expect(report.tokens).toEqual(parts);
+		// Teammates see the cost too (UI-16), so the parts are shared.
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`])).tokens).toEqual(parts);
+	});
+
+	it("keeps no tokens when Claude Code reports none, so the report says Not reported", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "one")] }), usage: null }]);
+		const report = await compile(s.options());
+		expect(report.tokens).toBeUndefined();
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]))).not.toHaveProperty("tokens");
 	});
 });

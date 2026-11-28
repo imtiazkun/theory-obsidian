@@ -23,6 +23,7 @@ import {
 	startSession,
 } from "../src/compile";
 import { markerCommit } from "../src/shared-report";
+import { QUESTION_PASS_SCHEMA } from "../src/question-pass";
 import { FakeGitHub } from "./fake-github";
 import { initRepo, out, tempFolder, write } from "./helpers";
 
@@ -221,6 +222,10 @@ async function handle(m) {
 				const answer = await call("fs/write_text_file", { sessionId: session, path: step.write, content: "written" });
 				note({ write: step.write, error: answer.error?.message ?? null });
 			}
+			if (step.read) {
+				const answer = await call("fs/read_text_file", { sessionId: session, path: step.read });
+				note({ read: step.read, error: answer.error?.message ?? null, content: answer.result?.content ?? null });
+			}
 		}
 		return send({ id: m.id, result: { stopReason: steps.find((step) => step.stop)?.stop ?? "end_turn" } });
 	}
@@ -241,7 +246,7 @@ async function setup(): Promise<Setup> {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	await initRepo(join(project, "app"));
 	write(root, { "agent/agent.mjs": FAKE_AGENT });
 	const plan = join(root, "agent", "plan.json");
@@ -536,7 +541,7 @@ describe("an ACP agent in a build", () => {
 		expect(writes.map((w) => w.error === null)).toEqual([true, false, false]);
 		expect(readFileSync(inside, "utf8")).toBe("written");
 		expect(existsSync(outside)).toBe(false);
-		expect(readFileSync(model, "utf8")).toBe("# Note\n\nThe rule.\n");
+		expect(readFileSync(model, "utf8")).toBe("# Note\n\n**R-1.** The rule.\n");
 		expect(outcome.skipped.some((p) => p.includes("outside the project folder"))).toBe(true);
 		expect(outcome.skipped.some((p) => p.startsWith("The agent tried to write to the model"))).toBe(true);
 	});
@@ -547,5 +552,36 @@ describe("an ACP agent in a build", () => {
 		await buildSession(s, steps, (_request, _answer, cancel) => cancel());
 		expect(s.records().find((r) => r.permission)?.permission).toEqual({ outcome: "cancelled" });
 		expect(s.records().some((r) => r.received === "session/cancel")).toBe(true);
+	});
+});
+
+describe("an ACP agent in the question pass (CMP-99)", () => {
+	it("can't read the code snapshot, and answers with the pass's fields only", async () => {
+		const s = await setup();
+		const snapshot = await createSnapshot(s.vault, "HEAD");
+		const code = join(s.project, "app");
+		write(code, { "secret.ts": "code\n" });
+		const passAnswer = { questions: [], changesCode: "some", why: "R-1 is new." };
+		const report = { log: [] as string[] };
+		const session = startSession({
+			settings: s.options([{ read: join(code, "secret.ts") }, { read: join(snapshot, "Note.md") }, answerStep(passAnswer)]),
+			cwd: snapshot,
+			snapshot,
+			protectedPaths: [s.vault, snapshot, code],
+			unreadable: [code],
+			prompt: "Check the model.",
+			schema: QUESTION_PASS_SCHEMA,
+			readOnly: true,
+			what: "compile",
+			report,
+			onUpdate: () => {},
+		});
+		const outcome = await session.done;
+		await removeSnapshot(snapshot);
+		const reads = s.records().filter((r) => r.read);
+		expect(reads.map((r) => r.error)).toEqual(["This check reads only the model, never the code.", null]);
+		expect(reads[1].content).toBe("# Note\n\n**R-1.** The rule.\n");
+		expect(report.log).toContain(`Refused read: ${join(code, "secret.ts")}`);
+		expect(outcome.result?.structured).toEqual(passAnswer);
 	});
 });

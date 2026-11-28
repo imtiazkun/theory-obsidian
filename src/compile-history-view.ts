@@ -2,13 +2,12 @@ import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import { basename } from "path";
 import type { PullRequestState } from "./github";
 import { timeAgo } from "./history-view";
+import { costText, historyCostTitle, reportCosts } from "./costs";
 import type TheoryPlugin from "./main";
 import { ONLY_HERE } from "./report-list";
 import { PR_STATE_TEXT, STATUS_ICON, STATUS_TEXT } from "./report-view";
 
 export const COMPILE_HISTORY_VIEW_TYPE = "theory-compile-history";
-
-const count = new Intl.NumberFormat();
 
 /**
  * Past compiles, newest first, beside the commit history in the right sidebar: the reports in plugin data and the
@@ -75,13 +74,11 @@ export class CompileHistoryView extends ItemView {
 				meta.createSpan({ text: " · " });
 				meta.createSpan({ cls: "theory-history-only-here", text: ONLY_HERE });
 			}
-			// An ACP agent reports how full its context is, not the tokens used, so there is no count (AGT-20).
-			if (report.agent !== "acp") {
-				meta.createSpan({ text: " · " });
-				meta.createSpan({
-					text: report.tokens === undefined ? "tokens unknown" : `${count.format(report.tokens)} tokens`,
-				});
-			}
+			// UI-16: the estimated cost, compile and build together; hovering shows them apart with their four parts.
+			// An agent that reports no tokens, like an ACP agent (AGT-20), shows "Not reported" (REP-56).
+			const costs = reportCosts(report, this.plugin.settings.modelPrices);
+			meta.createSpan({ text: " · " });
+			meta.createSpan({ cls: "theory-cost", text: costText(costs.total), attr: { title: historyCostTitle(costs) } });
 
 			// The state of its pull requests, one per repository when there are several.
 			const prs = report.pullRequests ?? [];

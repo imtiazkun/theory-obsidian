@@ -4,15 +4,29 @@ import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
-import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool } from "./code-snapshot";
+import { type TokenUsage, addUsage, claudeUsageParts } from "./costs";
+import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool, trackedFiles } from "./code-snapshot";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
+import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, checkWhere, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
+import { fixedContextText, fixedParts } from "./fixed-context";
+import { limitedDiff, readModelDiff } from "./model-diff";
+import { changedRules, compileScope, ruleMap, ruleMapText, scopeText, searchRules } from "./rule-map";
 import { toolPath } from "./tool-path";
+import {
+	type QuestionPassRecord,
+	QUESTION_PASS_SCHEMA,
+	askedQuestionsText,
+	nothingToChangeText,
+	questionPassPrompt,
+	questionsNotice,
+	readQuestionPassAnswer,
+	wordingOnly,
+} from "./question-pass";
 import { type SharedBuild, type SharedPlace, markerCommit } from "./shared-report";
 import { git, isInDotFolder } from "./vault";
 
@@ -20,7 +34,7 @@ export { removeSnapshot };
 
 // Git's well-known empty tree, used to diff the whole model on the first compile.
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-// Larger diffs are cut; Claude can still read every file in the snapshot.
+// Larger diffs are shown with three lines of context, then cut; Claude can still read every file in the snapshot (CMP-11).
 const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
 /** Git pathspec for files in dot folders, like `.obsidian/` and `.comments/`, at any depth. They are never theory. */
@@ -133,6 +147,16 @@ export interface CompileOptions extends AgentSettings {
 	 * moves it instead of writing to `.compiles/`. Unset means on.
 	 */
 	shareReports?: boolean;
+	/**
+	 * The Check row's agent settings when "Ask questions first" is on (CMP-99, CMP-105, CFG-47): the question pass runs
+	 * with them before the compile proper. Unset means no question pass.
+	 */
+	questionPass?: AgentSettings;
+	/**
+	 * Compile anyway (CMP-102): the report the question pass stopped, or ended as nothing to build (CMP-109). The
+	 * compile proper runs with its revisions, without a new question pass, and its questions go with the prompt.
+	 */
+	compileAnyway?: CompileReport;
 }
 
 export interface Revision {
@@ -150,8 +174,11 @@ export interface Question {
 	anchors?: Anchor[];
 }
 
-/** `imported` is only the marker-only shared report that carried the old tag over (CFG-45). No compile ends so. */
-export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled" | "imported";
+/**
+ * `imported` is only the marker-only shared report that carried the old tag over (CFG-45). No compile ends so.
+ * `questions` is a compile the question pass stopped before the compile proper (CMP-101).
+ */
+export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled" | "imported" | "questions";
 
 export interface CompileReport {
 	id: string;
@@ -187,8 +214,11 @@ export interface CompileReport {
 	log: string[];
 	/** Who ran the compile: the author name from settings, else from the git config. */
 	author?: string;
-	/** Every token Claude Code counted in this compile: input, output and cache. Unset when it never reported usage. */
-	tokens?: number;
+	/**
+	 * The compile's tokens in four parts, with the model that ran (REP-56). A build's go to its own record. Unset when the
+	 * agent reported none. A number is the single count reports kept before REP-56: `costOf` reads both.
+	 */
+	tokens?: TokenUsage | number;
 	/** "acp" when an ACP agent compiled. Unset for Claude Code. An ACP agent reports no token count. */
 	agent?: CompileAgent;
 	/** The issues this compile planned, the epic first, as far as they were created (REP-40). */
@@ -232,6 +262,10 @@ export interface CompileReport {
 	 * report had moved the marker past this compile's `from` (CMP-91): that report's file.
 	 */
 	compiledMeanwhile?: string;
+	/** The question pass before the compile proper, when one ran (CMP-99). */
+	questionPass?: QuestionPassRecord;
+	/** For Compile anyway: the id of the report whose revisions it compiles (CMP-102). */
+	anywayOf?: string;
 }
 
 /**
@@ -362,10 +396,9 @@ export async function revisionsBetween(vaultPath: string, from: string | null, t
 		});
 }
 
+/** The model diff Claude receives: each change with its whole section, or three lines when that is too long (CMP-10, CMP-11). */
 export async function modelDiff(vaultPath: string, from: string | null, to: string): Promise<string> {
-	const { stdout } = await git(vaultPath, ["diff", "--stat", "--patch", from ?? EMPTY_TREE, to, "--", ...NOT_SENT]);
-	if (stdout.length <= MAX_DIFF_CHARS) return stdout;
-	return stdout.slice(0, MAX_DIFF_CHARS) + "\n\n[Diff cut short. Read the changed files in the model directory.]\n";
+	return limitedDiff(await readModelDiff(vaultPath, from ?? EMPTY_TREE, to, NOT_SENT), MAX_DIFF_CHARS);
 }
 
 /** Notes that changed between the two commits, to point at when a failed compile names no spot. */
@@ -481,8 +514,14 @@ export function compilePrompt(params: {
 	instructions: { repo: string; path: string; text: string }[];
 	/** For a recompile: the earlier compile's issues that are still open (CMP-76). `from` is then that compile's start. */
 	earlier?: IssueRecord[];
+	/** The repositories this compile may plan issues in (CMP-96, CMP-97). */
+	scope?: string[];
+	/** The rule map, as `ruleMapText` writes it (CMP-94, CMP-95). */
+	ruleMap?: string;
+	/** The fixed context, as `fixedContextText` writes it (CMP-106). */
+	fixedContext?: string;
 }): string {
-	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier } = params;
+	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier, scope, ruleMap, fixedContext } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
@@ -509,11 +548,12 @@ Rules:
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
 - Read the code only in the code snapshot. It is each repository's default branch as \`origin\` has it. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
-- Before planning work in a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in that repository's folder in the model directory, so the issues fit how that repository is built and tested.
-- Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
+- Before planning work in a repository, follow its AGENTS.md and CLAUDE.md, given below in the fixed context, and \`instructions.md\` in that repository's folder in the model directory, given below too, so the issues fit how that repository is built and tested.
+- Plan one issue for each repository the work changes. Split a repository's work into several issues only when one issue would cover more than 15 rules: then split it by intent, into as few issues as that allows. A plan with more than one issue is an epic, with one sub-issue for each of them. Each issue is one build run, which reads the repository's instructions and finds its way around the code again. Leave \`plan.issues\` empty when the code already matches the model.
 - List sub-issues in build order: work that other sub-issues depend on comes first. They are built one at a time, each on top of the last.
 - Every issue says what to build and why, in the model's words. It lists the rule IDs it covers in \`rules\`. Those rules are its acceptance criteria.
 - Every issue changes exactly one repository. Name it in \`repo\` as it is named above.
+- Give every issue a \`where\`: the files and line ranges in its repository that the work starts from, like \`src/main.ts:142-190\`, at most 15. Paths are relative to the repository, so they don't start with its folder in the code snapshot. Fill it from the code you read while planning. Name a file the issue creates with "(new)", like \`src/where.ts (new)\`. In a recompile, a continued issue gets the Where of the new plan. The build starts from it instead of searching again.
 - In a recompile, continue an earlier issue whenever the same work is still asked for in the same repository, even when its title, body or rules change: plan all the work again, then match it to the earlier issues. To continue one, set \`continues\` to its number, and say in \`changed\`, in one sentence, what changed and why, like "Now names the description of each check, answered in STAT-10." An epic continues only an earlier epic, and an issue (a sub-issue too) only an earlier issue in the same repository. Each earlier issue is continued at most once. A new issue is only for work no earlier issue covers. Outside a recompile, never set \`continues\`.
 - A title is a short sentence in the imperative, under 70 characters, like "Show a diff for each file on the Commit page".
 - A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it. No two short names in one plan are the same, the epic's included.
@@ -521,7 +561,9 @@ Rules:
 - When a problem comes from something in the model, give it \`anchors\`: the model file, the heading it sits under, and a short quote copied exactly from the note (under 200 characters). Engineers see these as highlights in the note. Leave \`anchors\` empty when the problem isn't about the model.
 - Set \`status\` to "failed" if you can't plan the work.
 - Never create issues, branches or pull requests, and never touch GitHub.
-${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}
+- Read only the lines you need of a file longer than 400 lines, starting from the rule map or a search. Read a long file in full only when the lines you need are spread across it, and never read the same lines twice: a long file read in full is paid for in every later step.
+- An issue's body says what changes and why, in the model's words, in at most 150 words. It lists the rule IDs it covers and never repeats their text: the build reads the rules from the model.
+${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}${fixedContext ? `\n## Fixed context\n\n${fixedContext}\n` : ""}${scope ? `\n## Scope\n\n${scopeText(scope)}\n` : ""}${ruleMap ? `\n## Rule map\n\n${ruleMap}\n` : ""}
 ${
 		earlier
 			? `## This is a recompile
@@ -543,6 +585,8 @@ ${from ? `Last compiled revision: ${from}` : "This is the first compile, so the 
 ${revisionListText(revisions)}
 
 ## Changes to the model
+
+Each change is shown with the whole section it sits in, from the heading above it to the next heading of the same or a higher level.
 
 \`\`\`diff
 ${diff}
@@ -629,14 +673,6 @@ export function withAllowedRules(allowedTools: string, rules: string[]): string 
 		if (!` ${list} `.includes(` ${rule} `)) list = list ? `${list} ${rule}` : rule;
 	}
 	return list;
-}
-
-/** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
-function totalTokens(usage: unknown): number | undefined {
-	if (!usage || typeof usage !== "object") return undefined;
-	const keys = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
-	const counts = keys.map((key) => (usage as Record<string, unknown>)[key]).filter((n): n is number => typeof n === "number");
-	return counts.length > 0 ? counts.reduce((sum, n) => sum + n, 0) : undefined;
 }
 
 /** The summary when Claude Code fails to sign in (CMP-54). */
@@ -731,14 +767,18 @@ export interface SessionParams {
 	snapshot: string;
 	/** The vault and the snapshot: the agent may never write to them. */
 	protectedPaths: string[];
+	/** Folders the agent may not read: the code snapshot, for the question pass (CMP-99). */
+	unreadable?: string[];
 	prompt: string;
 	schema: { required: string[] };
 	/** True for a compile: only tools that read, and every other tool denied without a card (CMP-13). */
 	readOnly: boolean;
 	/** "compile" or "build", for the messages. */
 	what: "compile" | "build";
-	/** Where the activity log and the token count go. */
-	report: { log: string[]; tokens?: number };
+	/** Where the activity log goes, and the token parts unless `usageTo` is set. */
+	report: { log: string[]; tokens?: TokenUsage | number };
+	/** Where the token parts go instead of `report`: a build's go to its build record, apart from the compile's (REP-56). */
+	usageTo?: { tokens?: TokenUsage | number };
 	onUpdate: () => void;
 	onPermissionRequest?: (request: PermissionRequest) => void;
 }
@@ -853,6 +893,7 @@ export function startSession(params: SessionParams): AgentSession {
 						thinkingLevel: settings.agentThinkingLevel ?? "",
 						required: params.schema.required,
 						readOnly: params.readOnly,
+						unreadable: params.unreadable,
 					},
 					host,
 				)
@@ -1003,13 +1044,28 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	if (agent === "acp" && !options.agentCommand?.trim()) {
 		throw new Error("Set the agent command in theory.md settings first.");
 	}
+	// Compile anyway runs no new question pass (CMP-102); with "Ask questions first" off, none runs at all (CMP-105).
+	const anyway = options.compileAnyway;
+	const passSettings = anyway ? undefined : options.questionPass;
+	const passAgent: CompileAgent = passSettings?.agent ?? "claude";
+	if (passSettings && passAgent === "acp" && !passSettings.agentCommand?.trim()) {
+		throw new Error("Set the Check row's agent command in theory.md settings first.");
+	}
 
-	const head = await headCommit(vaultPath);
+	const latest = await headCommit(vaultPath);
+	// Compile anyway compiles the same revisions as the report it comes from, whatever was committed since (CMP-102).
+	const head = anyway ? anyway.toCommit : latest;
+	if (anyway) {
+		await git(vaultPath, ["cat-file", "-e", `${head}^{commit}`]).catch(() => {
+			throw new Error(`The vault doesn't have revision ${head.slice(0, 7)} that compile read. Pull, then try again.`);
+		});
+	}
 	// The marker as the shared reports set it after the pull before this compile (CMP-90), or the local tag with
 	// Share compile reports off (CFG-44).
 	const sharing = options.shareReports !== false;
 	const marker = await markerCommit(vaultPath, sharing);
-	if (marker === head || (await pendingRevisionCount(vaultPath, sharing)) === 0) {
+	// Compile anyway names its revisions, which a skipped compile (CMP-109) already marked compiled.
+	if (!anyway && (marker === head || (await pendingRevisionCount(vaultPath, sharing)) === 0)) {
 		throw new NothingToCompileError("Every committed revision is already compiled.");
 	}
 	// Claude plans from the committed code, never from the engineer's unfinished work (CMP-36).
@@ -1027,11 +1083,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 
 	// A recompile starts where the earlier compile started, and gets its issues that are still open (CMP-76).
 	const earlier = options.recompile;
-	const from = earlier ? earlier.fromCommit : marker;
+	const from = earlier ? earlier.fromCommit : anyway ? anyway.fromCommit : marker;
 	const openEarlier = earlier ? await openEarlierIssues(github, earlier) : undefined;
 
 	const revisions = await revisionsBetween(vaultPath, from, head);
-	const diff = await modelDiff(vaultPath, from, head);
+	const changes = await readModelDiff(vaultPath, from ?? EMPTY_TREE, head, NOT_SENT);
+	const diff = limitedDiff(changes, MAX_DIFF_CHARS);
+	// The changed rules (CMP-92) and the scope they and the changed notes make (CMP-96).
+	const rules = changedRules(changes.files);
+	const scope = compileScope(repos.map((r) => r.name), changes.files, rules, openEarlier ?? []);
 	const notes = await changedNotes(vaultPath, from, head);
 	const codeBefore = await codeState(projectFolder);
 	// Claude reads each repository's default branch as origin has it, never the checkout (CMP-84). Throws when one
@@ -1042,6 +1102,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	let guard: ModelGuard;
 	let codeHash: string;
 	const instructions: { repo: string; path: string; text: string }[] = [];
+	let mapText: string;
+	let fixedText: string;
 	try {
 		snapshot = await createSnapshot(vaultPath, head);
 		guard = await guardModel(vaultPath, snapshot);
@@ -1050,6 +1112,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			const file = await modelInstructions(snapshot, repo.name);
 			if (file) instructions.push({ repo: repo.name, ...file });
 		}
+		// The files git tracks in each repository, at the commit the code snapshot holds (CMP-93, CMP-106).
+		const tracked = await Promise.all(
+			code.code.map(async (read) => {
+				const repo = repos.find((r) => r.name === read.repo);
+				return { name: read.repo, files: repo ? await trackedFiles(repo.path, read.commit) : [] };
+			}),
+		);
+		mapText = ruleMapText(ruleMap(rules, await searchRules([...new Set(rules.map((r) => r.id))], code.dir, tracked)));
+		fixedText = fixedContextText(await fixedParts(snapshot, code.dir, tracked.filter((repo) => scope.includes(repo.name))));
 	} catch (error) {
 		// Both snapshots go whatever the outcome (INV-7, CMP-89).
 		if (snapshot) await removeSnapshot(snapshot);
@@ -1079,11 +1150,22 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		...(agent === "acp" ? { agent } : {}),
 		model: agent === "acp" ? (options.agentModel ?? "") : options.model,
 		effort: agent === "acp" ? (options.agentThinkingLevel ?? "") : options.effort,
+		...(anyway ? { anywayOf: anyway.id } : {}),
+		// The question pass runs with the Check row (CMP-99, CFG-46), and its tokens count towards the compile's (REP-56).
+		...(passSettings
+			? {
+					questionPass: {
+						state: "running" as const,
+						...(passAgent === "acp" ? { agent: passAgent } : {}),
+						model: passAgent === "acp" ? (passSettings.agentModel ?? "") : passSettings.model,
+						effort: passAgent === "acp" ? (passSettings.agentThinkingLevel ?? "") : passSettings.effort,
+					},
+				}
+			: {}),
 	};
 
-	let session: AgentSession;
-	try {
-		session = startSession({
+	const properSession = () =>
+		startSession({
 			settings: options,
 			// The agent runs in the code snapshot, whichever agent it is (CMP-13), and may write to none of these (INV-4, INV-14).
 			cwd: code.dir,
@@ -1100,7 +1182,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				diff,
 				instructions,
 				earlier: openEarlier,
-			}),
+				scope,
+				ruleMap: mapText,
+				fixedContext: fixedText,
+				// Compile anyway sends the pass's questions along, so Claude doesn't ask them again (CMP-102).
+			}) + askedQuestionsText(anyway?.questions ?? []),
 			schema: COMPILE_SCHEMA,
 			readOnly: true,
 			what: "compile",
@@ -1108,6 +1194,36 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			onUpdate: () => onUpdate(report),
 			onPermissionRequest: options.onPermissionRequest,
 		});
+	let session: AgentSession;
+	try {
+		session = report.questionPass
+			? // The question pass runs in the model snapshot and can't read the code snapshot (CMP-99). It counts as a
+				// compile for the model checks, so every write is denied as a compile's is (CMP-104, INV-4, INV-14).
+				startSession({
+					settings: passSettings!,
+					cwd: modelSnapshot,
+					snapshot: modelSnapshot,
+					protectedPaths: [vaultPath, modelSnapshot, code.dir],
+					unreadable: [code.dir],
+					prompt: questionPassPrompt({
+						snapshot: modelSnapshot,
+						head,
+						from,
+						repos: repos.map((r) => r.name),
+						revisions,
+						rules,
+						diff,
+						recompile: Boolean(earlier),
+					}),
+					schema: QUESTION_PASS_SCHEMA,
+					readOnly: true,
+					what: "compile",
+					report,
+					usageTo: report.questionPass,
+					onUpdate: () => onUpdate(report),
+					onPermissionRequest: options.onPermissionRequest,
+				})
+			: properSession();
 	} catch (error) {
 		await removeSnapshot(modelSnapshot);
 		await removeSnapshot(code.dir);
@@ -1126,9 +1242,99 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		await options.share?.(report, { model: modelSnapshot, code: code.dir }).catch(() => {});
 	};
 
-	const done = (async () => {
-		const outcome = await session.done;
+	/** Whether the agent left both snapshots and every repository as they were (INV-5, INV-6, INV-14, CMP-69). */
+	const runChecks = async () => {
+		const checked = await checkModel(guard);
+		// The code snapshot is checked as the model snapshot is, after every run in which the agent started (INV-14).
+		const codeIntact = (await hashTree(code.dir).catch(() => "")) === codeHash;
+		if (!codeIntact) checked.problems.push(plainProblem(CODE_SNAPSHOT_CHANGED));
+		// A compile never changes code (CMP-69): anything that did is the agent's own shell, and the engineer must hear.
+		const codeAfter = await codeState(projectFolder).catch(() => codeBefore);
+		const changedRepos = [...codeBefore.keys()].filter((name) => codeBefore.get(name) !== codeAfter.get(name));
+		if (changedRepos.length) {
+			checked.problems.push(
+				plainProblem(`These repositories changed during the compile: ${changedRepos.join(", ")}. A compile never changes code, so check them.`),
+			);
+		}
+		return { problems: checked.problems, intact: checked.intact && codeIntact && changedRepos.length === 0 };
+	};
+
+	/**
+	 * Ends the question pass (CMP-99 to CMP-104, CMP-109, CMP-110). True when the compile ends with it: questions, a
+	 * cancel, a pass that failed, or "none" for a wording-only change. False when the compile proper runs next.
+	 */
+	const endQuestionPass = async (outcome: AgentOutcome & { skipped: string[] }): Promise<boolean> => {
+		const pass = report.questionPass!;
+		const settings = passSettings!;
 		const { result, error, stderr } = outcome;
+		const passName = passAgent === "acp" ? "The agent" : "Claude Code";
+		// The pass counts as a compile for the model checks, and a cancelled or failed one leaves the marker (CMP-104).
+		const checked = await runChecks();
+		if (cancelled) {
+			pass.state = "cancelled";
+			report.status = "cancelled";
+			report.summary = "You cancelled this compile. The last compile marker didn't move.";
+			report.problems.unshift(...checked.problems);
+			return true;
+		}
+		if (error || (passAgent !== "acp" && !result?.structured && signInFailed(`${result?.text ?? ""}\n${stderr}`))) {
+			pass.state = "failed";
+			report.status = "failed";
+			report.summary = error ? `${passName} couldn't be started.` : SIGN_IN_SUMMARY;
+			if (error) report.problems.push(plainProblem(startProblem(error, settings)));
+			report.problems.unshift(...checked.problems);
+			return true;
+		}
+		const answer = readQuestionPassAnswer(result?.structured);
+		report.problems.push(...outcome.skipped.map(plainProblem));
+		if (!answer || !checked.intact) {
+			// Claude ran, so the report is shared, but the marker stays (CMP-104).
+			pass.state = "failed";
+			report.status = "failed";
+			report.markerMoved = false;
+			report.suspectNotes = notes;
+			report.summary = answer ? "The check before the compile failed, so the code wasn't read." : result?.text || `${passName} finished without an answer.`;
+			if (!answer) report.problems.push(plainProblem(noAnswerProblem(outcome, settings)));
+			report.problems.unshift(...checked.problems);
+			return true;
+		}
+		pass.state = "answered";
+		pass.changesCode = answer.changesCode;
+		pass.why = answer.why;
+		report.questions = await checkedQuestions(answer as unknown as StructuredAnswer, modelSnapshot);
+		report.problems.unshift(...checked.problems);
+		if (report.questions.length > 0) {
+			// Claude never read the code, so nothing is compiled, and the revisions stay pending (CMP-101).
+			report.status = "questions";
+			report.summary = questionsNotice(report.questions.length);
+			report.markerMoved = false;
+			return true;
+		}
+		// The plugin checks the change is wording only before it believes "none" (CMP-110). A recompile always plans
+		// again, since its earlier issues must be continued or closed (CMP-80).
+		if (answer.changesCode === "none" && !earlier && wordingOnly(changes.files)) {
+			pass.skipped = true;
+			report.status = "succeeded";
+			report.summary = nothingToChangeText(answer.why);
+			report.suspectNotes = notes;
+			report.issues = [];
+			// Nothing to build, and the marker moves (CMP-109, CMP-71).
+			markCompiled();
+			return true;
+		}
+		appendLog(
+			report,
+			answer.changesCode === "none"
+				? "No questions about the model. Claude found nothing the code must change, but more than the wording changed, so the compile reads the code."
+				: "No questions about the model. Compiling.",
+		);
+		// The vault check after the compile proper compares with the vault as it is now: changes so far are reported.
+		guard.vaultBefore = await workingTreeState(vaultPath);
+		onUpdate(report);
+		return false;
+	};
+
+	const done = (async () => {
 		let snapshotGone = false;
 		const dropSnapshot = async () => {
 			if (snapshotGone) return;
@@ -1136,6 +1342,25 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			await removeSnapshot(modelSnapshot);
 		};
 		try {
+			if (report.questionPass) {
+				if (await endQuestionPass(await session.done)) return report;
+				// With no questions, the compile proper starts at once, in the same report (CMP-100).
+				if (cancelled) {
+					report.status = "cancelled";
+					report.summary = "You cancelled this compile. The last compile marker didn't move.";
+					return report;
+				}
+				try {
+					session = properSession();
+				} catch (error) {
+					report.status = "failed";
+					report.summary = `${agentName} couldn't be started.`;
+					report.problems.push(plainProblem(startProblem(error instanceof Error ? error : new Error(String(error)), options)));
+					return report;
+				}
+			}
+			const outcome = await session.done;
+			const { result, error, stderr } = outcome;
 			const checked = await checkModel(guard);
 			// The code snapshot is checked as the model snapshot is, after every run in which the agent started (INV-14).
 			const codeIntact = (await hashTree(code.dir).catch(() => "")) === codeHash;
@@ -1180,9 +1405,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.summary = structured.summary;
 				claimedProblems = structured.problems;
 				if (verdict === "succeeded") {
-					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null);
+					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null, scope);
 					plan = read.plan;
 					planProblems.push(...read.problems);
+					// Each Where is checked against the code snapshot; a bad one is named, and never fails the compile (CMP-108).
+					if (plan) planProblems.push(...(await checkWhere(plan, code.dir)));
 					if (!plan) verdict = "failed";
 				}
 			} else {
@@ -1285,8 +1512,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	return {
 		report,
 		done,
-		requests: session.requests,
-		answer: session.answer,
+		// The question pass's session first, then the compile proper's (CMP-104).
+		get requests() {
+			return session.requests;
+		},
+		answer: (id, answer) => session.answer(id, answer),
 		cancel() {
 			if (report.status !== "running" || cancelled) return;
 			cancelled = true;
@@ -1307,11 +1537,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 export const READ_ONLY_TOOLS = ["Read", "Glob", "Grep"];
 
 /** The arguments Claude Code runs with. A read-only run gets only READ_ONLY_TOOLS, and every other tool is denied without asking. */
-export function claudeArgs(params: Pick<SessionParams, "settings" | "protectedPaths" | "snapshot" | "schema" | "readOnly">): string[] {
+export function claudeArgs(
+	params: Pick<SessionParams, "settings" | "protectedPaths" | "snapshot" | "schema" | "readOnly" | "unreadable">,
+): string[] {
 	const { settings, protectedPaths, snapshot, schema, readOnly } = params;
 	const disallowed = protectedPaths.flatMap((path) =>
 		["Edit", "Write", "NotebookEdit"].map((tool) => `${tool}(//${path.replace(/^\//, "")}/**)`),
 	);
+	// The question pass reads no code (CMP-99). Claude Code's Read rules cover Glob and Grep too.
+	for (const path of params.unreadable ?? []) disallowed.push(`Read(//${path.replace(/^\//, "")}/**)`);
 	const args = [
 		"-p",
 		"--input-format",
@@ -1340,6 +1574,9 @@ export function claudeArgs(params: Pick<SessionParams, "settings" | "protectedPa
 /** Runs Claude Code with `-p` and stream-json in `cwd` for one compile, or one issue of a build. */
 function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 	const { settings, protectedPaths, prompt, report, cwd, readOnly } = params;
+	const usageTo = params.usageTo ?? report;
+	// The model that ran, as Claude Code names it, so the cost uses its price (REP-57).
+	let model: string | undefined;
 	const child: ChildProcess = spawn(settings.claudeCommand || "claude", claudeArgs(params), {
 		cwd,
 		env: { ...process.env, PATH: toolPath() },
@@ -1418,7 +1655,10 @@ function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 			} catch {
 				return;
 			}
-			if (event.type === "assistant") {
+			if (event.type === "system" && event.subtype === "init" && typeof event.model === "string") {
+				model = event.model;
+			} else if (event.type === "assistant") {
+				if (!model && typeof event.message?.model === "string") model = event.message.model;
 				for (const block of event.message?.content ?? []) {
 					if (block.type === "tool_use" && block.name !== "StructuredOutput") {
 						host.log(describeToolUse(block.name, block.input ?? {}));
@@ -1429,8 +1669,9 @@ function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 			} else if (event.type === "control_cancel_request") {
 				host.withdraw(String(event.request_id));
 			} else if (event.type === "result") {
-				const tokens = totalTokens(event.usage);
-				if (tokens !== undefined) report.tokens = (report.tokens ?? 0) + tokens;
+				// REP-56: four parts, added to what this compile or build counted so far.
+				const parts = claudeUsageParts(event.usage);
+				if (parts) usageTo.tokens = addUsage(usageTo.tokens, parts, model);
 				result = {
 					isError: Boolean(event.is_error) || event.subtype !== "success",
 					text: typeof event.result === "string" ? event.result : "",

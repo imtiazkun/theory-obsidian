@@ -1,7 +1,7 @@
 import { resolveTask } from "./agent-rows";
 import { ItemView, Notice, Setting, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
 import { projectRepos } from "./branches";
-import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates, sharedEpicPullRequestBody } from "./build";
+import { type PullRequestCandidate, epicPullRequestBody, pullRequestCandidates } from "./build";
 import type { CompileReport } from "./compile";
 import {
 	PullRequest,
@@ -29,7 +29,6 @@ interface Section extends PullRequestCandidate {
 	base: string;
 	draft: boolean;
 	reviewers: string;
-	shared: boolean;
 	title: string;
 	body: string;
 	error: string | null;
@@ -39,15 +38,13 @@ interface Section extends PullRequestCandidate {
 	existing: boolean;
 }
 
-/** The Create PR page: a shared title and body, and one section per repository with commits. */
+/** The Create PR page: one section per repository with commits, each with its own title and body (REP-26). */
 export class CreatePullRequestView extends ItemView {
 	plugin: TheoryPlugin;
 	private reportId: string | null = null;
 	private loading = false;
 	private sections: Section[] = [];
-	private title = "";
-	private body = "";
-	// Body generations running, keyed by "shared" or the repository path.
+	// Body generations running, keyed by the repository path.
 	private generating = new Map<string, PullRequestBodyRun>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
@@ -103,10 +100,8 @@ export class CreatePullRequestView extends ItemView {
 		const epic = report.issues?.find((i) => i.kind === "epic");
 		const epicOrigin = epic ? await githubOrigin(epic.repoPath) : null;
 		const epicRepoName = epicOrigin ? epicOrigin.replace("https://github.com/", "") : null;
-		this.title = epic?.title ?? report.revisions[report.revisions.length - 1]?.subject ?? "";
-		// Every title starts as the epic's. The shared body refers to the epic from anywhere; each repository's
-		// own body refers to it as that repository must (REP-27, BLD-26).
-		this.body = sharedEpicPullRequestBody(report, epicRepoName);
+		// Every title starts as the epic's. Each body refers to the epic as its repository must (REP-27, BLD-26).
+		const title = epic?.title ?? report.revisions[report.revisions.length - 1]?.subject ?? "";
 		const candidates = await pullRequestCandidates(report);
 		const ghBlocked = candidates.length > 0 ? await ghProblem(candidates[0].branch.repoPath) : null;
 		for (const candidate of candidates) {
@@ -122,9 +117,7 @@ export class CreatePullRequestView extends ItemView {
 				base,
 				draft: false,
 				reviewers: "",
-				// Off by default: each repository refers to the epic differently (REP-26).
-				shared: false,
-				title: this.title,
+				title,
 				body,
 				error: null,
 				creating: false,
@@ -158,10 +151,6 @@ export class CreatePullRequestView extends ItemView {
 			contentEl.createDiv({ cls: "theory-report-empty", text: "No epic branch from this build needs a pull request." });
 			return;
 		}
-
-		const shared = contentEl.createDiv({ cls: "theory-create-pr-shared" });
-		this.titleField(shared, this.title, (value) => (this.title = value));
-		this.bodyField(shared, "shared", this.body, (value) => (this.body = value), this.sections.map((s) => s.branch.repo));
 
 		for (const section of this.sections) this.renderSection(section);
 
@@ -205,17 +194,8 @@ export class CreatePullRequestView extends ItemView {
 			.setName("Reviewers")
 			.setDesc("GitHub usernames, separated by commas.")
 			.addText((text) => text.setValue(section.reviewers).onChange((value) => (section.reviewers = value)));
-		new Setting(el).setName("Use the shared title and body").addToggle((toggle) =>
-			toggle.setValue(section.shared).onChange((value) => {
-				// Its own title and body are kept, only hidden, while the shared ones are used.
-				section.shared = value;
-				this.render();
-			}),
-		);
-		if (!section.shared) {
-			this.titleField(el, section.title, (value) => (section.title = value));
-			this.bodyField(el, section.branch.repoPath, section.body, (value) => (section.body = value), [section.branch.repo]);
-		}
+		this.titleField(el, section.title, (value) => (section.title = value));
+		this.bodyField(el, section, (value) => (section.body = value));
 		if (section.error) el.createDiv({ cls: "theory-create-pr-error", text: `Couldn't create the pull request: ${section.error}` });
 		if (section.creating) el.createDiv({ cls: "theory-report-meta", text: "Creating…" });
 	}
@@ -226,14 +206,18 @@ export class CreatePullRequestView extends ItemView {
 		input.addEventListener("input", () => onChange(input.value));
 	}
 
-	/** A body box with the sparkle that asks Claude to write it, the same as the commit message's. */
-	private bodyField(container: HTMLElement, key: string, value: string, onChange: (value: string) => void, repos: string[]) {
+	/**
+	 * A section's body box with the sparkle that asks Claude to write it, the same as the commit message's. Claude gets
+	 * only that repository's changes (REP-28).
+	 */
+	private bodyField(container: HTMLElement, section: Section, onChange: (value: string) => void) {
+		const key = section.branch.repoPath;
 		const box = container.createDiv({ cls: "theory-commit-message-box" });
 		const text = box.createEl("textarea", {
 			cls: "theory-commit-message theory-create-pr-body",
 			attr: { rows: "8", placeholder: "Body", "aria-label": "Body" },
 		});
-		text.value = value;
+		text.value = section.body;
 		text.addEventListener("input", () => onChange(text.value));
 		const generate = box.createEl("button", {
 			cls: "clickable-icon theory-commit-generate",
@@ -249,17 +233,13 @@ export class CreatePullRequestView extends ItemView {
 			const { claudeCommand } = this.plugin.settings;
 			const { model, effort } = resolveTask(this.plugin.settings.tasks, "writing");
 			const several = projectRepos(this.plugin.settings.projectFolder).length > 1;
-			const run = generatePullRequestBody({ claudeCommand, model, effort, report, repos, several });
+			const run = generatePullRequestBody({ claudeCommand, model, effort, report, repo: section.branch.repo, several });
 			this.generating.set(key, run);
 			this.render();
 			try {
 				const generated = await run.done;
 				// The generated text replaces the box's text.
-				if (key === "shared") this.body = generated;
-				else {
-					const section = this.sections.find((s) => s.branch.repoPath === key);
-					if (section) section.body = generated;
-				}
+				section.body = generated;
 			} catch (error) {
 				if (this.generating.get(key) === run) {
 					new Notice(`Couldn't generate the body: ${error instanceof Error ? error.message : String(error)}`, 10000);
@@ -281,8 +261,8 @@ export class CreatePullRequestView extends ItemView {
 		}
 		this.render();
 		for (const section of ready) {
-			const title = (section.shared ? this.title : section.title).trim();
-			const body = section.shared ? this.body : section.body;
+			const title = section.title.trim();
+			const body = section.body;
 			try {
 				if (!title) throw new Error("The title is empty.");
 				const reviewers = section.reviewers.split(",").map((r) => r.trim()).filter(Boolean);

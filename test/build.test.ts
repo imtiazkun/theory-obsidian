@@ -13,7 +13,6 @@ import {
 	epicBranchName,
 	epicPullRequestBody,
 	issueRef,
-	sharedEpicPullRequestBody,
 	interruptedBuild,
 	issueBranchName,
 	openBuildBranch,
@@ -22,7 +21,7 @@ import {
 } from "../src/build";
 import { CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
 import { fromSharedReport, markerCommit, sharedBuild, toSharedReport } from "../src/shared-report";
-import { type IssueRecord, fillIssueBodies, plannedBody } from "../src/plan";
+import { type IssueRecord, fillIssueBodies, issueBody, plannedBody, plannedWhere } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { FakeStep, fakeClaude, repoWithOrigin } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -36,7 +35,7 @@ async function setup() {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	const api = await repoWithOrigin(project, "api");
 	const web = await repoWithOrigin(project, "web");
 	const github = new FakeGitHub();
@@ -277,6 +276,34 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 	});
 });
 
+describe("what Claude is told for each issue (BLD-20, BLD-29)", () => {
+	it("BLD-20: passes the issue's Where and says to start from it, searching only for what it doesn't cover", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		report.issues![0].where = ["src/serve.ts:10-20", "src/log.ts (new)"];
+		await build(s, report);
+		const [call] = s.claude.calls();
+		expect(call.prompt).toContain("\nBuild one.\n\n## Where to start\n\n- src/serve.ts:10-20\n- src/log.ts (new)\n");
+		expect(call.prompt).toContain('Start from the files and lines under "Where to start": the compile found them for this issue. Search only for what they don\'t cover.');
+	});
+
+	it("BLD-20: says so when the compile named no files, as an issue planned before CMP-107", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report);
+		expect(s.claude.calls()[0].prompt).toContain("## Where to start\n\nThe compile named no files for this issue, so find the code it changes yourself.");
+	});
+
+	it("BLD-29: tells Claude to cite rule IDs in short comments and to name tests after rules", async () => {
+		const s = await setup();
+		await build(s, await planned(s, [{ repo: "api", shortName: "one" }]));
+		const { prompt } = s.claude.calls()[0];
+		expect(prompt).toContain("Cite the rule ID in a short comment beside code that follows it, like `// The welcome note says what to do first (SET-10).`");
+		expect(prompt).toContain("not on every line");
+		expect(prompt).toContain("Name tests after the rules they check.");
+	});
+});
+
 describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 	it("builds sub-issues in order on branches from the epic branch, merges each into it, closes each, and never touches a default branch", async () => {
 		const s = await setup();
@@ -344,17 +371,15 @@ describe("referring to issues across repositories (BLD-16, BLD-26, REP-27)", () 
 		);
 	});
 
-	it("gives the epic's repository, another repository and the shared Body their default bodies", async () => {
+	it("gives the epic's repository and another repository their default bodies", async () => {
 		const s = await setup();
 		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
 		const epic = report.issues?.find((i) => i.kind === "epic");
 		expect([epic?.repo, epic?.number]).toEqual(["api", 1]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// Not the local folder name when the epic's GitHub name is unknown.
 		expect(epicPullRequestBody(report, "team/web", null)).toBe(`Part of ${epic?.url}`);
-		expect(sharedEpicPullRequestBody(report, null)).toBe(`Part of ${epic?.url}`);
 	});
 
 	it("decides the sub-issue's 'Part of' by GitHub name, not by local folder", async () => {
@@ -391,7 +416,6 @@ describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", ()
 		]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// A single issue's pull request comes from the build itself.
 		const single = { ...(await planned(s, [{ repo: "api", shortName: "c" }])), id: "2" };
 		single.build = { status: "finished", startedAt: "" };
@@ -553,12 +577,28 @@ describe("continuing a build of the same compile (BLD-8, BLD-9, BLD-12, BLD-27, 
 		expect(plannedBody("Build one.\r\n\r\n---\r\nPlanned by theory.md from these revisions of the model:\r\n- abc1234 Write it")).toBe("Build one.");
 		expect(plannedBody("Rules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:")).toBe("");
 		expect(plannedBody("Written by hand.\n\n---\nA footer.")).toBe("Written by hand.\n\n---\nA footer.");
+		// CMP-108: the Where the plugin added comes off too, and is read back for the build (BLD-20).
+		const withWhere = issueBody(
+			{ kind: "issue", repo: "api", repoPath: "/api", title: "T", body: "Build one.", rules: ["R-1"], shortName: "one", where: ["src/a.ts:1-9", "src/b.ts (new)"] },
+			[{ hash: "abc1234def", author: "A", date: "", subject: "Write it" }],
+		);
+		expect(withWhere).toBe("Build one.\n\nRules: R-1\n\nWhere:\n- src/a.ts:1-9\n- src/b.ts (new)\n\n---\nPlanned by theory.md from these revisions of the model:\n- abc1234 Write it");
+		expect(plannedBody(withWhere)).toBe("Build one.");
+		expect(plannedWhere(withWhere)).toEqual(["src/a.ts:1-9", "src/b.ts (new)"]);
+		expect(plannedWhere("Build one.\n\nRules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:")).toEqual([]);
+		// A body written by hand keeps its own list.
+		expect(plannedBody("Written by hand.\n\nWhere:\n- here")).toBe("Written by hand.\n\nWhere:\n- here");
+		expect(plannedWhere("Written by hand.\n\nWhere:\n- here")).toEqual([]);
 		const s = await setup();
 		const records = (await planned(s, [{ repo: "api", shortName: "one" }])).issues ?? [];
 		records[0].body = "";
 		s.github.issues[0].body = "From GitHub.";
 		await fillIssueBodies(s.github, records);
 		expect(records[0].body).toBe("From GitHub.");
+		records[0].body = "";
+		s.github.issues[0].body = withWhere;
+		await fillIssueBodies(s.github, records);
+		expect([records[0].body, records[0].where]).toEqual(["Build one.", ["src/a.ts:1-9", "src/b.ts (new)"]]);
 		records[0].body = "";
 		s.github.failNext("issueBody", "offline");
 		await expect(fillIssueBodies(s.github, records)).rejects.toThrow("Couldn't read api#1 on GitHub: offline");
@@ -766,5 +806,52 @@ describe("a build after Obsidian closed, and which compile Build builds (BLD-1, 
 		]);
 		// The issue the recompile closed was never built.
 		expect((await branches(s.web.repo)).filter((b) => b.includes("two"))).toEqual([]);
+	});
+});
+
+describe("a build's tokens (REP-56)", () => {
+	const usage = { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 300, cache_read_input_tokens: 4000 };
+
+	it("adds up every issue's tokens on the build's record, kept apart from the compile's, and shares them with the build", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ commit: "one.txt", answer: built(), model: "claude-sonnet-5-5", usage },
+			{ commit: "two.txt", answer: built(), model: "claude-sonnet-5-5", usage },
+		]);
+		const report = await planned(s, [
+			{ repo: "api", shortName: "one" },
+			{ repo: "web", shortName: "two" },
+		]);
+		report.tokens = { input: 5, output: 6, cacheWrites: 7, cacheReads: 8, model: "claude-opus-5-5" };
+		await build(s, report);
+
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.tokens).toEqual({ input: 200, output: 40, cacheWrites: 600, cacheReads: 8000, model: "claude-sonnet-5-5" });
+		// Before, a build's tokens were added to the compile's count.
+		expect(report.tokens).toEqual({ input: 5, output: 6, cacheWrites: 7, cacheReads: 8, model: "claude-opus-5-5" });
+		expect(sharedBuild(report, { name: "Ana", email: "ana@example.com" })?.tokens).toEqual(report.build?.tokens);
+	});
+
+	it("counts only its own tokens when it continues a build of the same compile (BLD-27)", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "one.txt", answer: built(), model: "claude-sonnet-5-5", usage }]);
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		const earlier = { status: "stopped" as const, startedAt: "2026-11-27T09:00:00.000Z", tokens: { input: 9, output: 9, cacheWrites: 9, cacheReads: 9 } };
+		report.build = { ...earlier };
+		report.builds = [{ ...sharedBuild(report, { name: "Ana", email: "ana@example.com" })!, tokens: earlier.tokens }];
+		await build(s, report);
+		expect(report.build?.tokens).toEqual({ input: 100, output: 20, cacheWrites: 300, cacheReads: 4000, model: "claude-sonnet-5-5" });
+		expect(report.builds[0].tokens).toEqual(earlier.tokens);
+	});
+});
+
+describe("a pull request body's changes (REP-28)", () => {
+	it("are only that repository's, never another's", async () => {
+		const { changesFor } = await import("../src/pr-body");
+		const report = { changes: ["[web] Add the login page", "[api] Add the login route", "[web] Style it"] } as CompileReport;
+		expect(changesFor(report, "web", true)).toEqual(["[web] Add the login page", "[web] Style it"]);
+		expect(changesFor(report, "api", true)).toEqual(["[api] Add the login route"]);
+		// With one repository, every change is about it.
+		expect(changesFor(report, "web", false)).toEqual(report.changes);
 	});
 });

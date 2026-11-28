@@ -3,6 +3,7 @@ import { recompiledBy } from "./recompile";
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { plainProblem } from "./anchor";
+import type { TokenUsage } from "./costs";
 import {
 	BranchCommit,
 	CodeRepo,
@@ -83,6 +84,8 @@ export interface BuildRecord {
 	message?: string;
 	/** "Skipped and still open: {issues}." when an epic's build finished with sub-issues skipped (BLD-28). */
 	skippedLine?: string;
+	/** This build's tokens in four parts, every issue's added up, kept apart from the compile's (REP-56). */
+	tokens?: TokenUsage;
 }
 
 /** What Build says when a compile has nothing left to build (BLD-27). */
@@ -195,7 +198,13 @@ async function modelInstructions(snapshot: string, repo: string): Promise<{ path
 	return text === null ? null : { path: `${repo}/${name}`, text };
 }
 
-/** The prompt for one issue: what BLD-20 says Claude receives, and the rules of BLD-21. */
+/** The issue's Where as the build prompt gives it (BLD-20): the files and lines the compile found (CMP-107). */
+function whereText(where: string[] | undefined): string {
+	if (!where || where.length === 0) return "## Where to start\n\nThe compile named no files for this issue, so find the code it changes yourself.";
+	return ["## Where to start", "", ...where.map((entry) => `- ${entry}`)].join("\n");
+}
+
+/** The prompt for one issue: what BLD-20 says Claude receives, the rules of BLD-21, and BLD-29 on citing rules. */
 export function buildPrompt(params: {
 	snapshot: string;
 	head: string;
@@ -220,11 +229,15 @@ Branch checked out: ${branch}
 
 ${issue.body}
 
+${whereText(issue.where)}
+
 ## Rules
 
 - The model is read-only. Never create, edit, move or delete anything in the model directory, and never write to the Obsidian vault it came from. Writing to the model is forbidden.
 - The model is the source of truth. If the code disagrees with the model, change the code.
 - Build only what this issue covers, and change files only in this repository.
+- Start from the files and lines under "Where to start": the compile found them for this issue. Search only for what they don't cover.
+- Cite the rule ID in a short comment beside code that follows it, like \`// The welcome note says what to do first (SET-10).\`, where the code would surprise a reader without it, not on every line. Name tests after the rules they check. The next compile finds the code by the rule IDs it cites.
 - Before changing the repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in its folder in the model directory, and follow them, including how to test. When they disagree, the model's \`instructions.md\` wins.
 - End every commit message with the trailers \`Model-Revision: ${head}\` and \`Refs #${issue.number}\`.
 - If the model is unclear, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory, with \`anchors\` pointing at the rule that needs updating.
@@ -325,6 +338,8 @@ export async function startBuild(
 	delete build.waiting;
 	delete build.message;
 	delete build.skippedLine;
+	// REP-56: the build before this one keeps its tokens in `report.builds`; this build counts its own.
+	delete build.tokens;
 	report.build = build;
 	report.problems.push(...skippedClosed.map(plainProblem));
 	for (const line of skippedClosed) appendLog(report, line);
@@ -408,6 +423,7 @@ export async function startBuild(
 			readOnly: false,
 			what: "build",
 			report,
+			usageTo: build,
 			onUpdate: update,
 			onPermissionRequest: options.onPermissionRequest,
 		});
@@ -700,10 +716,4 @@ export function epicPullRequestBody(report: CompileReport, repoName: string | nu
 	return ref === `#${epic.number}` ? `Closes ${ref}` : `Part of ${ref}`;
 }
 
-/** The shared Body's default on the Create PR page (REP-27): "Part of {owner}/{name}#{epic}", whatever the repository. */
-export function sharedEpicPullRequestBody(report: CompileReport, epicRepoName: string | null): string {
-	const epic = report.issues?.find((i) => i.kind === "epic");
-	if (!epic?.number) return "";
-	return `Part of ${issueRef(epic.number, epicRepoName, null, epic.url)}`;
-}
 
