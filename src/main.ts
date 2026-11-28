@@ -136,6 +136,8 @@ export default class TheoryPlugin extends Plugin {
 	private buildRun: BuildRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
 	private compileStarting = false;
+	/** True from Build's click until its run starts, so the button says "Building…" during the pull (BLD-4). */
+	private buildStarting = false;
 	// At most one Expand per repository at a time, keyed by its name.
 	private expandRuns = new Map<string, ExpandRun>();
 	private statusBar: HTMLElement | null = null;
@@ -437,7 +439,7 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	isBuilding(): boolean {
-		return this.buildRun !== null;
+		return this.buildRun !== null || this.buildStarting;
 	}
 
 	/** The report of the compile or build running now, or null. */
@@ -468,6 +470,8 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 		this.compileStarting = true;
+		// The button shows the compile from the click, through the pull before it (CMP-48, UI-3).
+		this.compileButton.refresh();
 		try {
 			await this.runCompile(earlier);
 		} finally {
@@ -626,10 +630,14 @@ export default class TheoryPlugin extends Plugin {
 		}
 		const report = this.adoptReport(found.id) ?? found;
 		this.compileStarting = true;
+		this.buildStarting = true;
+		// The button shows the build from the click, through the pull before it (BLD-4, UI-3).
+		this.compileButton.refresh();
 		try {
 			await this.runBuild(report);
 		} finally {
 			this.compileStarting = false;
+			this.buildStarting = false;
 			this.buildRun = null;
 			this.compileButton.refresh();
 			this.refreshReportViews();
