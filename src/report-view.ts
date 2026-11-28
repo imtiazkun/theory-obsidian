@@ -31,6 +31,7 @@ export const STATUS_ICON:Record<CompileStatus, string> = {
 	succeeded: "check-circle",
 	failed: "alert-triangle",
 	cancelled: "x-circle",
+	imported: "import",
 };
 
 /** An issue's build state as the report shows it (BLD-3). */
@@ -475,7 +476,7 @@ export class CompileReportView extends ItemView {
 		} catch {
 			return;
 		}
-		pendingRevisionCount(vaultPath)
+		pendingRevisionCount(vaultPath, this.plugin.settings.shareReports)
 			.catch(() => 0)
 			.then((pending) => {
 				if (pending === this.pending) return;

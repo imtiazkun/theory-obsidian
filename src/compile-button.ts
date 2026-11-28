@@ -178,7 +178,7 @@ export class CompileButton {
 
 		if (plugin.isCompiling()) return { compile: { kind: "running" }, changed };
 		if (!plugin.settings.projectFolder) return { compile: { kind: "setup" }, changed };
-		const pending = await pendingRevisionCount(vaultPath);
+		const pending = await pendingRevisionCount(vaultPath, plugin.settings.shareReports);
 		if (pending > 0) return { compile: { kind: "ready", pending }, changed };
 		if (plugin.reports[0]?.status === "failed") return { compile: { kind: "failed" }, changed };
 		return { compile: { kind: "idle" }, changed };

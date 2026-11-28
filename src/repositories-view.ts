@@ -59,6 +59,9 @@ export class RepositoriesView extends ItemView {
 		const folder = this.plugin.settings.projectFolder;
 		const found = findProjectRepos(folder);
 		const repos = projectRepos(folder);
+		// The model folder icons follow the repositories this page shows: on Refresh, and after New repository and
+		// Add model folder, which both redraw the page (UI-42).
+		this.plugin.entryFiles.sync();
 
 		if (fetch && repos.length > 0) {
 			contentEl.empty();

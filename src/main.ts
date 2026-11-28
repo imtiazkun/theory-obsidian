@@ -22,6 +22,8 @@ import {
 	type ShareMoment,
 	type SharedFile,
 	compileMoment,
+	type ImportResult,
+	importMarker,
 	keptReports,
 	notSharedNotice,
 	readSharedFolder,
@@ -104,7 +106,8 @@ export default class TheoryPlugin extends Plugin {
 	private ruleCounts = new RuleCounts(this);
 	ruleAuthors = new RuleAuthorsOverlay(this);
 	private hiddenFolders = new HiddenFolders(this);
-	private entryFiles = new EntryFiles(this);
+	/** The entry file and model folder icons in the file explorer; the Repositories page refreshes them (UI-42). */
+	readonly entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
 	comments = new Comments(this);
 	/** The engineer's own commands, run after events and never awaited (HOOK-4). */
@@ -248,8 +251,11 @@ export default class TheoryPlugin extends Plugin {
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
 			// The sync status shows "No remote" or "Not pulled yet" even when no pull runs (PULL-9).
 			await this.puller.checkOrigin();
-			if (launching) this.puller.pull("launch");
+			const launchPull = launching ? this.puller.pull("launch") : Promise.resolve(null);
 			this.restartPullTimer();
+			// CFG-45: after the launch pull, so a teammate's shared marker is seen before the tag is carried over.
+			this.markerImport = launchPull.catch(() => null).then(() => this.importMarkerOnce());
+			await this.markerImport;
 		});
 		// A file explorer opened later gets the same sorting and the same entry files.
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.hiddenFolders.attach()));
@@ -499,6 +505,8 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	private async runCompile(earlier?: CompileReport) {
+		// A compile never starts from the empty marker the one-time import is about to fill (CFG-45).
+		await this.markerImport;
 		// "Recompile failed" for a recompile, as BLD-5 does for a build (CMP-75).
 		const recompile = earlier !== undefined;
 		const failed = failedPrefix(recompile);
@@ -535,7 +543,7 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 
-		const { projectFolder, githubProject } = this.settings;
+		const { projectFolder, githubProject, shareReports } = this.settings;
 		// Read once: a change to the row applies from the next compile (CFG-19, CMP-13).
 		const agentSettings = taskAgentSettings(this.settings, "compile");
 		let run: CompileRun;
@@ -549,10 +557,12 @@ export default class TheoryPlugin extends Plugin {
 					authorEmail,
 					githubProject,
 					fetched,
-					// Each compile Claude ran is shared in `.compiles/` (REP-10, REP-46).
+					// Each compile Claude ran is shared in `.compiles/` (REP-10, REP-46). With Share compile reports off,
+					// it stays in the data file and the local tag is the marker (CFG-44).
+					shareReports,
 					share: async (report, snapshots) => {
 						const moment = compileMoment(report);
-						if (moment) await this.shareReport(report, moment, snapshots);
+						if (moment) await this.shareReport(report, moment, snapshots, shareReports);
 					},
 					...(earlier ? { recompile: earlier, reports: this.allReports() } : {}),
 					onPermissionRequest: (request) => {
@@ -732,16 +742,22 @@ export default class TheoryPlugin extends Plugin {
 
 	/**
 	 * Writes and commits a compile's shared report at one of the REP-46 moments, then pushes (CMT-31). When the commit
-	 * or the push fails, the report stays in the data file with a notice (REP-48). Never throws.
+	 * or the push fails, the report stays in the data file with a notice (REP-48). With Share compile reports off, it
+	 * stays in the data file and a compile that moved the marker moves the local tag (CFG-44). Never throws.
 	 */
-	async shareReport(report: CompileReport, moment: ShareMoment, snapshots?: { model: string; code: string }): Promise<void> {
+	async shareReport(
+		report: CompileReport,
+		moment: ShareMoment,
+		snapshots?: { model: string; code: string },
+		sharing = this.settings.shareReports,
+	): Promise<void> {
 		const run = async () => {
 			const vaultPath = this.getVaultPath();
 			const { projectFolder } = this.settings;
 			const logPaths = snapshots ? { projectFolder, ...snapshots } : undefined;
 			// REP-50: pull before writing to a shared report, except during a compile, when no pull runs (PULL-4).
 			const pull = async () => (this.isCompiling() ? null : ((await this.puller.pull("share"))?.vault ?? null));
-			return shareReport({ vaultPath, reports: this.allReports(), logPaths, projectFolder, pull, push: () => this.push() }, report, moment);
+			return shareReport({ vaultPath, reports: this.allReports(), logPaths, projectFolder, pull, push: () => this.push(), sharing }, report, moment);
 		};
 		const next = this.shareQueue.then(run, run);
 		this.shareQueue = next.catch(() => {});
@@ -777,6 +793,37 @@ export default class TheoryPlugin extends Plugin {
 		absorbSharedFiles(this.reports, this.sharedFiles, this.settings.projectFolder, this.activeReportId());
 		if (JSON.stringify(this.reports) !== before) await this.saveSettings();
 		this.refreshReportViews();
+	}
+
+	// The one-time import of the old tag (CFG-45). Settled once it ended, or when it doesn't run.
+	private markerImport: Promise<void> = Promise.resolve();
+
+	/**
+	 * The first load with shared reports carries the local tag `theory/compiled` over as a marker-only shared report,
+	 * when none in `.compiles/` moved the marker yet (CFG-45). It runs once: a load that couldn't commit tries again
+	 * on the next. Only while Share compile reports is on. A compile waits for it (`runCompile`). Never throws.
+	 */
+	private async importMarkerOnce(): Promise<void> {
+		if (this.settings.markerImported || !this.settings.shareReports) return;
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+			if (!this.isVaultSetUp()) return;
+		} catch {
+			return;
+		}
+		const result = await importMarker({ vaultPath, push: () => this.push() }).catch(
+			(error): ImportResult => ({ kind: "not-shared", reason: errorMessage(error), committed: false }),
+		);
+		if (result.kind === "not-shared") new Notice(notSharedNotice(result.reason), 10000);
+		if (result.kind !== "not-shared" || result.committed) {
+			this.settings.markerImported = true;
+			await this.saveSettings();
+		}
+		if (result.kind !== "skipped") {
+			await this.loadSharedReports();
+			this.refreshGitState();
+		}
 	}
 
 	/** The reports in plugin data and the shared reports in `.compiles/` together, newest first (REP-51). */
