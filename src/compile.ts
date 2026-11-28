@@ -128,6 +128,11 @@ export interface CompileOptions extends AgentSettings {
 	 * Never throws. Unset means nothing is shared.
 	 */
 	share?: (report: CompileReport, snapshots: { model: string; code: string }) => Promise<void>;
+	/**
+	 * The Share compile reports setting (CFG-44). Off: the marker is the local tag `theory/compiled`, and `share`
+	 * moves it instead of writing to `.compiles/`. Unset means on.
+	 */
+	shareReports?: boolean;
 }
 
 export interface Revision {
@@ -145,7 +150,8 @@ export interface Question {
 	anchors?: Anchor[];
 }
 
-export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled";
+/** `imported` is only the marker-only shared report that carried the old tag over (CFG-45). No compile ends so. */
+export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled" | "imported";
 
 export interface CompileReport {
 	id: string;
@@ -232,11 +238,11 @@ export interface CompileReport {
  * How many committed revisions are waiting to be compiled. A revision that changes only files in dot
  * folders, like a comment, is never pending.
  */
-export async function pendingRevisionCount(vaultPath: string): Promise<number> {
+export async function pendingRevisionCount(vaultPath: string, sharing = true): Promise<number> {
 	const head = await headCommit(vaultPath).catch(() => null);
 	if (!head) return 0;
-	// The marker as the committed shared reports set it, never a tag (REP-49, CMP-90).
-	const from = await markerCommit(vaultPath);
+	// The marker as the committed shared reports set it (REP-49, CMP-90), or the local tag with sharing off (CFG-44).
+	const from = await markerCommit(vaultPath, sharing);
 	if (from === head) return 0;
 	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head, "--", DOT_FOLDERS]);
 	return Number(stdout.trim()) || 0;
@@ -999,9 +1005,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 
 	const head = await headCommit(vaultPath);
-	// The marker as the shared reports set it after the pull before this compile (CMP-90).
-	const marker = await markerCommit(vaultPath);
-	if (marker === head || (await pendingRevisionCount(vaultPath)) === 0) {
+	// The marker as the shared reports set it after the pull before this compile (CMP-90), or the local tag with
+	// Share compile reports off (CFG-44).
+	const sharing = options.shareReports !== false;
+	const marker = await markerCommit(vaultPath, sharing);
+	if (marker === head || (await pendingRevisionCount(vaultPath, sharing)) === 0) {
 		throw new NothingToCompileError("Every committed revision is already compiled.");
 	}
 	// Claude plans from the committed code, never from the engineer's unfinished work (CMP-36).

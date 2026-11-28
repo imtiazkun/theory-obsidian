@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { existsSync } from "fs";
-import { mkdir, readFile, readdir, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import type { BuildRecord, BuildStatus, EpicBranch } from "./build";
@@ -11,7 +11,7 @@ import type { BuildState, IssueRecord } from "./plan";
 import { NO_PROMPT_ENV, type VaultPull } from "./pull";
 import { PUSH_REJECTED, type PushResult } from "./push";
 import { recompiledBy } from "./recompile";
-import { commit, git } from "./vault";
+import { commit, git, requireIdentity } from "./vault";
 
 /** The dot folder at the vault root that holds the shared reports (REP-10). Never theory (INV-8, INV-13). */
 export const COMPILES_FOLDER = ".compiles";
@@ -317,6 +317,11 @@ export interface ShareContext {
 	pull?: () => Promise<VaultPull | null>;
 	/** The project folder, for the repository paths of what a teammate added. Defaults to the one in `logPaths`. */
 	projectFolder?: string;
+	/**
+	 * The Share compile reports setting (CFG-44). Off means nothing is written to `.compiles/`: the report stays in
+	 * the data file, and a compile that moved the marker moves the local tag instead. Unset means on.
+	 */
+	sharing?: boolean;
 }
 
 /**
@@ -353,6 +358,7 @@ async function changedPaths(vaultPath: string, paths: string[]): Promise<boolean
  * it carries the change (REP-48). Never throws.
  */
 export async function shareReport(ctx: ShareContext, report: CompileReport, moment: ShareMoment): Promise<ShareResult> {
+	if (ctx.sharing === false) return keepOnThisMachine(ctx.vaultPath, report, moment);
 	// Only the moments that end a compile Claude ran start a shared report. A build or pull request of a report that
 	// was never shared leaves it only on this machine (REP-10, REP-51).
 	const starts = moment === "compile" || moment === "recompile";
@@ -364,6 +370,19 @@ export async function shareReport(ctx: ShareContext, report: CompileReport, mome
 		else if (result.kind === "not-shared" || result.kind === "refused") r.notShared = result.reason;
 	}
 	return result;
+}
+
+/**
+ * With Share compile reports off (CFG-44): nothing is written or committed, so the report stays in the data file. A
+ * compile that ended and moved the marker moves the local tag `theory/compiled` to its `to`, as before shared reports.
+ * While it waits for Retry or Discard the tag stays, so a Discard leaves it where it was (CMP-68). Never throws.
+ */
+export async function keepOnThisMachine(vaultPath: string, report: CompileReport, moment: ShareMoment): Promise<ShareResult> {
+	const ended = moment === "compile" || moment === "update" || moment === "recompile";
+	if (ended && report.status !== "running" && report.markerMoved === true && /^[0-9a-f]{40}$/.test(report.toCommit)) {
+		await git(vaultPath, ["tag", "-f", MARKER_TAG, report.toCommit]).catch(() => {});
+	}
+	return { kind: "local" };
 }
 
 /**
@@ -476,11 +495,26 @@ export async function committedSharedReports(vaultPath: string): Promise<Map<str
 }
 
 /**
- * The last compile marker (REP-49, CMP-90): the `to` of the committed shared report with `markerMoved: true` whose
- * `to` comes last in the vault's history. Never a tag. Null when no shared report moved it.
+ * The last compile marker. With Share compile reports on (REP-49, CMP-90): the `to` of the committed shared report
+ * with `markerMoved: true` whose `to` comes last in the vault's history, never the tag. With it off (CFG-44): the
+ * local tag `theory/compiled`, as before shared reports. Null when nothing moved it yet.
  */
-export async function markerCommit(vaultPath: string): Promise<string | null> {
+export async function markerCommit(vaultPath: string, sharing = true): Promise<string | null> {
+	if (!sharing) return tagMarker(vaultPath);
 	return (await markerOf(vaultPath, await committedSharedReports(vaultPath), "HEAD"))?.to ?? null;
+}
+
+/** The local tag that is the marker while Share compile reports is off (CFG-44). It is never pushed (CMT-32). */
+export const MARKER_TAG = "theory/compiled";
+
+/** The commit the local tag `theory/compiled` points at, or null when there is no such tag. */
+export async function tagMarker(vaultPath: string): Promise<string | null> {
+	try {
+		const { stdout } = await git(vaultPath, ["rev-parse", "--verify", "--quiet", `refs/tags/${MARKER_TAG}^{commit}`]);
+		return stdout.trim() || null;
+	} catch {
+		return null;
+	}
 }
 
 /** The report among `reports` that sets the marker at `rev` (REP-49): markerMoved, and its `to` last in `rev`'s history. */
@@ -539,11 +573,11 @@ export async function compiledMeanwhile(vaultPath: string, report: CompileReport
 }
 
 /**
- * The vault files changed between the marker and HEAD, or null when no shared report moved the marker yet, so every
- * file is pending (REP-49, HDR-6).
+ * The vault files changed between the marker and HEAD, or null when nothing moved the marker yet, so every file is
+ * pending (REP-49, HDR-6). `sharing` is the Share compile reports setting, which says where the marker is (CFG-44).
  */
-export async function filesSinceMarker(vaultPath: string): Promise<string[] | null> {
-	const marker = await markerCommit(vaultPath);
+export async function filesSinceMarker(vaultPath: string, sharing = true): Promise<string[] | null> {
+	const marker = await markerCommit(vaultPath, sharing);
 	if (!marker) return null;
 	const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", marker, "HEAD"]);
 	return stdout.split("\0").filter(Boolean);
@@ -675,7 +709,7 @@ export function absorbShared(report: CompileReport, shared: SharedReport, projec
  * `recompileOf` is the earlier report's file, which `listReports` turns into the id this machine knows it by.
  */
 export function fromSharedReport(shared: SharedReport, file: string, projectFolder: string): CompileReport {
-	const status = (["succeeded", "failed", "cancelled"] as const).find((s) => s === shared.status) ?? "failed";
+	const status = (["succeeded", "failed", "cancelled", "imported"] as const).find((s) => s === shared.status) ?? "failed";
 	const issues: IssueRecord[] = list(shared.issues).map((i) => ({
 		kind: i.kind === "epic" ? "epic" : "issue",
 		repo: i.repo,
@@ -717,4 +751,110 @@ export function fromSharedReport(shared: SharedReport, file: string, projectFold
 	};
 	absorbShared(report, shared, projectFolder);
 	return report;
+}
+
+/** What turning Share compile reports off asks first (CFG-44). */
+export const SHARE_OFF_QUESTION = "Teammates won't see your compiles, and may compile the same revisions again. Turn off?";
+
+/** The question to ask before the Share compile reports toggle changes to `value`: only turning it off asks (CFG-44). */
+export function shareToggleQuestion(value: boolean): string | null {
+	return value ? null : SHARE_OFF_QUESTION;
+}
+
+/** The commit message of the marker carried over from the tag (CFG-45). */
+export const IMPORT_MESSAGE = "Share the compile marker";
+
+/** The summary of the marker-only report the tag is carried over in (CFG-45). */
+export function importSummary(author: string): string {
+	return `Marker carried over from ${author}'s machine`;
+}
+
+export interface ImportContext {
+	vaultPath: string;
+	/** Pushes the vault's `main` as every commit does (CMT-30, CMT-31). */
+	push: () => Promise<PushResult>;
+	/** The time the report is written at. Unset means now. */
+	now?: Date;
+}
+
+/**
+ * How the marker import ended (CFG-45). `skipped`: nothing to carry over, because there is no tag or `.compiles/`
+ * has a report that moved the marker already; nothing is written. `not-shared`: why it wasn't committed or pushed
+ * (REP-48). A commit that wasn't made leaves nothing behind, so the import runs again on the next load.
+ */
+export type ImportResult =
+	| { kind: "imported"; file: string; hash: string }
+	| { kind: "skipped"; reason: "no-tag" | "marker-shared" }
+	| { kind: "not-shared"; reason: string; committed: boolean };
+
+/** The marker-only shared report that carries the tag over (CFG-45): `from` and `to` are the tag, status "Imported". */
+export function importedReport(tag: string, compiledBy: Person, at: Date, shortId = newShortId()): SharedReport {
+	const time = at.toISOString();
+	return {
+		version: SHARED_REPORT_VERSION,
+		id: shortId,
+		compiledBy,
+		startedAt: time,
+		finishedAt: time,
+		// No agent ran: the marker was only carried over.
+		agent: "none",
+		model: null,
+		effort: null,
+		from: tag,
+		to: tag,
+		markerMoved: true,
+		status: "imported",
+		summary: importSummary(compiledBy.name),
+		problems: [],
+		questions: [],
+		revisions: [],
+		code: [],
+		issues: [],
+		recompileOf: null,
+		recompiledBy: null,
+		builds: [],
+		pullRequests: [],
+	};
+}
+
+/**
+ * The one-time upgrade to shared reports (CFG-45): reads the local tag `theory/compiled`, and when no report in
+ * `.compiles/` moved the marker yet, writes one marker-only shared report and commits only it as "Share the compile
+ * marker", signed by the engineer, then pushes. The tag is left in place. Reports already in the data file stay
+ * there, so they list as "Only on this machine" (REP-51). When two engineers upgrade with different tags, the later
+ * `to` wins (REP-49), and whoever pushes second gets the REP-48 notice. Never throws.
+ */
+export async function importMarker(ctx: ImportContext): Promise<ImportResult> {
+	const { vaultPath } = ctx;
+	const tag = await tagMarker(vaultPath);
+	if (!tag) return { kind: "skipped", reason: "no-tag" };
+	// Any report in the folder that moved the marker, committed or not, so an import never runs on top of one.
+	const folder = await readSharedFolder(vaultPath).catch(() => [] as SharedFile[]);
+	const committed = await committedSharedReports(vaultPath).catch(() => new Map<string, SharedReport>());
+	if (folder.some((f) => f.kind === "ok" && f.report.markerMoved) || [...committed.values()].some((r) => r.markerMoved)) {
+		return { kind: "skipped", reason: "marker-shared" };
+	}
+	let file: string;
+	let hash: string;
+	try {
+		const author = await requireIdentity(vaultPath);
+		const at = ctx.now ?? new Date();
+		const report = importedReport(tag, author, at);
+		file = sharedFileName(at.toISOString(), report.id);
+		await mkdir(join(vaultPath, COMPILES_FOLDER), { recursive: true });
+		await writeFile(join(vaultPath, file), formatSharedReport(report));
+		try {
+			hash = await commit(vaultPath, IMPORT_MESSAGE, [file]);
+		} catch (error) {
+			// Nothing is left half done: the file goes, and the next load tries again.
+			await rm(join(vaultPath, file), { force: true }).catch(() => {});
+			throw error;
+		}
+	} catch (error) {
+		return { kind: "not-shared", reason: errorText(error), committed: false };
+	}
+	const push = await ctx.push().catch((error): PushResult => ({ kind: "failed", message: errorText(error) }));
+	if (push.kind === "rejected") return { kind: "not-shared", reason: `Couldn't push: ${PUSH_REJECTED}`, committed: true };
+	if (push.kind === "failed") return { kind: "not-shared", reason: `Couldn't push: ${push.message}`, committed: true };
+	return { kind: "imported", file, hash };
 }
