@@ -126,7 +126,7 @@ describe("core plugins (SET-21, SET-22, SET-24)", () => {
 
 describe("ribbon order (UI-43, UI-44)", () => {
 	const obsidian = [
-		"theory-md:Compile the model",
+		"other-plugin:Do more",
 		"canvas:Create new canvas",
 		"command-palette:Open command palette",
 		"graph:Open graph view",
@@ -143,7 +143,7 @@ describe("ribbon order (UI-43, UI-44)", () => {
 			"templates:Insert template",
 			"command-palette:Open command palette",
 			"theory-md:Show repositories",
-			"theory-md:Compile the model",
+			"other-plugin:Do more",
 			"canvas:Create new canvas",
 			"other-plugin:Do things",
 		]);

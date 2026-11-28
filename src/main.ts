@@ -34,7 +34,6 @@ import { type ReportEntry, absorbSharedFiles, listReports, listedReports } from 
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings, confirmChoice } from "./settings";
 import {
-	REPOSITORIES_RIBBON_TITLE,
 	corePluginsNotice,
 	corePluginsQuestion,
 	missingStartersNotice,
@@ -57,7 +56,10 @@ import { EXPAND_VIEW_TYPE, ExpandView } from "./expand-view";
 import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNotice } from "./pull";
-import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
+import { NewRepositoryModal, REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
+import { THEORY_COMMANDS, THEORY_RIBBON, type TheoryCommandId } from "./commands";
+import { findProjectRepos } from "./project";
+import { newRepositoryProblem } from "./repositories";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
 import { firstLoadInWindow, leafViewType, noteTabTarget, openLaunchLayout, runsLaunchLayout, windowSessionStorage } from "./launch";
@@ -174,68 +176,33 @@ export default class TheoryPlugin extends Plugin {
 		this.settingTab = new TheorySettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);
 
-		this.addCommand({
-			id: "setup-vault",
-			name: "Setup vault",
-			callback: () => this.setUpVault(),
-		});
+		// Exactly the commands UI-10 lists, and only the Repositories ribbon button (UI-8, CMP-1).
+		const commands: Record<TheoryCommandId, () => unknown> = {
+			"setup-vault": () => this.setUpVault(),
+			"show-commit-history": () => this.showHistoryView(true),
+			compile: () => this.compile(),
+			build: () => this.build(),
+			"show-compile-report": () => this.showReportView(),
+			"commit-current-note": () => this.openCommitPage(this.app.workspace.getActiveFile()),
+			"show-repositories": () => this.showRepositories(),
+			"pull-now": () => this.pullNow(),
+			"comment-on-selection": () => this.comments.commentOnSelection(),
+			"show-comments": () => this.showComments(null),
+			"use-core-plugins": () => this.useCorePlugins(),
+			"new-repository": () => this.newRepository(),
+		};
+		for (const { id, name } of THEORY_COMMANDS) this.addCommand({ id, name, callback: () => commands[id]() });
+		for (const { icon, title, command } of THEORY_RIBBON) this.addRibbonIcon(icon, title, () => commands[command]());
 
 		this.registerView(HISTORY_VIEW_TYPE, (leaf) => new CommitHistoryView(leaf, this));
-		this.addCommand({
-			id: "show-commit-history",
-			name: "Show commit history",
-			callback: () => this.showHistoryView(true),
-		});
 		this.registerView(COMMIT_VIEW_TYPE, (leaf) => new CommitView(leaf, this));
 		this.registerView(PAST_COMMIT_VIEW_TYPE, (leaf) => new PastCommitView(leaf, this));
 		this.registerView(COMPILE_HISTORY_VIEW_TYPE, (leaf) => new CompileHistoryView(leaf, this));
 		this.registerView(REPORT_VIEW_TYPE, (leaf) => new CompileReportView(leaf, this));
-		this.addCommand({
-			id: "compile",
-			name: "Compile",
-			callback: () => this.compile(),
-		});
-		this.addCommand({
-			id: "build",
-			name: "Build",
-			callback: () => this.build(),
-		});
-		this.addCommand({
-			id: "show-compile-report",
-			name: "Show compile report",
-			callback: () => this.showReportView(),
-		});
-		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
 		this.registerView(CREATE_PR_VIEW_TYPE, (leaf) => new CreatePullRequestView(leaf, this));
 		this.registerView(EXPAND_VIEW_TYPE, (leaf) => new ExpandView(leaf, this));
 		this.registerView(REPOSITORIES_VIEW_TYPE, (leaf) => new RepositoriesView(leaf, this));
-		this.addCommand({
-			id: "show-repositories",
-			name: "Show repositories",
-			callback: () => this.showRepositories(),
-		});
-		this.addRibbonIcon("folder-git-2", REPOSITORIES_RIBBON_TITLE, () => this.showRepositories());
-		this.addCommand({
-			id: "pull-now",
-			name: "Pull now",
-			callback: () => this.pullNow(),
-		});
 		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsView(leaf, this));
-		this.addCommand({
-			id: "comment-on-selection",
-			name: "Comment on selection",
-			callback: () => this.comments.commentOnSelection(),
-		});
-		this.addCommand({
-			id: "show-comments",
-			name: "Show comments",
-			callback: () => this.showComments(null),
-		});
-		this.addCommand({
-			id: "use-core-plugins",
-			name: "Use theory.md's core plugins",
-			callback: () => this.useCorePlugins(),
-		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
@@ -328,11 +295,6 @@ export default class TheoryPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("file-open", syncOverlay));
 		this.registerEvent(this.app.vault.on("modify", debounce(syncOverlay, 1000, true)));
 
-		this.addCommand({
-			id: "commit-current-note",
-			name: "Commit current note",
-			callback: () => this.openCommitPage(this.app.workspace.getActiveFile()),
-		});
 		const syncButtons = () => this.commitButtons.sync();
 		const syncButtonsSoon = debounce(syncButtons, 1000, true);
 		this.registerEvent(this.app.workspace.on("layout-change", syncButtons));
@@ -952,6 +914,28 @@ export default class TheoryPlugin extends Plugin {
 			await leaf.setViewState({ type: REPOSITORIES_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+	}
+
+	/**
+	 * The command "New repository" (REPO-14): opens the form, unless the project folder can't take a new
+	 * repository; then it shows what the Repositories page says, as a notice (REPO-9).
+	 */
+	newRepository() {
+		const folder = this.settings.projectFolder;
+		const problem = newRepositoryProblem(folder, findProjectRepos(folder));
+		if (problem !== null) {
+			new Notice(problem);
+			return;
+		}
+		new NewRepositoryModal(this.app, this, () => this.refreshRepositoriesViews()).open();
+	}
+
+	/** Redraws every open Repositories page, and the model folder icons with them (UI-42). */
+	private refreshRepositoriesViews() {
+		this.entryFiles.sync();
+		for (const leaf of this.app.workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)) {
+			if (leaf.view instanceof RepositoriesView) void leaf.view.refresh(false);
+		}
 	}
 
 	private reportViews(): CompileReportView[] {
