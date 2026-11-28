@@ -112,8 +112,9 @@ export class NoteStatus {
 		const vaultPath = this.plugin.getVaultPath();
 		const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 		const tracked = new Set(files.split("\0").filter(Boolean));
-		// The marker as the shared reports set it (REP-49). No marker yet means every file is pending.
-		const pending = await filesSinceMarker(vaultPath).catch(() => null);
+		// The marker as the shared reports set it (REP-49), or the local tag with sharing off (CFG-44). No marker yet
+		// means every file is pending.
+		const pending = await filesSinceMarker(vaultPath, this.plugin.settings.shareReports).catch(() => null);
 		return { tracked, pending: pending ? new Set(pending) : "all" };
 	}
 

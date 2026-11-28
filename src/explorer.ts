@@ -196,7 +196,7 @@ export class ChangeDots {
 		const id = ++this.syncId;
 		let dots = new Map<string, ChangeDot>();
 		try {
-			if (this.plugin.isVaultSetUp()) dots = changeDots(await readDotState(this.plugin.getVaultPath()));
+			if (this.plugin.isVaultSetUp()) dots = changeDots(await readDotState(this.plugin.getVaultPath(), this.plugin.settings.shareReports));
 		} catch {
 			// Git couldn't be read; show no dots rather than wrong ones.
 		}

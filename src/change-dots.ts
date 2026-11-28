@@ -67,11 +67,12 @@ export function isOrange(dot: ChangeDot): boolean {
 }
 
 /** Reads the dots' state from git. */
-export async function readDotState(vaultPath: string): Promise<DotState> {
+export async function readDotState(vaultPath: string, sharing = true): Promise<DotState> {
 	const uncommitted = await changedFiles(vaultPath);
 	const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 	const tracked = files.split("\0").filter(Boolean);
-	// The marker as the shared reports set it (REP-49). No marker yet means every file is pending (HDR-6).
-	const pending = await filesSinceMarker(vaultPath).catch(() => null);
+	// The marker as the shared reports set it (REP-49), or the local tag with sharing off (CFG-44). No marker yet
+	// means every file is pending (HDR-6).
+	const pending = await filesSinceMarker(vaultPath, sharing).catch(() => null);
 	return { uncommitted, tracked, pending: pending ?? "all" };
 }

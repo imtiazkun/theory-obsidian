@@ -6,6 +6,8 @@ export const STATUS_TEXT: Record<CompileStatus, string> = {
 	succeeded: "Compiled",
 	failed: "Failed",
 	cancelled: "Cancelled",
+	// The marker-only report that carried the old tag over (CFG-45).
+	imported: "Imported",
 };
 
 /** How a report kept only in the data file is marked (REP-51). */
