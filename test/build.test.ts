@@ -13,7 +13,6 @@ import {
 	epicBranchName,
 	epicPullRequestBody,
 	issueRef,
-	sharedEpicPullRequestBody,
 	interruptedBuild,
 	issueBranchName,
 	openBuildBranch,
@@ -344,17 +343,15 @@ describe("referring to issues across repositories (BLD-16, BLD-26, REP-27)", () 
 		);
 	});
 
-	it("gives the epic's repository, another repository and the shared Body their default bodies", async () => {
+	it("gives the epic's repository and another repository their default bodies", async () => {
 		const s = await setup();
 		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
 		const epic = report.issues?.find((i) => i.kind === "epic");
 		expect([epic?.repo, epic?.number]).toEqual(["api", 1]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// Not the local folder name when the epic's GitHub name is unknown.
 		expect(epicPullRequestBody(report, "team/web", null)).toBe(`Part of ${epic?.url}`);
-		expect(sharedEpicPullRequestBody(report, null)).toBe(`Part of ${epic?.url}`);
 	});
 
 	it("decides the sub-issue's 'Part of' by GitHub name, not by local folder", async () => {
@@ -391,7 +388,6 @@ describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", ()
 		]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// A single issue's pull request comes from the build itself.
 		const single = { ...(await planned(s, [{ repo: "api", shortName: "c" }])), id: "2" };
 		single.build = { status: "finished", startedAt: "" };
@@ -766,5 +762,16 @@ describe("a build after Obsidian closed, and which compile Build builds (BLD-1, 
 		]);
 		// The issue the recompile closed was never built.
 		expect((await branches(s.web.repo)).filter((b) => b.includes("two"))).toEqual([]);
+	});
+});
+
+describe("a pull request body's changes (REP-28)", () => {
+	it("are only that repository's, never another's", async () => {
+		const { changesFor } = await import("../src/pr-body");
+		const report = { changes: ["[web] Add the login page", "[api] Add the login route", "[web] Style it"] } as CompileReport;
+		expect(changesFor(report, "web", true)).toEqual(["[web] Add the login page", "[web] Style it"]);
+		expect(changesFor(report, "api", true)).toEqual(["[api] Add the login route"]);
+		// With one repository, every change is about it.
+		expect(changesFor(report, "web", false)).toEqual(report.changes);
 	});
 });
