@@ -3,7 +3,8 @@ import { CommitButtons } from "./commit";
 import { COMMIT_VIEW_TYPE, CommitView, PAST_COMMIT_VIEW_TYPE, PastCommitView } from "./commit-view";
 import { type PushResult, commitNotice, pushNotice, pushVault } from "./push";
 import { generateCommitMessage } from "./commit-message";
-import { OLD_AGENT_FIELDS, resolveTask, savedTaskRows, taskAgentSettings } from "./agent-rows";
+import { OLD_AGENT_FIELDS, resolveTask, savedAskQuestionsFirst, savedTaskRows, taskAgentSettings } from "./agent-rows";
+import { savedModelPrices } from "./costs";
 import { COMPILE_HISTORY_VIEW_TYPE, CompileHistoryView } from "./compile-history-view";
 import { CompileButton } from "./compile-button";
 import {
@@ -1190,6 +1191,9 @@ export default class TheoryPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, settings);
 		this.settings.tasks = savedTaskRows(saved);
 		this.settings.hooks = savedHooks(this.settings.hooks);
+		// CFG-47 and CFG-48: data saved before these settings existed gets their defaults.
+		this.settings.askQuestionsFirst = savedAskQuestionsFirst(saved.askQuestionsFirst);
+		this.settings.modelPrices = savedModelPrices(saved.modelPrices);
 		this.setupOnLoad = setupOnLoad === true;
 		if (!(PULL_INTERVALS as readonly number[]).includes(this.settings.pullInterval)) this.settings.pullInterval = DEFAULT_SETTINGS.pullInterval;
 		// Earlier versions called the project folder the code repository, and briefly kept a list of repos.

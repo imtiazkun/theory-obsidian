@@ -17,6 +17,10 @@ export interface FakeStep {
 	hang?: boolean;
 	/** The structured answer. Without one, it answers with no structured output. */
 	answer?: unknown;
+	/** The model it says it runs, in the `system` `init` event Claude Code sends first. Unset sends no such event. */
+	model?: string;
+	/** The `usage` of its result. Default: one input and one output token. `null` reports no usage. */
+	usage?: Record<string, number> | null;
 }
 
 const SCRIPT = `
@@ -58,6 +62,7 @@ function listFiles(root, sub) {
 	return found.sort();
 }
 function act() {
+	if (step.model) process.stdout.write(JSON.stringify({ type: "system", subtype: "init", model: step.model }) + "\\n");
 	if (step.tamper) {
 		const file = join(process.cwd(), step.tamper);
 		chmodSync(dirname(file), 0o755);
@@ -70,7 +75,8 @@ function act() {
 		execFileSync("git", ["commit", "--quiet", "-m", "Build " + step.commit]);
 	}
 	if (step.checkout) execFileSync("git", ["checkout", "--quiet", "-b", step.checkout]);
-	const result = { type: "result", subtype: "success", is_error: false, result: "Finished.", usage: { input_tokens: 1, output_tokens: 1 } };
+	const result = { type: "result", subtype: "success", is_error: false, result: "Finished." };
+	if (step.usage !== null) result.usage = step.usage ?? { input_tokens: 1, output_tokens: 1 };
 	if (step.answer) result.structured_output = step.answer;
 	process.stdout.write(JSON.stringify(result) + "\\n");
 }

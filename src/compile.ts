@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
+import { type TokenUsage, addUsage, claudeUsageParts } from "./costs";
 import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool } from "./code-snapshot";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { dirtyRepos, projectRepos } from "./branches";
@@ -187,8 +188,11 @@ export interface CompileReport {
 	log: string[];
 	/** Who ran the compile: the author name from settings, else from the git config. */
 	author?: string;
-	/** Every token Claude Code counted in this compile: input, output and cache. Unset when it never reported usage. */
-	tokens?: number;
+	/**
+	 * The compile's tokens in four parts, with the model that ran (REP-56). A build's go to its own record. Unset when the
+	 * agent reported none. A number is the single count reports kept before REP-56: `costOf` reads both.
+	 */
+	tokens?: TokenUsage | number;
 	/** "acp" when an ACP agent compiled. Unset for Claude Code. An ACP agent reports no token count. */
 	agent?: CompileAgent;
 	/** The issues this compile planned, the epic first, as far as they were created (REP-40). */
@@ -631,14 +635,6 @@ export function withAllowedRules(allowedTools: string, rules: string[]): string 
 	return list;
 }
 
-/** Sums the token counts in a Claude Code `usage` object, or undefined when there are none. */
-function totalTokens(usage: unknown): number | undefined {
-	if (!usage || typeof usage !== "object") return undefined;
-	const keys = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
-	const counts = keys.map((key) => (usage as Record<string, unknown>)[key]).filter((n): n is number => typeof n === "number");
-	return counts.length > 0 ? counts.reduce((sum, n) => sum + n, 0) : undefined;
-}
-
 /** The summary when Claude Code fails to sign in (CMP-54). */
 export const SIGN_IN_SUMMARY = "Claude Code isn't signed in. Run claude in a terminal, then /login.";
 
@@ -737,8 +733,10 @@ export interface SessionParams {
 	readOnly: boolean;
 	/** "compile" or "build", for the messages. */
 	what: "compile" | "build";
-	/** Where the activity log and the token count go. */
-	report: { log: string[]; tokens?: number };
+	/** Where the activity log goes, and the token parts unless `usageTo` is set. */
+	report: { log: string[]; tokens?: TokenUsage | number };
+	/** Where the token parts go instead of `report`: a build's go to its build record, apart from the compile's (REP-56). */
+	usageTo?: { tokens?: TokenUsage | number };
 	onUpdate: () => void;
 	onPermissionRequest?: (request: PermissionRequest) => void;
 }
@@ -1340,6 +1338,9 @@ export function claudeArgs(params: Pick<SessionParams, "settings" | "protectedPa
 /** Runs Claude Code with `-p` and stream-json in `cwd` for one compile, or one issue of a build. */
 function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 	const { settings, protectedPaths, prompt, report, cwd, readOnly } = params;
+	const usageTo = params.usageTo ?? report;
+	// The model that ran, as Claude Code names it, so the cost uses its price (REP-57).
+	let model: string | undefined;
 	const child: ChildProcess = spawn(settings.claudeCommand || "claude", claudeArgs(params), {
 		cwd,
 		env: { ...process.env, PATH: toolPath() },
@@ -1418,7 +1419,10 @@ function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 			} catch {
 				return;
 			}
-			if (event.type === "assistant") {
+			if (event.type === "system" && event.subtype === "init" && typeof event.model === "string") {
+				model = event.model;
+			} else if (event.type === "assistant") {
+				if (!model && typeof event.message?.model === "string") model = event.message.model;
 				for (const block of event.message?.content ?? []) {
 					if (block.type === "tool_use" && block.name !== "StructuredOutput") {
 						host.log(describeToolUse(block.name, block.input ?? {}));
@@ -1429,8 +1433,9 @@ function runClaudeCode(params: SessionParams, host: AgentHost): AgentRun {
 			} else if (event.type === "control_cancel_request") {
 				host.withdraw(String(event.request_id));
 			} else if (event.type === "result") {
-				const tokens = totalTokens(event.usage);
-				if (tokens !== undefined) report.tokens = (report.tokens ?? 0) + tokens;
+				// REP-56: four parts, added to what this compile or build counted so far.
+				const parts = claudeUsageParts(event.usage);
+				if (parts) usageTo.tokens = addUsage(usageTo.tokens, parts, model);
 				result = {
 					isError: Boolean(event.is_error) || event.subtype !== "success",
 					text: typeof event.result === "string" ? event.result : "",

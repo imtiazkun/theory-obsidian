@@ -1,7 +1,19 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
-import { SAME, TASK_NAMES, type BuildRow, type ClaudeRow, type CompileRow, type TaskRows, agentName, defaultTaskRows, resolveTask } from "./agent-rows";
+import {
+	SAME,
+	TASK_NAMES,
+	type BuildRow,
+	type ClaudeRow,
+	type CompileRow,
+	type TaskRows,
+	agentName,
+	claudeCodeOnlyWrites,
+	defaultTaskRows,
+	resolveTask,
+} from "./agent-rows";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
+import { BUILT_IN_PRICES, PARTS, PART_NAMES, type ModelPrice, parsePrice } from "./costs";
 import { hasOrigin } from "./github";
 import { HOOK_EVENTS, HOOK_EVENT_NAMES, type Hook, type HookEvent } from "./hooks";
 import { findProjectRepos, pickFolder } from "./project";
@@ -23,8 +35,12 @@ export interface TheorySettings extends SavedAuthor {
 	/** Folder holding the project's code. Compile runs Claude Code here. */
 	projectFolder: string;
 	claudeCommand: string;
-	/** One row per task: Compile, Build, Expand and Writing, each with its agent, model and effort (CFG-41). */
+	/** One row per task: Compile, Check, Build, Expand and Writing, each with its agent, model and effort (CFG-41). */
 	tasks: TaskRows;
+	/** Run the question pass before a compile (CMP-105, CFG-47). On by default. */
+	askQuestionsFirst: boolean;
+	/** Prices that override the built-in ones, per million tokens (CFG-48). Empty by default. */
+	modelPrices: ModelPrice[];
 	permissionMode: PermissionMode;
 	allowedTools: string;
 	showCompileButton: boolean;
@@ -55,6 +71,8 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	projectFolder: "",
 	claudeCommand: "claude",
 	tasks: defaultTaskRows(),
+	askQuestionsFirst: true,
+	modelPrices: [],
 	permissionMode: "acceptEdits",
 	allowedTools: "Bash(git *)",
 	showCompileButton: true,
@@ -75,10 +93,9 @@ export function compileDescription(rows: TaskRows): string {
 	return `Compile hands new revisions of the model to ${agentName(compile)}, which plans the work as GitHub issues. Build has ${agentName(build)} write the code for each issue.`;
 }
 
-/** The Claude Code command's description. With an ACP agent for both Compile and Build, Claude Code still runs Expand and Writing (AGT-27). */
+/** The Claude Code command's description. With an ACP agent for Compile, Check and Build, Claude Code still runs Expand and Writing (AGT-27). */
 export function claudeCommandDescription(rows: TaskRows): string {
-	const acp = resolveTask(rows, "compile").agent === "acp" && resolveTask(rows, "build").agent === "acp";
-	return acp
+	return claudeCodeOnlyWrites(rows)
 		? "The Claude Code CLI, as a command name or an absolute path. Used for Expand and Writing."
 		: "The Claude Code CLI, as a command name or an absolute path.";
 }
@@ -442,13 +459,92 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Agents and models")
 			.setDesc(
-				"Each task has its own agent, model and effort. Compile and Build may use Claude Code or any agent that speaks the Agent Client Protocol (ACP). Expand and Writing (commit messages, pull request bodies and suggestions) always use Claude Code. A change applies from the task's next run.",
+				"Each task has its own agent, model and effort. Compile, Check and Build may use Claude Code or any agent that speaks the Agent Client Protocol (ACP). Expand and Writing (commit messages, pull request bodies and suggestions) always use Claude Code. A change applies from the task's next run.",
 			)
 			.setHeading();
 		this.displayCompileRow(containerEl, rows.compile);
-		this.displayBuildRow(containerEl, rows);
+		this.displayFollowingRow(containerEl, rows, "check", "Asks about the model before a compile reads the code.");
+		this.displayFollowingRow(containerEl, rows, "build", "Writes the code for each issue.");
 		this.displayClaudeRow(containerEl, rows.expand, "Expand", "Suggests notes a model folder is missing.");
 		this.displayClaudeRow(containerEl, rows.writing, "Writing", "Commit messages, pull request bodies and suggestions.");
+
+		// CFG-47: on by default. The question pass itself reads this when a compile starts (CMP-105).
+		new Setting(containerEl)
+			.setName("Ask questions first")
+			.setDesc(
+				"Before a compile reads the code, the Check row reads only the model and asks what it leaves unclear. A question found this way costs far less than a recompile.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.askQuestionsFirst).onChange(async (value) => {
+					this.plugin.settings.askQuestionsFirst = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		this.displayModelPrices(containerEl.createDiv({ cls: "theory-model-prices" }));
+	}
+
+	/**
+	 * Model prices (CFG-48): a model name with its price per million tokens for each part. A model listed here uses
+	 * these prices instead of the built-in ones, in every report shown afterwards, old ones included (REP-57).
+	 */
+	private displayModelPrices(containerEl: HTMLElement) {
+		containerEl.empty();
+		const prices = this.plugin.settings.modelPrices;
+		new Setting(containerEl)
+			.setName("Model prices")
+			.setDesc(
+				"US dollars per million tokens, for input, output, cache writes and cache reads. Reports estimate costs from the built-in prices; a model listed here uses your prices instead, in every report, old ones too. Name the model as Claude Code does, like claude-opus-5-5.",
+			)
+			.addButton((button) =>
+				button.setButtonText("Add model").onClick(async () => {
+					prices.push({ model: "", input: 0, output: 0, cacheWrites: 0, cacheReads: 0 });
+					await this.plugin.saveSettings();
+					this.displayModelPrices(containerEl);
+				}),
+			);
+		prices.forEach((price, index) => {
+			const row = new Setting(containerEl).setClass("theory-model-price");
+			row.addText((text) => {
+				text.setPlaceholder("claude-opus-5-5").setValue(price.model);
+				text.inputEl.setAttr("aria-label", "Model");
+				text.onChange(async (value) => {
+					price.model = value.trim();
+					await this.plugin.saveSettings();
+				});
+			});
+			for (const part of PARTS) {
+				row.addText((text) => {
+					text.setPlaceholder(PART_NAMES[part]).setValue(String(price[part]));
+					text.inputEl.setAttr("aria-label", `${PART_NAMES[part]}, dollars per million tokens`);
+					text.inputEl.setAttr("title", PART_NAMES[part]);
+					text.inputEl.addClass("theory-model-price-number");
+					text.onChange(async (value) => {
+						const parsed = parsePrice(value);
+						text.inputEl.toggleClass("theory-invalid", parsed === null);
+						if (parsed === null) return;
+						price[part] = parsed;
+						await this.plugin.saveSettings();
+					});
+				});
+			}
+			row.addExtraButton((button) =>
+				button
+					.setIcon("trash-2")
+					.setTooltip("Remove this price")
+					.onClick(async () => {
+						prices.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.displayModelPrices(containerEl);
+					}),
+			);
+		});
+		const builtIn = containerEl.createEl("details", { cls: "theory-built-in-prices" });
+		builtIn.createEl("summary", { text: "Built-in prices" });
+		const list = builtIn.createEl("ul");
+		for (const p of BUILT_IN_PRICES) {
+			list.createEl("li", { text: `${p.model}: ${PARTS.map((part) => `${PART_NAMES[part].toLowerCase()} $${p[part]}`).join(", ")}` });
+		}
 	}
 
 	private rowTitle(containerEl: HTMLElement, name: string, desc: string) {
@@ -461,23 +557,21 @@ export class TheorySettingTab extends PluginSettingTab {
 		this.agentDropdown(containerEl, row.agent, false, async (value) => {
 			row.agent = value as CompileAgent;
 		});
-		if (row.agent === "acp") this.displayAcpFields(containerEl, row, false);
+		if (row.agent === "acp") this.displayAcpFields(containerEl, row, "compile");
 		else this.modelAndEffort(containerEl, row, false);
 	}
 
-	private displayBuildRow(containerEl: HTMLElement, rows: TaskRows) {
-		const row: BuildRow = rows.build;
-		const agent = resolveTask(rows, "build").agent;
-		const desc =
-			row.agent === SAME
-				? `Writes the code for each issue. Same as Compile: runs ${agentName(agent)}.`
-				: `Writes the code for each issue. Runs ${agentName(agent)}.`;
-		this.rowTitle(containerEl, TASK_NAMES.build, desc);
+	/** Check's and Build's rows: Same as Compile by default, and either may use an ACP agent (CFG-42, CFG-43, CFG-46). */
+	private displayFollowingRow(containerEl: HTMLElement, rows: TaskRows, task: "check" | "build", what: string) {
+		const row: BuildRow = rows[task];
+		const agent = resolveTask(rows, task).agent;
+		const desc = row.agent === SAME ? `${what} Same as Compile: runs ${agentName(agent)}.` : `${what} Runs ${agentName(agent)}.`;
+		this.rowTitle(containerEl, TASK_NAMES[task], desc);
 		this.agentDropdown(containerEl, row.agent, true, async (value) => {
 			row.agent = value as BuildRow["agent"];
 		});
 		if (row.agent === SAME) return;
-		if (row.agent === "acp") this.displayAcpFields(containerEl, row, true);
+		if (row.agent === "acp") this.displayAcpFields(containerEl, row, task);
 		else this.modelAndEffort(containerEl, row, true);
 	}
 
@@ -487,7 +581,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		this.modelAndEffort(containerEl, row, true);
 	}
 
-	/** Agent is a dropdown in the Compile and Build rows; Build's also offers "Same as Compile" (AGT-4). */
+	/** Agent is a dropdown in the Compile, Check and Build rows; Check's and Build's also offer "Same as Compile" (AGT-4, CFG-46). */
 	private agentDropdown(containerEl: HTMLElement, value: string, same: boolean, set: (value: string) => Promise<void>) {
 		new Setting(containerEl).setName("Agent").addDropdown((dropdown) => {
 			if (same) dropdown.addOption(SAME, "Same as Compile");
@@ -507,13 +601,13 @@ export class TheorySettingTab extends PluginSettingTab {
 	private displayAcpFields(
 		containerEl: HTMLElement,
 		row: { agentCommand: string; agentModel: string; agentThinkingLevel: string },
-		build: boolean,
+		task: "compile" | "check" | "build",
 	) {
-		const task = build ? "build" : "compile";
+		const doing = task === "check" ? "check the model" : task;
 		new Setting(containerEl)
 			.setName("Agent command")
 			.setDesc(
-				`The command that starts the agent, with its arguments. theory.md never installs an agent: install it yourself first. ${build ? "Build" : "Compile"} can't start while it is empty.`,
+				`The command that starts the agent, with its arguments. theory.md never installs an agent: install it yourself first. ${TASK_NAMES[task]} can't start while it is empty.`,
 			)
 			.addText((text) =>
 				text
@@ -527,7 +621,7 @@ export class TheorySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Agent model")
 			.setDesc(
-				`The model the agent uses to ${task}, by its value or its name as the agent shows it. Empty means the agent's default. The activity log says which model the agent picked.`,
+				`The model the agent uses to ${doing}, by its value or its name as the agent shows it. Empty means the agent's default. The activity log says which model the agent picked.`,
 			)
 			.addText((text) =>
 				text.setValue(row.agentModel).onChange(async (value) => {
