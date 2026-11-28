@@ -3,6 +3,7 @@ import { recompiledBy } from "./recompile";
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { plainProblem } from "./anchor";
+import type { TokenUsage } from "./costs";
 import {
 	BranchCommit,
 	CodeRepo,
@@ -83,6 +84,8 @@ export interface BuildRecord {
 	message?: string;
 	/** "Skipped and still open: {issues}." when an epic's build finished with sub-issues skipped (BLD-28). */
 	skippedLine?: string;
+	/** This build's tokens in four parts, every issue's added up, kept apart from the compile's (REP-56). */
+	tokens?: TokenUsage;
 }
 
 /** What Build says when a compile has nothing left to build (BLD-27). */
@@ -325,6 +328,8 @@ export async function startBuild(
 	delete build.waiting;
 	delete build.message;
 	delete build.skippedLine;
+	// REP-56: the build before this one keeps its tokens in `report.builds`; this build counts its own.
+	delete build.tokens;
 	report.build = build;
 	report.problems.push(...skippedClosed.map(plainProblem));
 	for (const line of skippedClosed) appendLog(report, line);
@@ -408,6 +413,7 @@ export async function startBuild(
 			readOnly: false,
 			what: "build",
 			report,
+			usageTo: build,
 			onUpdate: update,
 			onPermissionRequest: options.onPermissionRequest,
 		});

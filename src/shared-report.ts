@@ -6,6 +6,7 @@ import { join } from "path";
 import type { BuildRecord, BuildStatus, EpicBranch } from "./build";
 import type { CompileReport, CompileStatus } from "./compile";
 import type { CodeRead } from "./code-snapshot";
+import { type TokenUsage, readUsage } from "./costs";
 import type { PullRequest } from "./github";
 import type { BuildState, IssueRecord } from "./plan";
 import { NO_PROMPT_ENV, type VaultPull } from "./pull";
@@ -38,6 +39,8 @@ export interface SharedBuild {
 	finishedAt: string | null;
 	status: string;
 	issues: { repo: string; number: number; state: string; branch: string | null; pullRequests: string[] }[];
+	/** The build's tokens in four parts, with the model that ran (REP-56). Absent when the agent reported none. */
+	tokens?: TokenUsage;
 }
 
 /** The file in `.compiles/` (REP-45). Times are UTC in ISO 8601, revisions as full hashes. */
@@ -54,6 +57,11 @@ export interface SharedReport {
 	to: string;
 	markerMoved: boolean;
 	status: Exclude<CompileStatus, "running">;
+	/**
+	 * The compile's tokens in four parts, with the model that ran (REP-56), so teammates see its cost too (UI-16).
+	 * Absent when the agent reported none, and in files written before REP-56.
+	 */
+	tokens?: TokenUsage;
 	/** Set while creating an issue failed and the compile waits for Retry or Discard (CMP-68). */
 	issueFailure?: string;
 	summary: string;
@@ -145,6 +153,7 @@ export function sharedBuild(report: CompileReport, builtBy: Person): SharedBuild
 				branch: i.branch ?? null,
 				pullRequests: (report.pullRequests ?? []).filter((pr) => pr.repo === i.repo && i.branch && pr.branch === i.branch).map((pr) => pr.url),
 			})),
+		...(build.tokens ? { tokens: build.tokens } : {}),
 	};
 }
 
@@ -167,6 +176,8 @@ export function toSharedReport(report: CompileReport, reports: CompileReport[]):
 		to: report.toCommit,
 		markerMoved: report.markerMoved === true,
 		status: sharedStatus(report.status),
+		// An older report's single count has no parts, so it isn't shared (REP-56).
+		...(readUsage(report.tokens) ? { tokens: readUsage(report.tokens) } : {}),
 		...(report.issueFailure ? { issueFailure: report.issueFailure } : {}),
 		summary: report.summary,
 		problems: report.problems.map((p) => ({ problem: p.text, anchors: anchorsOf(p.anchors) })),
@@ -744,6 +755,7 @@ export function fromSharedReport(shared: SharedReport, file: string, projectFold
 		model: shared.model ?? "",
 		effort: shared.effort ?? "",
 		markerMoved: shared.markerMoved,
+		...(readUsage(shared.tokens) ? { tokens: readUsage(shared.tokens) } : {}),
 		...(shared.issueFailure ? { issueFailure: shared.issueFailure } : {}),
 		issues,
 		shared: { file, shortId: shared.id || file.replace(/^.*-([^-/]+)\.json$/, "$1") },

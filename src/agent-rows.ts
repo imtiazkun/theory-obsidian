@@ -1,12 +1,19 @@
 import type { AgentSettings, CompileAgent, CompileEffort, CompileModel } from "./compile";
 
-/** The tasks that each have their own row in the settings (CFG-41). Writing is commit messages, pull request bodies and Suggest. */
-export type Task = "compile" | "build" | "expand" | "writing";
+/**
+ * The tasks that each have their own row in the settings (CFG-41). Check is the question pass before a compile
+ * (CMP-99). Writing is commit messages, pull request bodies and Suggest.
+ */
+export type Task = "compile" | "check" | "build" | "expand" | "writing";
 
-export const TASKS: readonly Task[] = ["compile", "build", "expand", "writing"];
+export const TASKS: readonly Task[] = ["compile", "check", "build", "expand", "writing"];
+
+/** The tasks that may run an ACP agent (CFG-43). */
+export type AgentTask = "compile" | "check" | "build";
 
 export const TASK_NAMES: Record<Task, string> = {
 	compile: "Compile",
+	check: "Check",
 	build: "Build",
 	expand: "Expand",
 	writing: "Writing",
@@ -28,7 +35,7 @@ export interface CompileRow {
 	effort: CompileEffort;
 }
 
-/** Build's row. Its agent may be "Same as Compile", which follows Compile's whole row (AGT-4). */
+/** Build's and Check's rows. The agent may be "Same as Compile", which follows Compile's whole row (AGT-4, CFG-46). */
 export interface BuildRow {
 	agent: CompileAgent | Same;
 	agentCommand: string;
@@ -44,8 +51,13 @@ export interface ClaudeRow {
 	effort: CompileEffort | Same;
 }
 
+/** Check's row has Build's shape: it may use an ACP agent too (CFG-43). */
+export type CheckRow = BuildRow;
+
 export interface TaskRows {
 	compile: CompileRow;
+	/** The question pass (CMP-99). Same as Compile by default (CFG-46). */
+	check: CheckRow;
 	build: BuildRow;
 	expand: ClaudeRow;
 	writing: ClaudeRow;
@@ -54,6 +66,7 @@ export interface TaskRows {
 export function defaultTaskRows(): TaskRows {
 	return {
 		compile: { agent: "claude", agentCommand: "", agentModel: "", agentThinkingLevel: "", model: "", effort: "" },
+		check: { agent: SAME, agentCommand: "", agentModel: "", agentThinkingLevel: "", model: SAME, effort: SAME },
 		build: { agent: SAME, agentCommand: "", agentModel: "", agentThinkingLevel: "", model: SAME, effort: SAME },
 		expand: { model: SAME, effort: SAME },
 		writing: { model: SAME, effort: SAME },
@@ -90,7 +103,6 @@ export function savedTaskRows(saved: Record<string, unknown>): TaskRows {
 	}
 	const tasks = record(saved.tasks);
 	const compile = record(tasks.compile);
-	const build = record(tasks.build);
 	const expand = record(tasks.expand);
 	const writing = record(tasks.writing);
 	rows.compile = {
@@ -101,18 +113,25 @@ export function savedTaskRows(saved: Record<string, unknown>): TaskRows {
 		model: pick(compile.model, MODELS, ""),
 		effort: pick(compile.effort, EFFORTS, ""),
 	};
-	rows.build = {
-		agent: pick(build.agent, [...AGENTS, SAME], SAME),
-		agentCommand: text(build.agentCommand),
-		agentModel: text(build.agentModel),
-		agentThinkingLevel: text(build.agentThinkingLevel),
-		model: pick(build.model, [...MODELS, SAME], SAME),
-		effort: pick(build.effort, [...EFFORTS, SAME], SAME),
-	};
+	// Data saved before the Check row existed has none: it is Same as Compile (CFG-46).
+	rows.check = followingRow(record(tasks.check));
+	rows.build = followingRow(record(tasks.build));
 	// Expand and Writing never take an agent, whatever the data says (CFG-43).
 	rows.expand = { model: pick(expand.model, [...MODELS, SAME], SAME), effort: pick(expand.effort, [...EFFORTS, SAME], SAME) };
 	rows.writing = { model: pick(writing.model, [...MODELS, SAME], SAME), effort: pick(writing.effort, [...EFFORTS, SAME], SAME) };
 	return rows;
+}
+
+/** A saved Check or Build row. Anything missing or not a choice is "Same as Compile". */
+function followingRow(row: Record<string, unknown>): BuildRow {
+	return {
+		agent: pick(row.agent, [...AGENTS, SAME], SAME),
+		agentCommand: text(row.agentCommand),
+		agentModel: text(row.agentModel),
+		agentThinkingLevel: text(row.agentThinkingLevel),
+		model: pick(row.model, [...MODELS, SAME], SAME),
+		effort: pick(row.effort, [...EFFORTS, SAME], SAME),
+	};
 }
 
 /** Plugin data fields from before rows existed. They are read into Compile's row and never saved again. */
@@ -146,15 +165,16 @@ export function resolveTask(rows: TaskRows, task: Task): ResolvedTask {
 	switch (task) {
 		case "compile":
 			return { ...compile };
+		case "check":
 		case "build": {
-			const build = rows.build;
-			if (build.agent === SAME) return { ...compile };
+			const row = rows[task];
+			if (row.agent === SAME) return { ...compile };
 			return {
-				agent: build.agent,
-				agentCommand: build.agentCommand,
-				agentModel: build.agentModel,
-				agentThinkingLevel: build.agentThinkingLevel,
-				...claudeModelAndEffort(build, compile),
+				agent: row.agent,
+				agentCommand: row.agentCommand,
+				agentModel: row.agentModel,
+				agentThinkingLevel: row.agentThinkingLevel,
+				...claudeModelAndEffort(row, compile),
 			};
 		}
 		case "expand":
@@ -169,10 +189,10 @@ export function resolveTask(rows: TaskRows, task: Task): ResolvedTask {
 	}
 }
 
-/** The agent settings a compile or a build starts with: its row, resolved, plus the shared Claude Code settings. */
+/** The agent settings a compile, a question pass or a build starts with: its row, resolved, plus the shared Claude Code settings. */
 export function taskAgentSettings(
 	settings: { tasks: TaskRows; claudeCommand: string; permissionMode: AgentSettings["permissionMode"]; allowedTools: string },
-	task: "compile" | "build",
+	task: AgentTask,
 ): AgentSettings {
 	return {
 		...resolveTask(settings.tasks, task),
@@ -180,6 +200,19 @@ export function taskAgentSettings(
 		permissionMode: settings.permissionMode,
 		allowedTools: settings.allowedTools,
 	};
+}
+
+/**
+ * True when Compile, Check and Build all run an ACP agent, so Claude Code runs only Expand and Writing (AGT-27,
+ * CFG-43). A Check row on Claude Code still needs the Claude Code command for the question pass.
+ */
+export function claudeCodeOnlyWrites(rows: TaskRows): boolean {
+	return (["compile", "check", "build"] as const).every((task) => resolveTask(rows, task).agent === "acp");
+}
+
+/** The "Ask questions first" toggle from saved plugin data: on unless it was turned off (CFG-47). */
+export function savedAskQuestionsFirst(value: unknown): boolean {
+	return value !== false;
 }
 
 /** How the settings name a row's agent (AGT-28). */
