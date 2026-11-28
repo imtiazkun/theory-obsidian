@@ -134,6 +134,18 @@ export async function branchPullRequest(
 	return null;
 }
 
+/**
+ * A pull request already opened from this `branch` that Create PR shows instead of opening another (REP-58): open,
+ * draft or merged. A closed one doesn't count, so a new pull request can replace it. Null when gh can't tell.
+ */
+export async function existingPullRequest(
+	repoPath: string,
+	branch: string,
+): Promise<{ url: string; state: PullRequestState } | null> {
+	const found = await branchPullRequest(repoPath, branch);
+	return found && found.state !== "closed" ? found : null;
+}
+
 /** Branch names on `origin`, as git last saw them. Never fetches. */
 export async function remoteBranches(repoPath: string): Promise<string[]> {
 	try {

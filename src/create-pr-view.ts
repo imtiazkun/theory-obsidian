@@ -7,6 +7,7 @@ import {
 	PullRequest,
 	createPullRequest,
 	editPullRequestBody,
+	existingPullRequest,
 	ghProblem,
 	githubOrigin,
 	pullRequestBody,
@@ -34,6 +35,8 @@ interface Section extends PullRequestCandidate {
 	error: string | null;
 	creating: boolean;
 	created: PullRequest | null;
+	/** True when `created` was already on GitHub, not opened from this page (REP-58). */
+	existing: boolean;
 }
 
 /** The Create PR page: a shared title and body, and one section per repository with commits. */
@@ -126,7 +129,12 @@ export class CreatePullRequestView extends ItemView {
 				error: null,
 				creating: false,
 				created: null,
+				existing: false,
 			});
+		}
+		// A branch that already has a pull request shows it instead of a form (REP-58).
+		for (const section of this.sections) {
+			if (!section.blocked) await this.adoptExisting(report, section);
 		}
 		this.loading = false;
 		this.render();
@@ -176,7 +184,7 @@ export class CreatePullRequestView extends ItemView {
 
 		if (section.created) {
 			const done = el.createDiv({ cls: "theory-report-meta" });
-			done.appendText("Created ");
+			done.appendText(section.existing ? `Already has a pull request (${section.created.state}): ` : "Created ");
 			done.createEl("a", { text: section.created.url, href: section.created.url });
 			return;
 		}
@@ -297,8 +305,11 @@ export class CreatePullRequestView extends ItemView {
 				report.pullRequests = [...(report.pullRequests ?? []), section.created];
 				await this.plugin.saveSettings();
 			} catch (error) {
-				// The section keeps its fields, so Create can be tried again.
-				section.error = error instanceof Error ? error.message : String(error);
+				// A pull request opened meanwhile, elsewhere, is shown instead of the error (REP-58).
+				if (!(await this.adoptExisting(report, section))) {
+					// The section keeps its fields, so Create can be tried again.
+					section.error = error instanceof Error ? error.message : String(error);
+				}
 			}
 			section.creating = false;
 			this.render();
@@ -308,6 +319,30 @@ export class CreatePullRequestView extends ItemView {
 		this.plugin.pullRequestsChanged();
 		// A repository that can't get a pull request from here doesn't hold up the others.
 		if (this.sections.filter((s) => !s.blocked).every((s) => s.created)) await this.addFooters(report);
+	}
+
+	/**
+	 * When the section's branch already has an open, draft or merged pull request on GitHub, the section shows it
+	 * and the report keeps it, with a notice, so Create never tries to open a second one (REP-58).
+	 */
+	private async adoptExisting(report: CompileReport, section: Section): Promise<boolean> {
+		const found = await existingPullRequest(section.branch.repoPath, section.branch.branch);
+		if (!found) return false;
+		section.created = {
+			repoPath: section.branch.repoPath,
+			repo: section.branch.repo,
+			branch: section.branch.branch,
+			base: section.base,
+			url: found.url,
+			state: found.state,
+		};
+		section.existing = true;
+		section.error = null;
+		report.pullRequests = [...(report.pullRequests ?? []), section.created];
+		await this.plugin.saveSettings();
+		this.plugin.pullRequestsChanged();
+		new Notice(`${section.branch.repo} already has a pull request (${found.state}): ${found.url}`, 10000);
+		return true;
 	}
 
 	/** Once every pull request exists, each body links the vault revisions compiled and the other pull requests. */
@@ -336,6 +371,8 @@ export class CreatePullRequestView extends ItemView {
 				new Notice(`Couldn't link the pull request in ${pr.repo}: ${error instanceof Error ? error.message : String(error)}`, 10000);
 			}
 		}
-		new Notice(prs.length === 1 ? "Created the pull request." : `Created ${prs.length} pull requests.`);
+		// Pull requests that were already on GitHub (REP-58) had their own notice.
+		const opened = this.sections.filter((s) => s.created && !s.existing).length;
+		if (opened > 0) new Notice(opened === 1 ? "Created the pull request." : `Created ${opened} pull requests.`);
 	}
 }
