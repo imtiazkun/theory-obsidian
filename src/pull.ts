@@ -380,7 +380,8 @@ export function syncMenu(state: SyncState, now: number): SyncMenu {
 	};
 }
 
-export type PullReason = "launch" | "focus" | "timer" | "now" | "compile";
+/** Why a pull runs. "share" is the pull before writing to a shared report (REP-50). */
+export type PullReason = "launch" | "focus" | "timer" | "now" | "compile" | "share";
 
 export interface PullOutcome {
 	/** Null when the vault isn't set up. */
@@ -427,14 +428,16 @@ export class Puller {
 	async pull(reason: PullReason): Promise<PullOutcome | null> {
 		if (AUTOMATIC.includes(reason) && !this.options.automatic()) return null;
 		if (reason !== "compile" && this.options.compiling()) {
+			// A shared report written during a compile is written without a pull (PULL-4), and none waits for it.
+			if (reason === "share") return null;
 			// "Pull now" outranks an automatic pull that is already waiting.
 			if (this.deferred === null || reason === "now") this.deferred = reason;
 			return null;
 		}
 		if (reason === "focus" && this.lastPull !== null && this.now() - this.lastPull < FOCUS_PULL_GAP_MS) return null;
 		if (this.running) {
-			if (reason !== "compile" && reason !== "now") return this.running;
-			// The compile and Pull now need a pull that started after they asked.
+			if (reason !== "compile" && reason !== "now" && reason !== "share") return this.running;
+			// The compile, Pull now and a shared report's write need a pull that started after they asked.
 			await this.running.catch(() => {});
 			return this.pull(reason);
 		}

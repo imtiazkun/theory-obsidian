@@ -9,7 +9,7 @@ import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./an
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
+import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
 import { toolPath } from "./tool-path";
@@ -211,6 +211,21 @@ export interface CompileReport {
 	notShared?: string;
 	/** Every build that ended, as the shared report keeps it (REP-45). */
 	builds?: SharedBuild[];
+	/**
+	 * True for a report read from `.compiles/`, which another engineer's compile shared: its Activity comes from the
+	 * shared log (REP-54), and its issue bodies from GitHub when a build or recompile needs them (REP-50).
+	 */
+	fromShared?: boolean;
+	/**
+	 * The files the shared report links, as last read from `.compiles/` (REP-41, REP-42). Kept so that writing the
+	 * report never drops a link to a report this machine doesn't list.
+	 */
+	sharedLinks?: { recompileOf: string | null; recompiledBy: string | null };
+	/**
+	 * Set when this compile's shared report couldn't be pushed because the remote moved, and the remote's newest
+	 * report had moved the marker past this compile's `from` (CMP-91): that report's file.
+	 */
+	compiledMeanwhile?: string;
 }
 
 /**
@@ -422,6 +437,8 @@ export async function openEarlierIssues(github: GitHub, earlier: CompileReport):
 		}
 		if (state === "open") open.push(record);
 	}
+	// REP-50: an earlier compile read from `.compiles/` has no issue bodies. The prompt and CMP-80 need them.
+	await fillIssueBodies(github, open);
 	return open;
 }
 

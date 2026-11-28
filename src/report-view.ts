@@ -19,15 +19,12 @@ import type TheoryPlugin from "./main";
 import type { BuildChoice } from "./build";
 import { issueFate, issueOrigin, recompileButton, recompiledBy, recompiledReport } from "./recompile";
 import { startSuggest, type SuggestRun } from "./suggest";
+import { ONLY_HERE, STATUS_TEXT, type ReportEntry, entryId, entryLabel } from "./report-list";
+import { COMPILED_MEANWHILE, NO_ACTIVITY_LOG, readActivityLog } from "./shared-report";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
 
-export const STATUS_TEXT:Record<CompileStatus, string> = {
-	running: "Compiling…",
-	succeeded: "Compiled",
-	failed: "Failed",
-	cancelled: "Cancelled",
-};
+export { STATUS_TEXT };
 
 export const STATUS_ICON:Record<CompileStatus, string> = {
 	running: "loader",
@@ -90,6 +87,8 @@ export class CompileReportView extends ItemView {
 	private drawnId: string | null = null;
 	// Pending revisions as last counted, for Recompile (CMP-74). Null until counted.
 	private pending: number | null = null;
+	// The shared Activity logs of reports from `.compiles/`, by file: their lines, or null when there is none (REP-54).
+	private sharedLogs = new Map<string, string[] | null>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: TheoryPlugin) {
 		super(leaf);
@@ -111,6 +110,8 @@ export class CompileReportView extends ItemView {
 	async onOpen() {
 		this.registerInterval(window.setInterval(() => this.tick(), 1000));
 		this.refresh();
+		// Teammates' compiles may have arrived since `.compiles/` was last read (REP-51).
+		await this.plugin.loadSharedReports();
 	}
 
 	/** Forgets which reports need a pull request, e.g. after one was created, so the next draw looks again. */
@@ -122,6 +123,7 @@ export class CompileReportView extends ItemView {
 	async onClose() {
 		this.drawnId = null;
 		this.candidates.clear();
+		this.sharedLogs.clear();
 		for (const s of this.suggestions.values()) if (s.state === "running") s.run.cancel();
 		this.suggestions.clear();
 	}
@@ -134,13 +136,16 @@ export class CompileReportView extends ItemView {
 
 	/** Shows one report, e.g. when it's picked in the compile history. */
 	show(id: string) {
-		this.selectedId = this.plugin.reports[0]?.id === id ? null : id;
+		const [newest] = this.plugin.reportEntries();
+		this.selectedId = newest && entryId(newest) === id ? null : id;
 		this.refresh();
 	}
 
 	refresh() {
-		const reports = this.plugin.reports;
-		const report = reports.find((r) => r.id === this.selectedId) ?? reports[0];
+		// The reports in plugin data and the shared ones in `.compiles/`, newest first (REP-51).
+		const entries = this.plugin.reportEntries();
+		const entry: ReportEntry | undefined = entries.find((e) => entryId(e) === this.selectedId) ?? entries[0];
+		const report = entry?.kind === "report" ? entry.report : undefined;
 		const { contentEl } = this;
 		// A suggestion box being edited keeps its focus and cursor across redraws.
 		const focused = document.activeElement;
@@ -153,15 +158,12 @@ export class CompileReportView extends ItemView {
 		this.countdowns = [];
 
 		const toolbar = contentEl.createDiv({ cls: "theory-report-toolbar" });
-		if (reports.length > 0) {
+		if (entry) {
 			const select = toolbar.createEl("select", { cls: "dropdown", attr: { "aria-label": "Past compiles" } });
-			for (const r of reports) {
-				const label = `${new Date(r.startedAt).toLocaleString()} · ${STATUS_TEXT[r.status]}`;
-				select.createEl("option", { value: r.id, text: label });
-			}
-			select.value = report.id;
+			for (const e of entries) select.createEl("option", { value: entryId(e), text: entryLabel(e) });
+			select.value = entryId(entry);
 			select.addEventListener("change", () => {
-				this.selectedId = select.value === reports[0].id ? null : select.value;
+				this.selectedId = select.value === entryId(entries[0]) ? null : select.value;
 				this.refresh();
 			});
 		}
@@ -169,14 +171,23 @@ export class CompileReportView extends ItemView {
 		compile.disabled = this.plugin.isCompiling();
 		compile.addEventListener("click", () => this.plugin.compile());
 
-		if (!report) {
+		if (entry?.kind === "broken") {
+			// REP-52: never overwritten, and never counted for the marker.
+			contentEl.createDiv({ cls: "theory-report-empty", text: `Can't read ${entry.file}` });
+			contentEl.createDiv({
+				cls: "theory-report-meta",
+				text: "The plugin never overwrites this file, and it doesn't count for the last compile marker. Fix or remove it in git.",
+			});
+			return;
+		}
+		if (!report || entry?.kind !== "report") {
 			contentEl.createDiv({
 				cls: "theory-report-empty",
 				text: "No compiles yet. Commit your changes to the model, then click Compile.",
 			});
 			return;
 		}
-		this.renderReport(report);
+		this.renderReport(report, entry.onlyHere);
 		this.checkPullRequests(report);
 		this.countPending();
 		if (editing?.key) {
@@ -186,7 +197,7 @@ export class CompileReportView extends ItemView {
 		}
 	}
 
-	private renderReport(report: CompileReport) {
+	private renderReport(report: CompileReport, onlyHere: boolean) {
 		const { contentEl } = this;
 
 		const header = contentEl.createDiv({ cls: `theory-report-status is-${report.status}` });
@@ -211,6 +222,18 @@ export class CompileReportView extends ItemView {
 			const create = header.createEl("button", { cls: "theory-report-cancel theory-report-create-pr", text: "Create PR" });
 			setIcon(create.createSpan({ cls: "theory-report-reply-icon" }), "git-pull-request");
 			create.addEventListener("click", () => this.plugin.openCreatePullRequests(report.id));
+		}
+
+		// REP-51: who compiled a shared report, or that this one is only on this machine.
+		contentEl.createDiv({
+			cls: "theory-report-meta theory-report-origin",
+			text: onlyHere ? ONLY_HERE : report.author ? `Compiled by ${report.author}` : "Shared in .compiles/",
+		});
+		// CMP-91: a teammate compiled the same revisions at the same time. The engineers decide which plan to build.
+		if (report.compiledMeanwhile) {
+			const card = contentEl.createDiv({ cls: "theory-permission-card theory-build-question" });
+			card.createDiv({ cls: "theory-permission-title", text: COMPILED_MEANWHILE });
+			card.createDiv({ cls: "theory-report-meta", text: `The other report: ${report.compiledMeanwhile}` });
 		}
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
@@ -311,7 +334,9 @@ export class CompileReportView extends ItemView {
 			}
 		}
 
-		if (report.log.length === 0 && report.status !== "running" && !building) return;
+		// REP-54: a report from `.compiles/` shows the shared Activity log, then what this machine's builds added.
+		const shared = report.fromShared ? this.sharedLog(report) : undefined;
+		if (shared === undefined && report.log.length === 0 && report.status !== "running" && !building) return;
 		// Waiting permission requests show as cards on their own line of the log, in the report that runs.
 		const waiting = this.plugin.activeReportId() === report.id ? this.plugin.permissionRequests() : [];
 		const cardAt = new Map(waiting.map((request) => [request.line, request]));
@@ -321,9 +346,11 @@ export class CompileReportView extends ItemView {
 		details.addEventListener("toggle", () => {
 			if (waiting.length === 0) this.activityOpen = details.open;
 		});
-		details.createEl("summary", { text: `Activity (${report.log.length})` });
+		details.createEl("summary", { text: `Activity (${report.log.length + (shared?.length ?? 0)})` });
 		const lines = details.createDiv({ cls: "theory-report-log-lines" });
-		if (report.log.length === 0) lines.createEl("pre", { text: "Waiting for Claude…" });
+		if (shared === null) lines.createDiv({ cls: "theory-report-meta", text: NO_ACTIVITY_LOG });
+		else if (shared && shared.length > 0) lines.createEl("pre", { text: shared.join("\n") });
+		if (report.log.length === 0 && shared === undefined) lines.createEl("pre", { text: "Waiting for Claude…" });
 		let chunk: string[] = [];
 		const flush = () => {
 			if (chunk.length > 0) lines.createEl("pre", { text: chunk.join("\n") });
@@ -344,6 +371,31 @@ export class CompileReportView extends ItemView {
 		// Scrolled to the oldest waiting card.
 		const [card] = cards;
 		if (card) window.requestAnimationFrame(() => card.scrollIntoView({ block: "nearest" }));
+	}
+
+	/**
+	 * The shared Activity log of a report from `.compiles/` (REP-54): its lines, null when there is none, or an empty
+	 * list while it is read, which redraws once it is.
+	 */
+	private sharedLog(report: CompileReport): string[] | null {
+		const file = report.shared?.file;
+		if (!file) return null;
+		if (this.sharedLogs.has(file)) return this.sharedLogs.get(file) ?? null;
+		this.sharedLogs.set(file, []);
+		let vaultPath: string;
+		try {
+			vaultPath = this.plugin.getVaultPath();
+		} catch {
+			this.sharedLogs.set(file, null);
+			return null;
+		}
+		readActivityLog(vaultPath, file)
+			.catch(() => null)
+			.then((lines) => {
+				this.sharedLogs.set(file, lines);
+				this.refresh();
+			});
+		return [];
 	}
 
 	/**
@@ -407,11 +459,11 @@ export class CompileReportView extends ItemView {
 			});
 		};
 		if (report.recompileOf !== undefined) {
-			const earlier = recompiledReport(report, this.plugin.reports);
+			const earlier = recompiledReport(report, this.plugin.allReports());
 			const date = earlier?.startedAt ?? report.earlier?.startedAt;
 			if (date) line("Recompiles the compile of ", date, earlier);
 		}
-		const recompile = recompiledBy(report, this.plugin.reports);
+		const recompile = recompiledBy(report, this.plugin.allReports());
 		if (recompile) line("Recompiled on ", recompile.startedAt, recompile);
 	}
 
@@ -434,7 +486,7 @@ export class CompileReportView extends ItemView {
 
 	/** Recompile next to Build, while the compile can be recompiled (CMP-72 to CMP-74). Its checks run on click (CMP-75). */
 	private addRecompile(buttons: HTMLElement, report: CompileReport) {
-		const state = recompileButton(report, this.plugin.reports, this.pending, this.plugin.isCompiling());
+		const state = recompileButton(report, this.plugin.allReports(), this.pending, this.plugin.isCompiling());
 		if (!state.shown) return;
 		const button = buttons.createEl("button", { text: "Recompile" });
 		button.disabled = state.disabled;
@@ -447,7 +499,7 @@ export class CompileReportView extends ItemView {
 		const issues = (report.issues ?? []).filter((i) => i.kind === "issue" && i.number !== undefined);
 		if (report.status !== "succeeded" || issues.length === 0) return;
 		// A recompiled compile offers no Build and no Recompile: the recompile's report owns its issues (REP-41, CMP-83).
-		if (recompiledBy(report, this.plugin.reports)) return;
+		if (recompiledBy(report, this.plugin.allReports())) return;
 		const build = report.build;
 		const busy = this.plugin.isCompiling();
 		const section = this.contentEl.createDiv({ cls: "theory-report-build" });
@@ -509,7 +561,7 @@ export class CompileReportView extends ItemView {
 		const issues = report.issues ?? [];
 		const closed = report.recompileOf !== undefined ? (report.closing ?? []).filter((c) => c.closed) : [];
 		if (issues.length === 0 && closed.length === 0) return;
-		const recompile = recompiledBy(report, this.plugin.reports);
+		const recompile = recompiledBy(report, this.plugin.allReports());
 		const section = this.section("Issues", issues.length);
 		for (const issue of issues) {
 			const mark = recompile ? issueFate(issue, recompile) : report.recompileOf !== undefined ? issueOrigin(issue) : null;

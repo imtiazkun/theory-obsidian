@@ -477,6 +477,17 @@ describe("Puller", () => {
 		expect(runs).toEqual(["now"]);
 	});
 
+	it("pulls before a shared report is written, but never during a compile, and none waits for it (REP-50, PULL-4)", async () => {
+		let compiling = true;
+		const { puller, runs } = fakePuller({ compiling: () => compiling, automatic: false });
+		expect(await puller.pull("share")).toBeNull();
+		compiling = false;
+		await puller.compileEnded();
+		expect(runs).toEqual([]);
+		expect(await puller.pull("share")).not.toBeNull();
+		expect(runs).toEqual(["share"]);
+	});
+
 	it("skips a focus pull within 30 seconds of the last pull", async () => {
 		let now = 1_000_000;
 		const { puller, runs } = fakePuller({ now: () => now });

@@ -17,7 +17,18 @@ import {
 	withAllowedRules,
 } from "./compile";
 import { failedPrefix, startFailure } from "./recompile";
-import { type ShareMoment, compileMoment, keptReports, notSharedNotice, shareReport, sharedBuild } from "./shared-report";
+import {
+	COMPILED_MEANWHILE,
+	type ShareMoment,
+	type SharedFile,
+	compileMoment,
+	keptReports,
+	notSharedNotice,
+	readSharedFolder,
+	shareReport,
+	sharedBuild,
+} from "./shared-report";
+import { type ReportEntry, absorbSharedFiles, listReports, listedReports } from "./report-list";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
 import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
@@ -79,8 +90,12 @@ const MAX_REPORTS = 20;
 
 export default class TheoryPlugin extends Plugin {
 	settings: TheorySettings = { ...DEFAULT_SETTINGS };
-	/** Compile reports, newest first. */
+	/** Compile reports in plugin data, newest first. The shared ones from other machines are in `reportEntries()`. */
 	reports: CompileReport[] = [];
+	// The files in `.compiles/` as last read; null until read (REP-51, REP-52).
+	private sharedFiles: SharedFile[] | null = null;
+	// The list last drawn, so a shared report keeps the pull request states asked of GitHub.
+	private entries: ReportEntry[] = [];
 	private commitButtons = new CommitButtons(this);
 	private compileButton = new CompileButton(this);
 	overlay = new FailureOverlay(this);
@@ -111,7 +126,7 @@ export default class TheoryPlugin extends Plugin {
 	private expandRuns = new Map<string, ExpandRun>();
 	private statusBar: HTMLElement | null = null;
 	private pullRequestStates = new PullRequestStates({
-		reports: () => this.reports,
+		reports: () => this.allReports(),
 		check: (pr) => pullRequestState(pr.repoPath, pr.url),
 		changed: async () => {
 			await this.saveSettings();
@@ -212,6 +227,7 @@ export default class TheoryPlugin extends Plugin {
 		const launching = !this.app.workspace.layoutReady;
 		this.app.workspace.onLayoutReady(async () => {
 			if (launching) await this.openIndex();
+			await this.loadSharedReports();
 			await this.showHistoryView(false);
 			await this.showCompileHistoryView();
 			await this.showCommentsView();
@@ -338,6 +354,8 @@ export default class TheoryPlugin extends Plugin {
 
 	/** After a pull: names what changed in the vault (PULL-8) and redraws what shows git state. Code pulls stay silent. */
 	private async pulled(outcome: PullOutcome, reason: PullReason) {
+		// A pull may bring a teammate's compile, or their build of one (REP-50, REP-51).
+		if (outcome.vault?.kind === "pulled" || this.sharedFiles === null) await this.loadSharedReports();
 		if (outcome.vault?.kind === "pulled") {
 			new Notice(pulledNotice(outcome.vault), 8000);
 			this.refreshGitState();
@@ -452,7 +470,8 @@ export default class TheoryPlugin extends Plugin {
 	 * lock applies as for any compile, and CMP-73 is checked again once the other checks pass (CMP-75).
 	 */
 	async recompile(reportId: string) {
-		const earlier = this.reports.find((r) => r.id === reportId);
+		// Any engineer may recompile any shared report (REP-50).
+		const earlier = this.adoptReport(reportId);
 		if (!earlier) return;
 		await this.startCompileRun(earlier);
 	}
@@ -531,7 +550,7 @@ export default class TheoryPlugin extends Plugin {
 						const moment = compileMoment(report);
 						if (moment) await this.shareReport(report, moment, snapshots);
 					},
-					...(earlier ? { recompile: earlier, reports: this.reports } : {}),
+					...(earlier ? { recompile: earlier, reports: this.allReports() } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
@@ -610,11 +629,13 @@ export default class TheoryPlugin extends Plugin {
 			await this.showReportView();
 			return;
 		}
-		const report = reportId ? this.reports.find((r) => r.id === reportId) : buildableReport(this.reports);
-		if (!report?.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) {
+		// Any engineer may build from any shared report (REP-50).
+		const found = reportId ? this.findReport(reportId) : buildableReport(this.allReports());
+		if (!found?.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) {
 			new Notice("No compile has created issues to build yet. Compile first.");
 			return;
 		}
+		const report = this.adoptReport(found.id) ?? found;
 		this.compileStarting = true;
 		try {
 			await this.runBuild(report);
@@ -662,7 +683,7 @@ export default class TheoryPlugin extends Plugin {
 					},
 				},
 				report,
-				this.reports,
+				this.allReports(),
 				() => {
 					this.refreshReportViews();
 					this.compileButton.render();
@@ -712,20 +733,77 @@ export default class TheoryPlugin extends Plugin {
 	async shareReport(report: CompileReport, moment: ShareMoment, snapshots?: { model: string; code: string }): Promise<void> {
 		const run = async () => {
 			const vaultPath = this.getVaultPath();
-			const logPaths = snapshots ? { projectFolder: this.settings.projectFolder, ...snapshots } : undefined;
-			return shareReport({ vaultPath, reports: this.reports, logPaths, push: () => this.push() }, report, moment);
+			const { projectFolder } = this.settings;
+			const logPaths = snapshots ? { projectFolder, ...snapshots } : undefined;
+			// REP-50: pull before writing to a shared report, except during a compile, when no pull runs (PULL-4).
+			const pull = async () => (this.isCompiling() ? null : ((await this.puller.pull("share"))?.vault ?? null));
+			return shareReport({ vaultPath, reports: this.allReports(), logPaths, projectFolder, pull, push: () => this.push() }, report, moment);
 		};
 		const next = this.shareQueue.then(run, run);
 		this.shareQueue = next.catch(() => {});
+		const meanwhile = report.compiledMeanwhile;
 		try {
 			const result = await next;
 			if (result.kind === "not-shared") new Notice(notSharedNotice(result.reason), 10000);
+			// REP-50: nothing was written, and the report says why.
+			else if (result.kind === "refused") new Notice(result.reason, 10000);
 		} catch (error) {
 			report.notShared = errorMessage(error);
 			new Notice(notSharedNotice(errorMessage(error)), 10000);
 		}
+		if (report.compiledMeanwhile && report.compiledMeanwhile !== meanwhile) new Notice(COMPILED_MEANWHILE, 15000);
 		await this.saveSettings();
+		await this.loadSharedReports();
 		this.refreshGitState();
+	}
+
+	/**
+	 * Reads `.compiles/` again (REP-51, REP-52), takes in what teammates added to the shared reports in plugin data
+	 * (REP-50), and redraws the report and the compile history. Never throws.
+	 */
+	async loadSharedReports(): Promise<void> {
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+		} catch {
+			return;
+		}
+		this.sharedFiles = await readSharedFolder(vaultPath).catch(() => []);
+		const before = JSON.stringify(this.reports);
+		absorbSharedFiles(this.reports, this.sharedFiles, this.settings.projectFolder, this.activeReportId());
+		if (JSON.stringify(this.reports) !== before) await this.saveSettings();
+		this.refreshReportViews();
+	}
+
+	/** The reports in plugin data and the shared reports in `.compiles/` together, newest first (REP-51). */
+	reportEntries(): ReportEntry[] {
+		this.entries = listReports(this.reports, this.sharedFiles, this.settings.projectFolder, this.entries);
+		return this.entries;
+	}
+
+	/** Every report this machine lists: those in plugin data and the shared ones, newest first. */
+	allReports(): CompileReport[] {
+		return listedReports(this.reportEntries());
+	}
+
+	/** A report by its id, from plugin data or `.compiles/`. */
+	findReport(id: string): CompileReport | undefined {
+		return this.reports.find((r) => r.id === id) ?? this.allReports().find((r) => r.id === id);
+	}
+
+	/**
+	 * A report to work on (REP-50): one from another machine's compile joins plugin data first, so its build, pull
+	 * requests and permission answers are kept. It is shared, so the data file never drops it (REP-11).
+	 */
+	adoptReport(id: string): CompileReport | undefined {
+		const own = this.reports.find((r) => r.id === id);
+		if (own) return own;
+		const shared = this.allReports().find((r) => r.id === id);
+		if (!shared) return undefined;
+		const at = this.reports.findIndex((r) => Date.parse(r.startedAt) < Date.parse(shared.startedAt));
+		if (at < 0) this.reports.push(shared);
+		else this.reports.splice(at, 0, shared);
+		return shared;
 	}
 
 	/** Permission requests from the running build that are waiting for an answer. A compile never asks (CMP-13). */
@@ -780,6 +858,8 @@ export default class TheoryPlugin extends Plugin {
 
 	/** Opens the Create PR page for one compile in a new tab. */
 	async openCreatePullRequests(reportId: string) {
+		// Any engineer may open pull requests for any shared report (REP-50).
+		this.adoptReport(reportId);
 		const leaf = this.app.workspace.getLeaf("tab");
 		await leaf.setViewState({ type: CREATE_PR_VIEW_TYPE, active: true, state: { reportId } });
 		await this.app.workspace.revealLeaf(leaf);

@@ -30,7 +30,7 @@ import { IdentityError, git } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
 import { commitFiles, initRepo, markCompiled, out, tempFolder, write } from "./helpers";
-import { compileMoment, markerCommit, shareReport } from "../src/shared-report";
+import { compileMoment, fromSharedReport, markerCommit, shareReport } from "../src/shared-report";
 import { pushVault } from "../src/push";
 
 const PROJECT_URL = "https://github.com/orgs/team/projects/1";
@@ -681,6 +681,35 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 		expect(recompile).toContain("### #1: Ship the big thing\n\n- Repository: api\n- Kind: epic\n- Rules: R-1, R-2\n- Short name: big-thing\n\nSeveral pieces.");
 		expect(recompile).toContain("### #2: Change one\n\n- Repository: api\n- Kind: issue\n- Rules: R-1\n- Short name: one\n\nBuild one.");
 		expect(recompile).not.toContain("Change two");
+	});
+
+	it("recompiles another engineer's shared report, with its open issues' bodies read from GitHub (REP-50)", async () => {
+		const s = await setup();
+		const start = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
+		await markCompiled(s.vault, start);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nThe first rule.\n" }, "Write the first rule");
+		s.claude.setSteps([
+			{ answer: answer({ epic, issues: [issue("api", "one"), issue("web", "two")] }) },
+			{ answer: answer({ epic: { ...epic, continues: 1 }, issues: [{ ...issue("api", "one"), continues: 2 }, { ...issue("web", "two"), continues: 3 }] }) },
+		]);
+		const earlier = await compile(s.options());
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nThe answered rule.\n" }, "Answer the question");
+		// As another engineer reads it from `.compiles/`: no issue bodies.
+		const file = earlier.shared!.file;
+		const theirs = fromSharedReport(JSON.parse(readFileSync(join(s.vault, file), "utf8")), file, s.project);
+		expect(theirs.issues?.map((i) => i.body)).toEqual(["", "", ""]);
+
+		const report = await compile(s.options({ recompile: theirs, reports: [theirs] }));
+		expect(report.status).toBe("succeeded");
+		expect(report.recompileOf).toBe(file);
+		const recompile = s.claude.calls()[1].prompt;
+		expect(recompile).toContain("- Short name: big-thing\n\nSeveral pieces.");
+		expect(recompile).toContain("- Short name: one\n\nBuild one.");
+		expect(recompile).not.toContain("Planned by theory.md");
+		// Claude's bodies didn't change, so no continued issue gets the CMP-79 comment (CMP-80).
+		expect(s.github.calls.filter((c) => c.startsWith("commentIssue"))).toEqual([]);
+		// The earlier report's file now links the recompile (REP-41, REP-46).
+		expect(JSON.parse(readFileSync(join(s.vault, file), "utf8")).recompiledBy).toBe(report.shared?.file);
 	});
 
 	it("lets the plan's epic and issues name the issue they continue and what changed (CMP-15)", () => {

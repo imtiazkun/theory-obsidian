@@ -87,7 +87,8 @@ export class CreatePullRequestView extends ItemView {
 	}
 
 	private report(): CompileReport | undefined {
-		return this.plugin.reports.find((r) => r.id === this.reportId);
+		// A shared report from another machine joins plugin data, so its pull requests are kept (REP-50).
+		return this.reportId === null ? undefined : this.plugin.adoptReport(this.reportId);
 	}
 
 	private async loadSections() {

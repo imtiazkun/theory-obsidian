@@ -44,7 +44,7 @@ import {
 } from "./compile";
 import { checkProblems } from "./anchor";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import type { IssueRecord } from "./plan";
+import { type IssueRecord, fillIssueBodies } from "./plan";
 import { NO_PROMPT_ENV } from "./pull";
 import { toolPath } from "./tool-path";
 import { git } from "./vault";
@@ -313,6 +313,8 @@ export async function startBuild(
 		toBuild.push(issue);
 	}
 	if (toBuild.length === 0 && skippedClosed.length === 0) throw new NothingLeftError();
+	// REP-50: another engineer's compile, read from `.compiles/`, has no issue bodies. Claude gets them from GitHub.
+	await fillIssueBodies(github, toBuild);
 
 	const snapshot = await createSnapshot(options.vaultPath, report.toCommit);
 	// BLD-27: a build of a compile built before continues its record, epic branches included.
@@ -500,7 +502,8 @@ export async function startBuild(
 			build.epicBranches = [];
 			for (const repo of repos) {
 				const before = kept.find((b) => b.repoPath === repo.path);
-				const base = before?.base ?? (defaults.get(repo.path) as string);
+				// A shared report may not know an epic branch's base (REP-50): then it is the default branch.
+				const base = before?.base || (defaults.get(repo.path) as string);
 				const remote = `refs/remotes/origin/${branch}`;
 				try {
 					if (await branchExists(repo.path, branch)) {
