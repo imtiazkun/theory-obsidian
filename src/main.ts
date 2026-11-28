@@ -105,7 +105,8 @@ export default class TheoryPlugin extends Plugin {
 	private ruleCounts = new RuleCounts(this);
 	ruleAuthors = new RuleAuthorsOverlay(this);
 	private hiddenFolders = new HiddenFolders(this);
-	private entryFiles = new EntryFiles(this);
+	/** The entry file and model folder icons in the file explorer; the Repositories page refreshes them (UI-42). */
+	readonly entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
 	comments = new Comments(this);
 	/** The engineer's own commands, run after events and never awaited (HOOK-4). */

@@ -93,6 +93,7 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
+| Model folder icon: in the file explorer, each folder named exactly like a repository in the project folder shows the history icon left of its name | Done |
 | Hooks: your own shell commands run after a comment, a commit, a push, a compile or build starting or ending, or a permission request, with the event as JSON on stdin, like posting to Slack | Done |
 | Server: team-wide marker and compile lock | Planned |
 
