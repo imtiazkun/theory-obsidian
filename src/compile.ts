@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
-import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool } from "./code-snapshot";
+import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool, trackedFiles } from "./code-snapshot";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
@@ -12,6 +12,9 @@ import { type GitHub, type PullRequest, ghGitHub } from "./github";
 import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
+import { fixedContextText, fixedParts } from "./fixed-context";
+import { limitedDiff, readModelDiff } from "./model-diff";
+import { changedRules, compileScope, ruleMap, ruleMapText, scopeText, searchRules } from "./rule-map";
 import { toolPath } from "./tool-path";
 import { type SharedBuild, type SharedPlace, markerCommit } from "./shared-report";
 import { git, isInDotFolder } from "./vault";
@@ -20,7 +23,7 @@ export { removeSnapshot };
 
 // Git's well-known empty tree, used to diff the whole model on the first compile.
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-// Larger diffs are cut; Claude can still read every file in the snapshot.
+// Larger diffs are shown with three lines of context, then cut; Claude can still read every file in the snapshot (CMP-11).
 const MAX_DIFF_CHARS = 200_000;
 const MAX_LOG_LINES = 500;
 /** Git pathspec for files in dot folders, like `.obsidian/` and `.comments/`, at any depth. They are never theory. */
@@ -362,10 +365,9 @@ export async function revisionsBetween(vaultPath: string, from: string | null, t
 		});
 }
 
+/** The model diff Claude receives: each change with its whole section, or three lines when that is too long (CMP-10, CMP-11). */
 export async function modelDiff(vaultPath: string, from: string | null, to: string): Promise<string> {
-	const { stdout } = await git(vaultPath, ["diff", "--stat", "--patch", from ?? EMPTY_TREE, to, "--", ...NOT_SENT]);
-	if (stdout.length <= MAX_DIFF_CHARS) return stdout;
-	return stdout.slice(0, MAX_DIFF_CHARS) + "\n\n[Diff cut short. Read the changed files in the model directory.]\n";
+	return limitedDiff(await readModelDiff(vaultPath, from ?? EMPTY_TREE, to, NOT_SENT), MAX_DIFF_CHARS);
 }
 
 /** Notes that changed between the two commits, to point at when a failed compile names no spot. */
@@ -481,8 +483,14 @@ export function compilePrompt(params: {
 	instructions: { repo: string; path: string; text: string }[];
 	/** For a recompile: the earlier compile's issues that are still open (CMP-76). `from` is then that compile's start. */
 	earlier?: IssueRecord[];
+	/** The repositories this compile may plan issues in (CMP-96, CMP-97). */
+	scope?: string[];
+	/** The rule map, as `ruleMapText` writes it (CMP-94, CMP-95). */
+	ruleMap?: string;
+	/** The fixed context, as `fixedContextText` writes it (CMP-106). */
+	fixedContext?: string;
 }): string {
-	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier } = params;
+	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier, scope, ruleMap, fixedContext } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
@@ -509,7 +517,7 @@ Rules:
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
 - Read the code only in the code snapshot. It is each repository's default branch as \`origin\` has it. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
-- Before planning work in a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in that repository's folder in the model directory, so the issues fit how that repository is built and tested.
+- Before planning work in a repository, follow its AGENTS.md and CLAUDE.md, given below in the fixed context, and \`instructions.md\` in that repository's folder in the model directory, given below too, so the issues fit how that repository is built and tested.
 - Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
 - List sub-issues in build order: work that other sub-issues depend on comes first. They are built one at a time, each on top of the last.
 - Every issue says what to build and why, in the model's words. It lists the rule IDs it covers in \`rules\`. Those rules are its acceptance criteria.
@@ -521,7 +529,9 @@ Rules:
 - When a problem comes from something in the model, give it \`anchors\`: the model file, the heading it sits under, and a short quote copied exactly from the note (under 200 characters). Engineers see these as highlights in the note. Leave \`anchors\` empty when the problem isn't about the model.
 - Set \`status\` to "failed" if you can't plan the work.
 - Never create issues, branches or pull requests, and never touch GitHub.
-${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}
+- Read only the lines you need of a file longer than 400 lines, starting from the rule map or a search. Read a long file in full only when the lines you need are spread across it, and never read the same lines twice: a long file read in full is paid for in every later step.
+- An issue's body says what changes and why, in the model's words, in at most 150 words. It lists the rule IDs it covers and never repeats their text: the build reads the rules from the model.
+${instructionList ? `\n## Instructions for each repository\n\n${instructionList}\n` : ""}${fixedContext ? `\n## Fixed context\n\n${fixedContext}\n` : ""}${scope ? `\n## Scope\n\n${scopeText(scope)}\n` : ""}${ruleMap ? `\n## Rule map\n\n${ruleMap}\n` : ""}
 ${
 		earlier
 			? `## This is a recompile
@@ -543,6 +553,8 @@ ${from ? `Last compiled revision: ${from}` : "This is the first compile, so the 
 ${revisionListText(revisions)}
 
 ## Changes to the model
+
+Each change is shown with the whole section it sits in, from the heading above it to the next heading of the same or a higher level.
 
 \`\`\`diff
 ${diff}
@@ -1031,7 +1043,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const openEarlier = earlier ? await openEarlierIssues(github, earlier) : undefined;
 
 	const revisions = await revisionsBetween(vaultPath, from, head);
-	const diff = await modelDiff(vaultPath, from, head);
+	const changes = await readModelDiff(vaultPath, from ?? EMPTY_TREE, head, NOT_SENT);
+	const diff = limitedDiff(changes, MAX_DIFF_CHARS);
+	// The changed rules (CMP-92) and the scope they and the changed notes make (CMP-96).
+	const rules = changedRules(changes.files);
+	const scope = compileScope(repos.map((r) => r.name), changes.files, rules, openEarlier ?? []);
 	const notes = await changedNotes(vaultPath, from, head);
 	const codeBefore = await codeState(projectFolder);
 	// Claude reads each repository's default branch as origin has it, never the checkout (CMP-84). Throws when one
@@ -1042,6 +1058,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	let guard: ModelGuard;
 	let codeHash: string;
 	const instructions: { repo: string; path: string; text: string }[] = [];
+	let mapText: string;
+	let fixedText: string;
 	try {
 		snapshot = await createSnapshot(vaultPath, head);
 		guard = await guardModel(vaultPath, snapshot);
@@ -1050,6 +1068,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			const file = await modelInstructions(snapshot, repo.name);
 			if (file) instructions.push({ repo: repo.name, ...file });
 		}
+		// The files git tracks in each repository, at the commit the code snapshot holds (CMP-93, CMP-106).
+		const tracked = await Promise.all(
+			code.code.map(async (read) => {
+				const repo = repos.find((r) => r.name === read.repo);
+				return { name: read.repo, files: repo ? await trackedFiles(repo.path, read.commit) : [] };
+			}),
+		);
+		mapText = ruleMapText(ruleMap(rules, await searchRules([...new Set(rules.map((r) => r.id))], code.dir, tracked)));
+		fixedText = fixedContextText(await fixedParts(snapshot, code.dir, tracked.filter((repo) => scope.includes(repo.name))));
 	} catch (error) {
 		// Both snapshots go whatever the outcome (INV-7, CMP-89).
 		if (snapshot) await removeSnapshot(snapshot);
@@ -1100,6 +1127,9 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				diff,
 				instructions,
 				earlier: openEarlier,
+				scope,
+				ruleMap: mapText,
+				fixedContext: fixedText,
 			}),
 			schema: COMPILE_SCHEMA,
 			readOnly: true,
@@ -1180,7 +1210,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.summary = structured.summary;
 				claimedProblems = structured.problems;
 				if (verdict === "succeeded") {
-					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null);
+					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null, scope);
 					plan = read.plan;
 					planProblems.push(...read.problems);
 					if (!plan) verdict = "failed";

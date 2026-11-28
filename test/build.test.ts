@@ -36,7 +36,7 @@ async function setup() {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	const api = await repoWithOrigin(project, "api");
 	const web = await repoWithOrigin(project, "web");
 	const github = new FakeGitHub();
