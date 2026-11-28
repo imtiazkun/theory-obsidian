@@ -32,7 +32,15 @@ import {
 } from "./shared-report";
 import { type ReportEntry, absorbSharedFiles, listReports, listedReports } from "./report-list";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
-import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
+import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings, confirmChoice } from "./settings";
+import {
+	REPOSITORIES_RIBBON_TITLE,
+	corePluginsNotice,
+	corePluginsQuestion,
+	missingStartersNotice,
+	runFirstLoad,
+} from "./first-load";
+import { useTheoryWorkspace } from "./workspace-setup";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
@@ -156,7 +164,7 @@ export default class TheoryPlugin extends Plugin {
 	});
 	private pullTimer: number | null = null;
 	private settingTab: TheorySettingTab | null = null;
-	// Set by scripts/install.sh on a first install: run Setup vault once, on the first load.
+	// Set by scripts/install.sh on a first install: run the first load once (SET-20).
 	private setupOnLoad = false;
 
 	async onload() {
@@ -206,7 +214,7 @@ export default class TheoryPlugin extends Plugin {
 			name: "Show repositories",
 			callback: () => this.showRepositories(),
 		});
-		this.addRibbonIcon("folder-git-2", "Show repositories", () => this.showRepositories());
+		this.addRibbonIcon("folder-git-2", REPOSITORIES_RIBBON_TITLE, () => this.showRepositories());
 		this.addCommand({
 			id: "pull-now",
 			name: "Pull now",
@@ -222,6 +230,11 @@ export default class TheoryPlugin extends Plugin {
 			id: "show-comments",
 			name: "Show comments",
 			callback: () => this.showComments(null),
+		});
+		this.addCommand({
+			id: "use-core-plugins",
+			name: "Use theory.md's core plugins",
+			callback: () => this.useCorePlugins(),
 		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
@@ -1246,21 +1259,43 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/**
-	 * Sets up a freshly installed vault, once. The request is dropped from plugin data first, so a failed
-	 * setup is never retried on its own; Setup vault in the command palette does that.
+	 * The first load after install.sh, once (SET-20): the core plugins, then Setup vault. The request is dropped
+	 * from plugin data first, so a failed step is never retried on its own; the command "Use theory.md's core
+	 * plugins" and Setup vault do that.
 	 */
 	private async setUpOnFirstLoad() {
-		this.setupOnLoad = false;
-		await this.saveSettings();
-		if (!this.isVaultSetUp()) {
-			await this.setUpVault();
-			return;
-		}
-		// A vault that already has git is left as it is.
-		const missing = await this.missingStarters();
-		if (missing.files.length > 0 || missing.gitignoreLines.length > 0) {
-			new Notice("theory.md is installed. This vault already uses git, so it was left as it is. Settings → theory.md can add the missing starter files.", 10000);
-		}
+		await runFirstLoad({
+			dropRequest: async () => {
+				this.setupOnLoad = false;
+				await this.saveSettings();
+			},
+			setCorePlugins: async () => {
+				await this.applyCorePlugins();
+			},
+			setUpVault: async () => {
+				if (!this.isVaultSetUp()) {
+					await this.setUpVault();
+					return;
+				}
+				// A vault that already has git is left as it is (SET-2).
+				const notice = missingStartersNotice(await this.missingStarters());
+				if (notice) new Notice(notice, 10000);
+			},
+		});
+	}
+
+	/** Sets the core plugins, the ribbon order and the graph colour groups, and says what changed (SET-21 to SET-24). */
+	private async applyCorePlugins(): Promise<boolean> {
+		const { turnedOff, failed } = await useTheoryWorkspace(this.app, this.manifest.id);
+		const notice = corePluginsNotice(turnedOff, failed);
+		if (notice) new Notice(notice, 10000);
+		return notice !== null;
+	}
+
+	/** The command "Use theory.md's core plugins": SET-21 at any time, after asking (SET-25). */
+	private async useCorePlugins() {
+		if (!(await confirmChoice(this.app, "Use theory.md's core plugins", corePluginsQuestion(), "Turn off"))) return;
+		if (!(await this.applyCorePlugins())) new Notice("theory.md's core plugins are already the only ones on.");
 	}
 
 	/** Runs the commit hooks for the vault's newest commit, made outside the Commit page. */
