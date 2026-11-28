@@ -10,7 +10,7 @@ import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./an
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
+import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, checkWhere, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
 import { fixedContextText, fixedParts } from "./fixed-context";
@@ -549,10 +549,11 @@ Rules:
 - Read the code only in the code snapshot. It is each repository's default branch as \`origin\` has it. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
 - Before planning work in a repository, follow its AGENTS.md and CLAUDE.md, given below in the fixed context, and \`instructions.md\` in that repository's folder in the model directory, given below too, so the issues fit how that repository is built and tested.
-- Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
+- Plan one issue for each repository the work changes. Split a repository's work into several issues only when one issue would cover more than 15 rules: then split it by intent, into as few issues as that allows. A plan with more than one issue is an epic, with one sub-issue for each of them. Each issue is one build run, which reads the repository's instructions and finds its way around the code again. Leave \`plan.issues\` empty when the code already matches the model.
 - List sub-issues in build order: work that other sub-issues depend on comes first. They are built one at a time, each on top of the last.
 - Every issue says what to build and why, in the model's words. It lists the rule IDs it covers in \`rules\`. Those rules are its acceptance criteria.
 - Every issue changes exactly one repository. Name it in \`repo\` as it is named above.
+- Give every issue a \`where\`: the files and line ranges in its repository that the work starts from, like \`src/main.ts:142-190\`, at most 15. Paths are relative to the repository, so they don't start with its folder in the code snapshot. Fill it from the code you read while planning. Name a file the issue creates with "(new)", like \`src/where.ts (new)\`. In a recompile, a continued issue gets the Where of the new plan. The build starts from it instead of searching again.
 - In a recompile, continue an earlier issue whenever the same work is still asked for in the same repository, even when its title, body or rules change: plan all the work again, then match it to the earlier issues. To continue one, set \`continues\` to its number, and say in \`changed\`, in one sentence, what changed and why, like "Now names the description of each check, answered in STAT-10." An epic continues only an earlier epic, and an issue (a sub-issue too) only an earlier issue in the same repository. Each earlier issue is continued at most once. A new issue is only for work no earlier issue covers. Outside a recompile, never set \`continues\`.
 - A title is a short sentence in the imperative, under 70 characters, like "Show a diff for each file on the Commit page".
 - A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it. No two short names in one plan are the same, the epic's included.
@@ -1407,6 +1408,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					const read = readPlan(structured.plan, repos.map((r) => r.name), openEarlier ?? null, scope);
 					plan = read.plan;
 					planProblems.push(...read.problems);
+					// Each Where is checked against the code snapshot; a bad one is named, and never fails the compile (CMP-108).
+					if (plan) planProblems.push(...(await checkWhere(plan, code.dir)));
 					if (!plan) verdict = "failed";
 				}
 			} else {
