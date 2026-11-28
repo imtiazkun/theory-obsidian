@@ -172,3 +172,16 @@ export function codeSourceText(read: CodeRead): string {
 	if (read.source === "local") return `the local ${read.branch}, never fetched`;
 	return "";
 }
+
+/**
+ * The files git tracks at `commit` in a repository, in git's order (CMP-93, CMP-106). Only `git ls-tree` reads the
+ * repository, so nothing in it changes (CMP-85). An empty list when git can't say.
+ */
+export async function trackedFiles(repoPath: string, commit: string): Promise<string[]> {
+	try {
+		const { stdout } = await git(repoPath, ["-c", "core.quotePath=false", "ls-tree", "-r", "-z", "--name-only", commit]);
+		return stdout.split("\0").filter((path) => path !== "");
+	} catch {
+		return [];
+	}
+}

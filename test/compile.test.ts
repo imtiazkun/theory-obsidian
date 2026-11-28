@@ -51,7 +51,7 @@ async function setup(repos = ["api", "web"]) {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	for (const repo of repos) await initRepo(join(project, repo));
 	const github = new FakeGitHub();
 	const claude = fakeClaude([{ answer: answer({ issues: [issue("api", "one")] }) }]);
@@ -497,6 +497,76 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 	});
 });
 
+describe("the rule map, scope and fixed context (CMP-92 to CMP-98, CMP-106)", () => {
+	it("CMP-98: the plan check refuses an issue whose repository is outside the scope", () => {
+		const repos = ["api", "web"];
+		expect(readPlan({ issues: [issue("api", "one")] }, repos, null, ["api"]).problems).toEqual([]);
+		expect(readPlan({ issues: [issue("web", "one")] }, repos, null, ["api"]).problems).toEqual([
+			'The issue "Change one" is in "web", which is outside this compile\'s scope: "api".',
+		]);
+		expect(readPlan({ issues: [issue("api", "one")] }, repos, null, []).problems).toEqual([
+			'The issue "Change one" is in "api", which is outside this compile\'s scope: no repository.',
+		]);
+		// Without a scope, as before.
+		expect(readPlan({ issues: [issue("web", "one")] }, repos).problems).toEqual([]);
+	});
+
+	it("CMP-96, CMP-98: a compile of one model folder fails when the plan has work in another repository, and the marker moves", async () => {
+		const s = await setup();
+		await markCompiled(s.vault, await out(s.vault, ["rev-parse", "HEAD"]));
+		const head = await commitFiles(s.vault, { "api/Server.md": "# Server\n\n**API-1.** Serve.\n" }, "Describe the server");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("web", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("failed");
+		expect(report.problems.map((p) => p.text)).toContain('The issue "Change one" is in "web", which is outside this compile\'s scope: "api".');
+		expect(s.github.issues).toEqual([]);
+		expect(await markerCommit(s.vault)).toBe(head);
+		expect(s.claude.calls()[0].prompt).toContain("## Scope\n\nThis compile may plan issues only in these repositories: api.");
+	});
+
+	it("CMP-94, CMP-97, CMP-106: the prompt holds the rule map, the scope and the fixed context of the repositories in scope", async () => {
+		const s = await setup();
+		await commitFiles(join(s.project, "api"), { "AGENTS.md": "Run the api tests.\n", "src/serve.ts": "x\n// Serve every request (API-1).\n" }, "Code");
+		await commitFiles(join(s.project, "web"), { "AGENTS.md": "Run the web tests.\n", "page.ts": "// API-1 from the web\n" }, "Code");
+		await markCompiled(s.vault, await out(s.vault, ["rev-parse", "HEAD"]));
+		await commitFiles(s.vault, { "Index.md": "# System\n\nThe whole system.\n", "api/Server.md": "# Server\n\n**API-1.** Serve.\n\n**API-2.** Log.\n" }, "Describe the server");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const prompt = s.claude.calls()[0].prompt;
+		expect(prompt).toContain("- API-1 (api/Server.md): api/src/serve.ts:2, web/page.ts:1");
+		expect(prompt).toContain("- API-2 (api/Server.md): Not found in the code");
+		expect(prompt).toContain("This compile may plan issues only in these repositories: api.");
+		expect(prompt).toContain("## Fixed context");
+		expect(prompt).toContain("### Index.md (in the model directory)\n\n# System\n\nThe whole system.");
+		expect(prompt).toContain("### api/AGENTS.md\n\nRun the api tests.");
+		expect(prompt).toContain("### Files git tracks in api\n\nAGENTS.md\nREADME.md\nsrc/serve.ts");
+		// web is outside the scope: Claude may read it, but it isn't fixed context.
+		expect(prompt).not.toContain("Run the web tests.");
+		expect(prompt).not.toContain("Files git tracks in web");
+	});
+
+	it("CMP-12: tells Claude to follow the AGENTS.md and CLAUDE.md given, read long files in part, and keep issue bodies short", () => {
+		const prompt = compilePrompt({
+			snapshot: "/model",
+			projectFolder: "/project",
+			codeSnapshot: "/code",
+			code: [],
+			head: "abc1234",
+			from: null,
+			revisions: [],
+			diff: "",
+			instructions: [],
+		});
+		expect(prompt).toContain("Before planning work in a repository, follow its AGENTS.md and CLAUDE.md, given below in the fixed context");
+		expect(prompt).not.toContain("read its AGENTS.md (and CLAUDE.md, if there is one)");
+		expect(prompt).toContain("Read only the lines you need of a file longer than 400 lines, starting from the rule map or a search.");
+		expect(prompt).toContain("never read the same lines twice");
+		expect(prompt).toContain("An issue's body says what changes and why, in the model's words, in at most 150 words. It lists the rule IDs it covers and never repeats their text");
+		expect(prompt).toContain("Each change is shown with the whole section it sits in");
+	});
+});
+
 describe("nothing to build (CMP-15, CMP-71)", () => {
 	it("succeeds with an empty plan, creates no issue, offers no Build and moves the marker", async () => {
 		const s = await setup();
@@ -692,7 +762,7 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 		expect(recompile).toContain(`- ${first.slice(0, 7)} `);
 		expect(recompile).toContain(`- ${second.slice(0, 7)} `);
 		// The diff covers the earlier compile's revisions too: from its start, not from the marker.
-		expect(recompile).toContain("-The rule.");
+		expect(recompile).toContain("-**R-1.** The rule.");
 		expect(recompile).toContain("+The answered rule.");
 		expect(recompile).toContain("### #1: Ship the big thing\n\n- Repository: api\n- Kind: epic\n- Rules: R-1, R-2\n- Short name: big-thing\n\nSeveral pieces.");
 		expect(recompile).toContain("### #2: Change one\n\n- Repository: api\n- Kind: issue\n- Rules: R-1\n- Short name: one\n\nBuild one.");
@@ -850,7 +920,7 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		const first = await compile(s.options());
 		expect(first.status).toBe("succeeded");
 		const before = structuredClone(first);
-		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		await commitFiles(s.vault, { "Note.md": "# Note\n\n**R-1.** Answered.\n" }, "Answer the question");
 		const revision = (await out(s.vault, ["rev-parse", "--short=7", "HEAD"])).trim();
 		s.github.calls = [];
 		const head = (await out(s.vault, ["rev-parse", "HEAD"])).trim();

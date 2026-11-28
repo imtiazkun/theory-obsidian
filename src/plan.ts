@@ -258,9 +258,15 @@ function continuationProblems(
  * `earlier` is the earlier compile's issues that are still open, and the CMP-78 limits on continuing them are
  * checked too; without it, a plan that continues anything is refused. Each problem names the issue it is about.
  * The sub-issues keep Claude's order, which is the build order (CMP-60). A plan with no epic and no issues is
- * empty: the code already matches the model (CMP-71).
+ * empty: the code already matches the model (CMP-71). With `scope`, every issue's repository must be in it too
+ * (CMP-98).
  */
-export function readPlan(value: unknown, repos: string[], earlier: IssueRecord[] | null = null): { plan: Plan | null; problems: string[] } {
+export function readPlan(
+	value: unknown,
+	repos: string[],
+	earlier: IssueRecord[] | null = null,
+	scope: string[] | null = null,
+): { plan: Plan | null; problems: string[] } {
 	const problems: string[] = [];
 	if (!value || typeof value !== "object" || Array.isArray(value)) return { plan: null, problems: ["Claude's answer has no plan."] };
 	const raw = value as Record<string, unknown>;
@@ -294,6 +300,8 @@ export function readPlan(value: unknown, repos: string[], earlier: IssueRecord[]
 		if (item.rules.length === 0) problems.push(`${who} lists no rule IDs.`);
 		if (kind === "issue" && !repos.includes((item as PlannedIssue).repo)) {
 			problems.push(`${who} names a repository that isn't in the project folder: "${(item as PlannedIssue).repo}".`);
+		} else if (kind === "issue" && scope && !scope.includes((item as PlannedIssue).repo)) {
+			problems.push(`${who} is in "${(item as PlannedIssue).repo}", which is outside this compile's scope: ${scopeList(scope)}.`);
 		}
 	}
 	const byName = new Map<string, string[]>();
@@ -307,6 +315,11 @@ export function readPlan(value: unknown, repos: string[], earlier: IssueRecord[]
 	for (const [kind, item] of badNumbers) problems.push(`${named(kind, item)} continues something that isn't an issue number.`);
 	problems.push(...continuationProblems(items, earlier));
 	return problems.length > 0 ? { plan: null, problems } : { plan: { epic, issues }, problems };
+}
+
+/** The scope as a plan problem names it (CMP-98). */
+function scopeList(scope: string[]): string {
+	return scope.length === 0 ? "no repository" : scope.map((repo) => `"${repo}"`).join(", ");
 }
 
 /** True when the plan has nothing to build: no epic and no issues (CMP-71). */

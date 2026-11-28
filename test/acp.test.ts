@@ -241,7 +241,7 @@ async function setup(): Promise<Setup> {
 	const root = tempFolder();
 	const vault = join(root, "vault");
 	const project = join(root, "project");
-	await initRepo(vault, { "Note.md": "# Note\n\nThe rule.\n" });
+	await initRepo(vault, { "Note.md": "# Note\n\n**R-1.** The rule.\n" });
 	await initRepo(join(project, "app"));
 	write(root, { "agent/agent.mjs": FAKE_AGENT });
 	const plan = join(root, "agent", "plan.json");
@@ -536,7 +536,7 @@ describe("an ACP agent in a build", () => {
 		expect(writes.map((w) => w.error === null)).toEqual([true, false, false]);
 		expect(readFileSync(inside, "utf8")).toBe("written");
 		expect(existsSync(outside)).toBe(false);
-		expect(readFileSync(model, "utf8")).toBe("# Note\n\nThe rule.\n");
+		expect(readFileSync(model, "utf8")).toBe("# Note\n\n**R-1.** The rule.\n");
 		expect(outcome.skipped.some((p) => p.includes("outside the project folder"))).toBe(true);
 		expect(outcome.skipped.some((p) => p.startsWith("The agent tried to write to the model"))).toBe(true);
 	});
