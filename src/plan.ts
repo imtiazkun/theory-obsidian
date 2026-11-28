@@ -376,10 +376,31 @@ async function inRepository(root: string, path: string): Promise<boolean> {
 	}
 }
 
+/** The entry without a leading `{repo}/`, and any `./` before it. */
+function withoutRepoFolder(entry: string, repo: string): string {
+	return entry.replace(/^(?:\.\/)+/, "").slice(repo.length + 1);
+}
+
+/**
+ * One Where entry as the issue keeps it, or null when it is dropped (CMP-108). An entry whose path is in the
+ * repository as written is kept as it is, so a repository with a folder of its own name still works. Else a path
+ * that starts with the repository's folder, as the rule map writes paths (CMP-93), is kept without it when the rest
+ * is in the repository. A new file is kept unchecked: without the repository's folder, unless the repository has a
+ * folder of its own name, which it may then be meant to go in.
+ */
+async function checkedEntry(root: string, repo: string, entry: string): Promise<string | null> {
+	const path = wherePath(entry);
+	const prefixed = path.startsWith(`${repo}/`);
+	if (markedNew(entry)) return prefixed && !(await inRepository(root, repo)) ? withoutRepoFolder(entry, repo) : entry;
+	if (await inRepository(root, path)) return entry;
+	if (prefixed && (await inRepository(root, path.slice(repo.length + 1)))) return withoutRepoFolder(entry, repo);
+	return null;
+}
+
 /**
  * Checks each issue's Where against the code snapshot, one folder per repository (CMP-108). An entry whose path
- * isn't in the issue's repository, and that isn't marked "(new)", is dropped. After that, an issue keeps at most
- * the first 15 (CMP-107). Each problem names the issue and what was dropped. A bad Where never fails the compile,
+ * isn't in the issue's repository, with or without a leading `{repo}/` (`checkedEntry`), and that isn't marked
+ * "(new)", is dropped. After that, an issue keeps at most the first 15 (CMP-107). Each problem names the issue and what was dropped. A bad Where never fails the compile,
  * so the plan is always kept: only its Where lists change.
  */
 export async function checkWhere(plan: Plan, codeSnapshot: string): Promise<string[]> {
@@ -388,9 +409,11 @@ export async function checkWhere(plan: Plan, codeSnapshot: string): Promise<stri
 		if (!issue.where) continue;
 		const kept: string[] = [];
 		const missing: string[] = [];
+		const root = join(codeSnapshot, issue.repo);
 		for (const entry of issue.where) {
-			if (markedNew(entry) || (await inRepository(join(codeSnapshot, issue.repo), wherePath(entry)))) kept.push(entry);
-			else missing.push(entry);
+			const checked = await checkedEntry(root, issue.repo, entry);
+			if (checked === null) missing.push(entry);
+			else kept.push(checked);
 		}
 		const who = named("issue", issue);
 		if (missing.length > 0) {

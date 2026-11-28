@@ -532,13 +532,33 @@ describe("each issue's Where (CMP-15, CMP-107, CMP-108)", () => {
 			"../web/page.ts",
 			"out.ts",
 			`${code}/api/src/serve.ts`,
-			"api/src/serve.ts",
+			"api/src/gone.ts",
 		]);
 		const problems = await checkWhere(plan, code);
 		expect(plan.issues[0].where).toEqual(["src/serve.ts:1-2", "./src/serve.ts", "src/serve.ts:3-4, 9-12 (serve)", "src", "src/where.ts (new)"]);
 		expect(problems).toEqual([
-			`The issue "Change one" names files in its Where that aren't in "api": "src/gone.ts:4-9", "page.ts", "../web/page.ts", "out.ts", "${code}/api/src/serve.ts", "api/src/serve.ts". They were left out of the issue.`,
+			`The issue "Change one" names files in its Where that aren't in "api": "src/gone.ts:4-9", "page.ts", "../web/page.ts", "out.ts", "${code}/api/src/serve.ts", "api/src/gone.ts". They were left out of the issue.`,
 		]);
+	});
+
+	it("CMP-108: keeps a path that starts with the repository's folder, as the rule map writes it (CMP-93), without that folder", async () => {
+		const code = tempFolder();
+		write(code, { "api/src/serve.ts": "x\n", "web/page.ts": "x\n" });
+		const plan = planOf(["api/src/serve.ts:1-2", "./api/src/serve.ts (serve)", "api/src/log.ts (new)", "api/../web/page.ts", "web/page.ts"]);
+		const problems = await checkWhere(plan, code);
+		expect(plan.issues[0].where).toEqual(["src/serve.ts:1-2", "src/serve.ts (serve)", "src/log.ts (new)"]);
+		expect(problems).toEqual([
+			'The issue "Change one" names files in its Where that aren\'t in "api": "api/../web/page.ts", "web/page.ts". They were left out of the issue.',
+		]);
+	});
+
+	it("CMP-108: keeps a path as written when the repository has a folder of its own name", async () => {
+		const code = tempFolder();
+		write(code, { "api/api/lib.ts": "x\n", "api/src/serve.ts": "x\n" });
+		const plan = planOf(["api/lib.ts:3-9", "api/src/serve.ts", "api/new.ts (new)"]);
+		expect(await checkWhere(plan, code)).toEqual([]);
+		// The folder's own file stays as written; one only outside that folder loses the prefix; a new file may go in the folder.
+		expect(plan.issues[0].where).toEqual(["api/lib.ts:3-9", "src/serve.ts", "api/new.ts (new)"]);
 	});
 
 	it("CMP-107, CMP-108: keeps at most the first 15, names one missing file, and leaves no Where when nothing is left", async () => {
