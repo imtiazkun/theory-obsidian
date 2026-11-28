@@ -60,8 +60,8 @@ export class HiddenFolders {
 /** The icon beside each entry file: a house for index, a scroll for instructions. Names match ignoring case. */
 const ENTRY_ICONS: Record<string, string[]> = { "index.md": ["house", "home"], "instructions.md": ["scroll"] };
 
-/** The icon beside each model folder: the commit history view's icon (UI-40). */
-const MODEL_FOLDER_ICON = ["history"];
+/** The icon beside each model folder: the git branch, as on the Repositories page (UI-40). */
+const MODEL_FOLDER_ICON = ["git-branch"];
 
 /** The first of `names` this Obsidian version has, since Lucide renames icons between versions. */
 function firstIcon(names: string[]): string {
@@ -130,7 +130,7 @@ ${declarations.map((line) => `\t${line};\n`).join("")}	mask: ${mask} center / co
 
 /**
  * Shows `index.md` and `instructions.md` in bold with an icon, at the vault root and directly inside a
- * model folder (a root folder named exactly like a repository in the project folder), and the history
+ * model folder (a root folder named exactly like a repository in the project folder), and the git branch
  * icon left of each model folder's name (UI-40).
  *
  * It writes one stylesheet that targets the explorer rows by their `data-path`, the same attribute the
