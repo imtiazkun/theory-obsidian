@@ -19,7 +19,7 @@ The theoretical model is an Obsidian vault that describes the product:
 - It is mostly Markdown text, with SVG and image assets for diagrams.
 - It says *what* the system does and *why*: concepts, behaviour, rules, decisions.
 - It lives in **its own git repository**, separate from the code it describes.
-- `Index.md` at the vault root is the entry point. theory.md opens it on launch.
+- `Index.md` at the vault root is the entry point. On launch theory.md opens Graph view, which shows the whole model and how its notes link, or `Index.md` when Graph view is turned off.
 - `Instructions.md` at the vault root holds the human-only rules and the writing syntax rules for the model. It is for humans and isn't sent to Claude.
 
 ### Humans only
@@ -68,7 +68,7 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Generate the commit message with Claude (sparkle button on the Commit page) | Done |
 | Commit history view in the right sidebar | Done |
 | Compile history view in the right sidebar: when, who and tokens spent, for your compiles and your teammates' | Done |
-| Open `Index.md` on launch | Done |
+| On launch: Graph view as the active tab (or `Index.md` when Graph view is off), both sidebars expanded with the file explorer on the left and the Comments view on the right. Once per launch, never when the plugin is turned on mid-session or the vault is reopened in the same window | Done |
 | Compile: send revisions since the last compile to Claude Code, which only reads and plans the work; theory.md creates it on GitHub as one issue, or an epic with sub-issues, added to your GitHub Project | Done |
 | Build: Claude Code writes the code for each issue on its own branch; one issue becomes a pull request you merge, an epic's sub-issues are merged into an epic branch you merge; Retry, Skip and Stop when an issue fails; building the same compile again continues it on the same branches | Done |
 | Recompile in a compile report: plans that compile's work again with the answers you committed since, continuing its issues where it can. Offered while no later compile succeeded, nothing of it was built and it wasn't recompiled; disabled until a revision is pending. The two reports link to each other, and Build then builds from the new one | Done |
@@ -94,6 +94,7 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
+| Model folder icon: in the file explorer, each folder named exactly like a repository in the project folder shows the history icon left of its name | Done |
 | Hooks: your own shell commands run after a comment, a commit, a push, a compile or build starting or ending, or a permission request, with the event as JSON on stdin, like posting to Slack | Done |
 | Server: team-wide marker and compile lock | Planned |
 
