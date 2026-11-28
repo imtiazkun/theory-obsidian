@@ -1,3 +1,5 @@
+import { realpath, stat } from "fs/promises";
+import { isAbsolute, join, sep } from "path";
 import type { GitHub } from "./github";
 import type { Revision } from "./compile";
 
@@ -11,6 +13,11 @@ export interface PlannedIssue {
 	rules: string[];
 	/** Says what changes, like `commit-page-diffs`. Branches are named from it (CMP-61). */
 	shortName: string;
+	/**
+	 * Where the work starts: files and line ranges in its repository, like `src/main.ts:142-190`, a new file marked
+	 * "(new)" (CMP-107). Unset when Claude gave none, as answers from before CMP-107 do.
+	 */
+	where?: string[];
 	/** In a recompile: the number of the earlier issue this one continues (CMP-77). */
 	continues?: number;
 	/** In a recompile: one sentence on what changed in the issue it continues, and why (CMP-79). */
@@ -50,6 +57,8 @@ export interface IssueRecord {
 	body: string;
 	rules: string[];
 	shortName: string;
+	/** Where the build starts (CMP-107, BLD-20), as `checkWhere` left it. Never set on the epic. */
+	where?: string[];
 	/** Set once the issue exists on GitHub. */
 	number?: number;
 	url?: string;
@@ -102,6 +111,8 @@ export interface ClosingIssue {
 
 export const SHORT_NAME_MAX = 40;
 export const TITLE_MAX = 70;
+/** The most files and line ranges an issue's Where lists (CMP-107). */
+export const WHERE_MAX = 15;
 
 const ISSUE_SCHEMA = {
 	type: "object",
@@ -111,6 +122,12 @@ const ISSUE_SCHEMA = {
 		body: { type: "string", description: "What to build and why, in the model's words." },
 		rules: { type: "array", items: { type: "string" }, description: "The rule IDs the issue covers, like CMP-12. They are its acceptance criteria." },
 		shortName: { type: "string", description: "Says what changes, like commit-page-diffs: lowercase letters, digits and dashes, at most 40 characters." },
+		where: {
+			type: "array",
+			items: { type: "string" },
+			description:
+				'Where the work starts, from the code you read while planning: at most 15 files and line ranges in the issue\'s repository, like "src/main.ts:142-190". Paths are relative to the repository. Mark a file the issue creates with "(new)", like "src/where.ts (new)".',
+		},
 		continues: {
 			type: "integer",
 			description: "Only in a recompile: the number of the earlier open issue this one continues. Leave it out for new work.",
@@ -120,7 +137,7 @@ const ISSUE_SCHEMA = {
 			description: "Only with continues: one sentence on what changed and why, like \"Now names the description of each check, answered in STAT-10.\"",
 		},
 	},
-	required: ["repo", "title", "body", "rules", "shortName"],
+	required: ["repo", "title", "body", "rules", "shortName", "where"],
 };
 
 /** The plan's shape in the answer (CMP-15). */
@@ -130,7 +147,7 @@ export const PLAN_SCHEMA = {
 	properties: {
 		epic: {
 			type: "object",
-			description: "Only when the work spans several repositories or several intents. Leave it out for one issue.",
+			description: "Only when the plan has more than one issue (CMP-59). Leave it out for one issue.",
 			properties: {
 				title: ISSUE_SCHEMA.properties.title,
 				body: ISSUE_SCHEMA.properties.body,
@@ -274,7 +291,18 @@ export function readPlan(
 	const issues: PlannedIssue[] = (Array.isArray(raw.issues) ? raw.issues : []).map((i) => {
 		const issue = (i ?? {}) as Record<string, unknown>;
 		const { bad, ...more } = continuation(issue);
-		const planned: PlannedIssue = { repo: text(issue.repo), title: text(issue.title), body: text(issue.body), rules: strings(issue.rules), shortName: text(issue.shortName), ...more };
+		// One line each, so the issue body's Where section reads back as it was written (CMP-108).
+		const where = strings(issue.where).map((entry) => entry.replace(/\s+/g, " "));
+		const planned: PlannedIssue = {
+			repo: text(issue.repo),
+			title: text(issue.title),
+			body: text(issue.body),
+			rules: strings(issue.rules),
+			shortName: text(issue.shortName),
+			// An answer from before CMP-107 has no Where, and is still read.
+			...(where.length > 0 ? { where } : {}),
+			...more,
+		};
 		if (bad) badNumbers.push(["issue", planned]);
 		return planned;
 	});
@@ -315,6 +343,95 @@ export function readPlan(
 	for (const [kind, item] of badNumbers) problems.push(`${named(kind, item)} continues something that isn't an issue number.`);
 	problems.push(...continuationProblems(items, earlier));
 	return problems.length > 0 ? { plan: null, problems } : { plan: { epic, issues }, problems };
+}
+
+/** True when a Where entry names a file the issue creates (CMP-107). */
+function markedNew(entry: string): boolean {
+	return /\(new\)/i.test(entry);
+}
+
+/**
+ * The path a Where entry names, relative to its repository: without its line ranges, like `:142-190`, without any
+ * note in brackets, like "(new)", and without a leading `./`.
+ */
+export function wherePath(entry: string): string {
+	return entry
+		.replace(/\([^)]*\)/g, " ")
+		.replace(/:\d.*$/, "")
+		.trim()
+		.replace(/^(?:\.\/)+/, "");
+}
+
+/** True when `path` names a file or folder inside the repository at `root`, symlinks followed. */
+async function inRepository(root: string, path: string): Promise<boolean> {
+	if (!path || isAbsolute(path)) return false;
+	try {
+		const base = await realpath(root);
+		const real = await realpath(join(root, path));
+		if (real !== base && !real.startsWith(base + sep)) return false;
+		await stat(real);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** The entry without a leading `{repo}/`, and any `./` before it. */
+function withoutRepoFolder(entry: string, repo: string): string {
+	return entry.replace(/^(?:\.\/)+/, "").slice(repo.length + 1);
+}
+
+/**
+ * One Where entry as the issue keeps it, or null when it is dropped (CMP-108). An entry whose path is in the
+ * repository as written is kept as it is, so a repository with a folder of its own name still works. Else a path
+ * that starts with the repository's folder, as the rule map writes paths (CMP-93), is kept without it when the rest
+ * is in the repository. A new file is kept unchecked: without the repository's folder, unless the repository has a
+ * folder of its own name, which it may then be meant to go in.
+ */
+async function checkedEntry(root: string, repo: string, entry: string): Promise<string | null> {
+	const path = wherePath(entry);
+	const prefixed = path.startsWith(`${repo}/`);
+	if (markedNew(entry)) return prefixed && !(await inRepository(root, repo)) ? withoutRepoFolder(entry, repo) : entry;
+	if (await inRepository(root, path)) return entry;
+	if (prefixed && (await inRepository(root, path.slice(repo.length + 1)))) return withoutRepoFolder(entry, repo);
+	return null;
+}
+
+/**
+ * Checks each issue's Where against the code snapshot, one folder per repository (CMP-108). An entry whose path
+ * isn't in the issue's repository, with or without a leading `{repo}/` (`checkedEntry`), and that isn't marked
+ * "(new)", is dropped. After that, an issue keeps at most the first 15 (CMP-107). Each problem names the issue and what was dropped. A bad Where never fails the compile,
+ * so the plan is always kept: only its Where lists change.
+ */
+export async function checkWhere(plan: Plan, codeSnapshot: string): Promise<string[]> {
+	const problems: string[] = [];
+	for (const issue of plan.issues) {
+		if (!issue.where) continue;
+		const kept: string[] = [];
+		const missing: string[] = [];
+		const root = join(codeSnapshot, issue.repo);
+		for (const entry of issue.where) {
+			const checked = await checkedEntry(root, issue.repo, entry);
+			if (checked === null) missing.push(entry);
+			else kept.push(checked);
+		}
+		const who = named("issue", issue);
+		if (missing.length > 0) {
+			const list = missing.map((entry) => `"${entry}"`).join(", ");
+			problems.push(
+				missing.length === 1
+					? `${who} names a file in its Where that isn't in "${issue.repo}": ${list}. It was left out of the issue.`
+					: `${who} names files in its Where that aren't in "${issue.repo}": ${list}. They were left out of the issue.`,
+			);
+		}
+		if (kept.length > WHERE_MAX) {
+			problems.push(`${who} lists ${kept.length} files in its Where. Only the first ${WHERE_MAX} were kept: ${kept.slice(WHERE_MAX).map((entry) => `"${entry}"`).join(", ")} were left out.`);
+			kept.length = WHERE_MAX;
+		}
+		if (kept.length > 0) issue.where = kept;
+		else delete issue.where;
+	}
+	return problems;
 }
 
 /** The scope as a plan problem names it (CMP-98). */
@@ -364,6 +481,9 @@ export function issueRecords(plan: Plan, repoPaths: Map<string, string>, earlier
 			rules: item.rules,
 			shortName: item.shortName,
 		};
+		// A continued issue takes the new plan's Where, like its title and body (CMP-107).
+		const where = kind === "issue" ? (item as PlannedIssue).where : undefined;
+		if (where && where.length > 0) result.where = where;
 		if (!from) return result;
 		result.number = from.number;
 		if (from.url) result.url = from.url;
@@ -391,35 +511,69 @@ export function closingIssues(open: IssueRecord[], records: IssueRecord[]): Clos
 		.map((r) => ({ kind: r.kind, repo: r.repo, repoPath: r.repoPath, number: r.number as number, ...(r.url ? { url: r.url } : {}), title: r.title }));
 }
 
-/** The body an issue gets on GitHub: Claude's body, the rules it covers, then the vault revisions it was planned from (CMP-67). */
+/**
+ * The body an issue gets on GitHub: Claude's body, the rules it covers, its Where (CMP-108), then the vault revisions
+ * it was planned from (CMP-67).
+ */
 export function issueBody(record: IssueRecord, revisions: Revision[]): string {
 	const parts = [record.body.trim()];
 	if (record.rules.length > 0) parts.push(`Rules: ${record.rules.join(", ")}`);
+	if (record.where && record.where.length > 0) parts.push([WHERE_HEADING, ...record.where.map((entry) => `- ${entry}`)].join("\n"));
 	parts.push(
 		["---", "Planned by theory.md from these revisions of the model:", ...revisions.map((r) => `- ${r.hash.slice(0, 7)} ${r.subject}`)].join("\n"),
 	);
 	return parts.filter(Boolean).join("\n\n");
 }
 
-/**
- * Claude's body back from an issue's body on GitHub (CMP-67): without the rules and the revisions the plugin added.
- * A shared report doesn't hold the body, so a build or recompile of another engineer's compile reads it here (REP-50).
- */
-export function plannedBody(githubBody: string): string {
-	let body = githubBody.replace(/\r\n/g, "\n");
+const WHERE_HEADING = "Where:";
+/** The Where section at the end of what is left of a body once the revisions are cut off (CMP-108). */
+const WHERE_SECTION = /(^|\n\n)Where:\n((?:- [^\n]*(?:\n|$))+)$/;
+
+/** An issue's body on GitHub without the revisions the plugin added (CMP-67), and whether it had them. */
+function withoutRevisions(githubBody: string): { body: string; planned: boolean } {
+	const body = githubBody.replace(/\r\n/g, "\n");
 	const footer = body.lastIndexOf("\n---\nPlanned by theory.md from these revisions of the model:");
-	if (footer >= 0) body = body.slice(0, footer);
-	else if (body.startsWith("---\nPlanned by theory.md from these revisions of the model:")) body = "";
-	body = body.trimEnd().replace(/(^|\n\n)Rules: [^\n]*$/, "");
-	return body.trim();
+	if (footer >= 0) return { body: body.slice(0, footer).trimEnd(), planned: true };
+	if (body.startsWith("---\nPlanned by theory.md from these revisions of the model:")) return { body: "", planned: true };
+	return { body, planned: false };
 }
 
-/** Fills in the bodies a shared report left empty (REP-50), from GitHub. Throws with the issue when GitHub can't answer. */
+/**
+ * Claude's body back from an issue's body on GitHub (CMP-67): without the rules, the Where and the revisions the
+ * plugin added. A shared report doesn't hold the body, so a build or recompile of another engineer's compile reads
+ * it here (REP-50). A Where is only taken off a body the plugin wrote, one that ends with the revisions.
+ */
+export function plannedBody(githubBody: string): string {
+	const { body, planned } = withoutRevisions(githubBody);
+	return (planned ? body.replace(WHERE_SECTION, "") : body)
+		.trimEnd()
+		.replace(/(^|\n\n)Rules: [^\n]*$/, "")
+		.trim();
+}
+
+/** The Where back from an issue's body on GitHub (CMP-108), or an empty list when the plugin wrote none. */
+export function plannedWhere(githubBody: string): string[] {
+	const { body, planned } = withoutRevisions(githubBody);
+	const section = planned ? WHERE_SECTION.exec(body) : null;
+	if (!section) return [];
+	return section[2]
+		.split("\n")
+		.map((line) => line.replace(/^- /, "").trim())
+		.filter(Boolean);
+}
+
+/**
+ * Fills in the bodies a shared report left empty (REP-50), and their Where (CMP-108), from GitHub. Throws with the
+ * issue when GitHub can't answer.
+ */
 export async function fillIssueBodies(github: GitHub, records: IssueRecord[]): Promise<void> {
 	for (const record of records) {
 		if (record.body || record.number === undefined) continue;
 		try {
-			record.body = plannedBody(await github.issueBody(record.repoPath, record.number));
+			const githubBody = await github.issueBody(record.repoPath, record.number);
+			record.body = plannedBody(githubBody);
+			const where = plannedWhere(githubBody);
+			if (record.kind === "issue" && where.length > 0 && !record.where) record.where = where;
 		} catch (error) {
 			throw new Error(`Couldn't read ${record.repo}#${record.number} on GitHub: ${error instanceof Error ? error.message : String(error)}`);
 		}
