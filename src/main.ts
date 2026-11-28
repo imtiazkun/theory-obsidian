@@ -52,6 +52,7 @@ import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNot
 import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
+import { firstLoadInWindow, leafViewType, noteTabTarget, openLaunchLayout, runsLaunchLayout, windowSessionStorage } from "./launch";
 import {
 	Hooks,
 	buildEndDetails,
@@ -228,12 +229,15 @@ export default class TheoryPlugin extends Plugin {
 
 		// The layout is already ready when the plugin is turned on mid-session; only act on launch.
 		const launching = !this.app.workspace.layoutReady;
+		// Graph view and both sidebars, once per launch and never when the vault is reopened in the same window (UI-33).
+		const launchLayout = runsLaunchLayout(!launching, firstLoadInWindow(windowSessionStorage(), this.getVaultPath()));
 		this.app.workspace.onLayoutReady(async () => {
-			if (launching) await this.openIndex();
 			await this.loadSharedReports();
 			await this.showHistoryView(false);
 			await this.showCompileHistoryView();
 			await this.showCommentsView();
+			// Before first load, so Setup vault's note opens after Graph view (UI-35).
+			if (launchLayout) await openLaunchLayout(this.app, { commentsViewType: COMMENTS_VIEW_TYPE, openIndex: () => this.openIndex() });
 			await this.comments.refresh();
 			await this.commitButtons.sync();
 			this.compileButton.attach();
@@ -1083,7 +1087,9 @@ export default class TheoryPlugin extends Plugin {
 		if (existing) {
 			workspace.setActiveLeaf(existing, { focus: true });
 		} else {
-			await workspace.getLeaf(false).openFile(note);
+			// A note opens after Graph view, in its own tab, instead of replacing it (UI-35).
+			const active = leafViewType(workspace.getMostRecentLeaf(workspace.rootSplit));
+			await workspace.getLeaf(noteTabTarget(active) === "new" ? "tab" : false).openFile(note);
 		}
 	}
 
