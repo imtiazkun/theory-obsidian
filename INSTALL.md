@@ -37,7 +37,7 @@ The script:
 1. Downloads `main.js`, `manifest.json` and `styles.css` from the latest GitHub release and checks them against the release's `checksums.txt`.
 2. Copies them into `<vault>/.obsidian/plugins/theory-md/`. Running it again updates the plugin in place.
 3. Adds `theory-md` to `<vault>/.obsidian/community-plugins.json`, keeping every other entry.
-4. On a first install only, writes the plugin's settings: name and email from `git config`, the project folder, and a one-time request to run **Setup vault** when the plugin first loads. Existing settings are never changed.
+4. On a first install only, writes the plugin's settings: name and email from `git config`, the project folder, and a one-time request for the plugin's first load: set Obsidian's core plugins, ribbon order and Graph view colours, then run **Setup vault**. Existing settings are never changed.
 
 It ends with `key: value` lines (version, checksums checked, settings, whether Obsidian is running). If it fails, show the person its error and stop. Don't work around it by copying files yourself.
 
@@ -61,7 +61,7 @@ xdg-open "obsidian://open?path=<url-encoded vault path>"   # Linux
 Say which version was installed, into which vault, and that these steps are theirs:
 
 - **Trust the plugin.** If Obsidian asks whether to trust the vault's plugins, or Community plugins is in Restricted mode, they turn that off. theory.md then loads.
-- **Setup vault runs by itself** on that first load: it makes the vault a git repository with `Index.md`, `Instructions.md`, `_templates/` and a first commit signed with their name. A vault that already uses git is left as it is.
+- **The first load sets things up by itself.** theory.md turns off the core plugins it doesn't use (they can turn any back on in Settings → Core plugins), orders the ribbon and colours Graph view. Then Setup vault makes the vault a git repository with `Index.md`, `Instructions.md`, `_templates/` and a first commit signed with their name. A vault that already uses git is left as it is, and the notice names any missing starter files.
 - **Name and email.** If the script warned that git has no `user.name` or `user.email`, they set them with `git config --global user.name "Their Name"` and `git config --global user.email "them@example.com"`, then run **theory.md: Setup vault** from the command palette. theory.md signs commits with the name and email git uses.
 - **Claude Code.** Compile needs the [Claude Code CLI](https://claude.com/claude-code), signed in. If the script warned that it isn't on PATH, say so. **Create PR** also needs the [GitHub CLI](https://cli.github.com) signed in (`gh auth status`).
 - **Allowed commands.** Under Settings → theory.md → Compile, they add the commands Claude may run in their project, like `Bash(npm run *)`.

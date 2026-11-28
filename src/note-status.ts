@@ -1,5 +1,5 @@
 import { MarkdownView, TFile, getIconIds, setIcon } from "obsidian";
-import { COMPILED_TAG } from "./compile";
+import { filesSinceMarker } from "./shared-report";
 import type TheoryPlugin from "./main";
 import { git } from "./vault";
 
@@ -112,13 +112,10 @@ export class NoteStatus {
 		const vaultPath = this.plugin.getVaultPath();
 		const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 		const tracked = new Set(files.split("\0").filter(Boolean));
-		try {
-			const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", `refs/tags/${COMPILED_TAG}`, "HEAD"]);
-			return { tracked, pending: new Set(stdout.split("\0").filter(Boolean)) };
-		} catch {
-			// No compile marker yet.
-			return { tracked, pending: "all" };
-		}
+		// The marker as the shared reports set it (REP-49), or the local tag with sharing off (CFG-44). No marker yet
+		// means every file is pending.
+		const pending = await filesSinceMarker(vaultPath, this.plugin.settings.shareReports).catch(() => null);
+		return { tracked, pending: pending ? new Set(pending) : "all" };
 	}
 
 	private compileState(path: string, { tracked, pending }: GitState): CompileState {

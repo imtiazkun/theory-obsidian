@@ -42,6 +42,13 @@ export class FakeGitHub implements GitHub {
 	/** Folders of repositories without a GitHub origin. */
 	noOrigin = new Set<string>();
 	projectError: string | null = null;
+	/**
+	 * The default branch GitHub names for a repository folder, or an Error to fail with. A folder not listed gets
+	 * the branch its real `origin` has as HEAD, else "main".
+	 */
+	defaultBranches = new Map<string, string | Error>();
+	/** True when GitHub can't be reached, so asking for a default branch fails (CMP-87). */
+	offline = false;
 	/** Makes the nth call of a method fail once with this message, counted from 1. */
 	failures = new Map<string, { at: number; message: string }>();
 	private counts = new Map<string, number>();
@@ -74,6 +81,15 @@ export class FakeGitHub implements GitHub {
 
 	async repoName(repoPath: string) {
 		return this.noOrigin.has(this.repo(repoPath)) ? null : `team/${this.repo(repoPath)}`;
+	}
+
+	async defaultBranch(repoPath: string) {
+		if (this.offline) throw new Error("Couldn't reach GitHub.");
+		const set = this.defaultBranches.get(this.repo(repoPath));
+		if (set instanceof Error) throw set;
+		if (set) return set;
+		const { stdout } = await git(repoPath, ["ls-remote", "--symref", "origin", "HEAD"]).catch(() => ({ stdout: "" }));
+		return stdout.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1] ?? "main";
 	}
 
 	async checkProject(projectUrl: string) {
@@ -147,6 +163,11 @@ export class FakeGitHub implements GitHub {
 
 	async issueState(repoPath: string, number: number) {
 		return this.issue(this.repo(repoPath), number).state;
+	}
+
+	async issueBody(repoPath: string, number: number) {
+		this.call("issueBody", `${this.repo(repoPath)}#${number}`);
+		return this.issue(this.repo(repoPath), number).body;
 	}
 
 	async openPullRequest(repoPath: string, pr: { head: string; base: string; title: string; body: string }) {

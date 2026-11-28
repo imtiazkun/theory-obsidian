@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 import { describe, expect, it } from "vitest";
 import {
 	AcpPermissionOption,
@@ -13,7 +13,6 @@ import {
 } from "../src/acp";
 import {
 	BUILD_SCHEMA,
-	COMPILED_TAG,
 	CompileOptions,
 	CompileReport,
 	PermissionRequest,
@@ -23,6 +22,7 @@ import {
 	startCompile,
 	startSession,
 } from "../src/compile";
+import { markerCommit } from "../src/shared-report";
 import { FakeGitHub } from "./fake-github";
 import { initRepo, out, tempFolder, write } from "./helpers";
 
@@ -161,7 +161,7 @@ describe("ACP settings (AGT-5, AGT-6)", () => {
 
 const FAKE_AGENT = `
 import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 const [plan, record] = process.argv.slice(2);
 const steps = JSON.parse(readFileSync(plan, "utf8"));
 let nextId = 1000;
@@ -299,7 +299,7 @@ describe("compiling with an ACP agent", () => {
 		await expect(startCompile({ ...s.options([]), agentCommand: "  " }, () => {})).rejects.toThrow(
 			"Set the agent command in theory.md settings first.",
 		);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(await markerCommit(s.vault)).toBeNull();
 	});
 
 	it("fails with the agent's command when it isn't found, and the marker doesn't move (AGT-19)", async () => {
@@ -310,7 +310,7 @@ describe("compiling with an ACP agent", () => {
 		expect(problemTexts(report)).toContain(
 			`Couldn't find the agent ("theory-no-such-agent --acp"). Set its command in theory.md settings.`,
 		);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(report.markerMoved).not.toBe(true);
 	});
 
 	it("sends the prompt with the answer's shape and reads the answer from the last JSON block (AGT-9, AGT-10)", async () => {
@@ -328,10 +328,16 @@ describe("compiling with an ACP agent", () => {
 		expect(prompt).toContain("You are compiling a theoretical model into a plan of work.");
 		expect(prompt).toContain('"required": [\n    "status",');
 		const session = records.find((r) => r.received === "session/new")?.params;
-		expect(session.cwd).toBe(s.project);
+		// It runs in the code snapshot, as Claude Code does (CMP-13), which is gone once the compile ended (CMP-89).
+		expect(session.cwd).not.toBe(s.project);
+		expect(basename(session.cwd)).toMatch(/^theory-code-/);
+		expect(prompt).toContain(`one folder per repository under the same name: ${session.cwd}`);
+		expect(prompt).toMatch(/- app: main at [0-9a-f]{7}/);
+		expect(existsSync(session.cwd)).toBe(false);
 		expect(session.additionalDirectories).toHaveLength(1);
 		expect(records.find((r) => r.received === "initialize")?.params.clientCapabilities.terminal).toBe(false);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
+		// The marker moves once this report is committed with markerMoved: true (CMP-22, REP-49).
+		expect(report.markerMoved).toBe(true);
 	});
 
 	it("picks the agent model and thinking level from the agent's choices, never Claude Code's (AGT-6, AGT-23, AGT-24)", async () => {
@@ -372,7 +378,8 @@ describe("compiling with an ACP agent", () => {
 		const report = await (await compile(s.options([answerStep(), answerStep(partial)]))).done;
 		expect(report.status).toBe("failed");
 		expect(problemTexts(report).some((p) => p.startsWith("The agent gave no structured answer."))).toBe(true);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe(COMPILED_TAG);
+		// The marker moves once this report is committed with markerMoved: true (CMP-22, REP-49).
+		expect(report.markerMoved).toBe(true);
 	});
 
 	it("says why the agent stopped and the end of its error output, never the exit code (AGT-22)", async () => {
@@ -435,7 +442,7 @@ describe("compiling with an ACP agent", () => {
 		expect(problems.some((p) => p.startsWith("These vault files changed while the compile ran: Note.md."))).toBe(true);
 		expect(problems).toContain("Claude tried to change the model snapshot. Those changes were thrown away.");
 		expect(s.records().some((r) => r.received === "session/cancel")).toBe(true);
-		await expect(out(s.vault, ["tag", "--list", COMPILED_TAG])).resolves.toBe("");
+		expect(report.markerMoved).not.toBe(true);
 		expect(s.github.issues).toEqual([]);
 	});
 });

@@ -1,22 +1,23 @@
 import { ChildProcess, spawn } from "child_process";
-import { createHash } from "crypto";
 import { existsSync, statSync } from "fs";
 import { mkdtemp, readFile, readdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { runAcpAgent } from "./acp";
+import { CodeRead, CodeSnapshot, codeReadText, createCodeSnapshot, hashTree, removeSnapshot, runTool } from "./code-snapshot";
 import { Anchor, Problem, checkAnchors, checkProblems, plainProblem } from "./anchor";
 import { dirtyRepos, projectRepos } from "./branches";
 import type { BuildRecord } from "./build";
 import { type GitHub, type PullRequest, ghGitHub } from "./github";
-import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
+import { ClosingIssue, IssueRecord, PLAN_SCHEMA, SYNC_FAILURE, SyncError, canDiscard, closingIssues, discardIssues, fillIssueBodies, isEmptyPlan, issueRecords, readPlan, stepsLeft, syncIssues } from "./plan";
 import { findProjectRepos } from "./project";
 import { recompileProblem } from "./recompile";
 import { toolPath } from "./tool-path";
+import { type SharedBuild, type SharedPlace, markerCommit } from "./shared-report";
 import { git, isInDotFolder } from "./vault";
 
-/** Tag in the vault repository that marks the last compiled commit. */
-export const COMPILED_TAG = "theory/compiled";
+export { removeSnapshot };
+
 // Git's well-known empty tree, used to diff the whole model on the first compile.
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 // Larger diffs are cut; Claude can still read every file in the snapshot.
@@ -94,10 +95,20 @@ export interface AgentSettings {
 
 export interface CompileOptions extends AgentSettings {
 	vaultPath: string;
-	/** Folder holding the project's code: one repository, or several side by side. Claude reads it here. */
+	/**
+	 * Folder holding the project's code: one repository, or several side by side. Claude never reads it here: it
+	 * reads each repository's default branch in the code snapshot (CMP-84).
+	 */
 	projectFolder: string;
+	/**
+	 * Paths of the repositories the pull before this compile fetched. The code of the others is read as of their last
+	 * fetch (CMP-87). Unset means every repository was just fetched.
+	 */
+	fetched?: string[];
 	/** Who runs the compile, shown in the compile history. */
 	author: string;
+	/** The email git signs with (CFG-34), for the shared report (REP-45). */
+	authorEmail?: string;
 	/** The GitHub Project every issue is added to, as its URL (CFG-40). */
 	githubProject: string;
 	/** How the plugin reaches GitHub. `gh` when unset; tests pass a fake (TEST-6). */
@@ -111,6 +122,17 @@ export interface CompileOptions extends AgentSettings {
 	recompile?: CompileReport;
 	/** Every saved report, to check again at start that `recompile` can still be recompiled (CMP-73, CMP-75). */
 	reports?: CompileReport[];
+	/**
+	 * Commits the shared report (REP-46): when creating an issue fails and the report waits for Retry or Discard, and
+	 * once the compile ends. Gets the snapshot folders, so the Activity log can name paths relative to them (REP-53).
+	 * Never throws. Unset means nothing is shared.
+	 */
+	share?: (report: CompileReport, snapshots: { model: string; code: string }) => Promise<void>;
+	/**
+	 * The Share compile reports setting (CFG-44). Off: the marker is the local tag `theory/compiled`, and `share`
+	 * moves it instead of writing to `.compiles/`. Unset means on.
+	 */
+	shareReports?: boolean;
 }
 
 export interface Revision {
@@ -128,7 +150,8 @@ export interface Question {
 	anchors?: Anchor[];
 }
 
-export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled";
+/** `imported` is only the marker-only shared report that carried the old tag over (CFG-45). No compile ends so. */
+export type CompileStatus = "running" | "succeeded" | "failed" | "cancelled" | "imported";
 
 export interface CompileReport {
 	id: string;
@@ -150,6 +173,8 @@ export interface CompileReport {
 	toCommit: string;
 	revisions: Revision[];
 	summary: string;
+	/** The code each repository was read at: its default branch and commit in the code snapshot (CMP-84, REP-43). */
+	code?: CodeRead[];
 	/** Changes a build made to the code, from Claude's answer for each issue. A compile makes none. */
 	changes: string[];
 	questions: Question[];
@@ -176,16 +201,48 @@ export interface CompileReport {
 	build?: BuildRecord;
 	/** Pull requests for this compile's work: those a build opened, and those opened with Create PR. */
 	pullRequests?: PullRequest[];
+	/** The email git signed with for the engineer who compiled (CFG-34), for the shared report (REP-45). */
+	authorEmail?: string;
+	/** The model and effort (or an ACP agent's thinking level) the agent ran with. Unset or "" means its default. */
+	model?: string;
+	effort?: string;
+	/**
+	 * Whether this compile moved the last compile marker, once Claude ran (CMP-22). Unset when Claude never ran. The
+	 * marker moves only when the shared report is committed with it (REP-49).
+	 */
+	markerMoved?: boolean;
+	/** The report's file in `.compiles/` and its short id, once it was first shared (REP-44). */
+	shared?: SharedPlace;
+	/** Why the last commit or push of the shared report failed: it is then only in the data file (REP-48). */
+	notShared?: string;
+	/** Every build that ended, as the shared report keeps it (REP-45). */
+	builds?: SharedBuild[];
+	/**
+	 * True for a report read from `.compiles/`, which another engineer's compile shared: its Activity comes from the
+	 * shared log (REP-54), and its issue bodies from GitHub when a build or recompile needs them (REP-50).
+	 */
+	fromShared?: boolean;
+	/**
+	 * The files the shared report links, as last read from `.compiles/` (REP-41, REP-42). Kept so that writing the
+	 * report never drops a link to a report this machine doesn't list.
+	 */
+	sharedLinks?: { recompileOf: string | null; recompiledBy: string | null };
+	/**
+	 * Set when this compile's shared report couldn't be pushed because the remote moved, and the remote's newest
+	 * report had moved the marker past this compile's `from` (CMP-91): that report's file.
+	 */
+	compiledMeanwhile?: string;
 }
 
 /**
  * How many committed revisions are waiting to be compiled. A revision that changes only files in dot
  * folders, like a comment, is never pending.
  */
-export async function pendingRevisionCount(vaultPath: string): Promise<number> {
+export async function pendingRevisionCount(vaultPath: string, sharing = true): Promise<number> {
 	const head = await headCommit(vaultPath).catch(() => null);
 	if (!head) return 0;
-	const from = await tagCommit(vaultPath);
+	// The marker as the committed shared reports set it (REP-49, CMP-90), or the local tag with sharing off (CFG-44).
+	const from = await markerCommit(vaultPath, sharing);
 	if (from === head) return 0;
 	const { stdout } = await git(vaultPath, ["rev-list", "--count", from ? `${from}..${head}` : head, "--", DOT_FOLDERS]);
 	return Number(stdout.trim()) || 0;
@@ -281,15 +338,6 @@ export function requiredFields(schema: { required: string[] }): string[] {
 	return schema.required;
 }
 
-async function tagCommit(vaultPath: string): Promise<string | null> {
-	try {
-		const { stdout } = await git(vaultPath, ["rev-parse", "--verify", "--quiet", `refs/tags/${COMPILED_TAG}^{commit}`]);
-		return stdout.trim() || null;
-	} catch {
-		return null;
-	}
-}
-
 async function headCommit(vaultPath: string): Promise<string> {
 	try {
 		const { stdout } = await git(vaultPath, ["rev-parse", "--verify", "HEAD"]);
@@ -355,40 +403,6 @@ export async function createSnapshot(vaultPath: string, commit: string): Promise
 	return dir;
 }
 
-export async function removeSnapshot(dir: string) {
-	await runTool("chmod", ["-R", "u+w", dir]).catch(() => {});
-	await rm(dir, { recursive: true, force: true });
-}
-
-/** A hash of every path and file in `dir`, to check nothing in the snapshot changed. */
-async function hashTree(dir: string): Promise<string> {
-	const hash = createHash("sha256");
-	const walk = async (sub: string) => {
-		const entries = await readdir(join(dir, sub), { withFileTypes: true });
-		entries.sort((a, b) => a.name.localeCompare(b.name));
-		for (const entry of entries) {
-			const path = join(sub, entry.name);
-			hash.update(path + "\0");
-			if (entry.isDirectory()) await walk(path);
-			else if (entry.isFile()) hash.update(await readFile(join(dir, path)));
-		}
-	};
-	await walk("");
-	return hash.digest("hex");
-}
-
-function runTool(command: string, args: string[]): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, { env: { ...process.env, PATH: toolPath() } });
-		let stderr = "";
-		child.stderr.on("data", (chunk) => (stderr += chunk));
-		child.on("error", reject);
-		child.on("close", (code) =>
-			code === 0 ? resolve() : reject(new Error(`${command} failed: ${stderr.trim() || `exit ${code}`}`)),
-		);
-	});
-}
-
 /** The `instructions.md` in a repository's model folder, matched ignoring case, or null when it has none. */
 async function modelInstructions(snapshot: string, repo: string): Promise<{ path: string; text: string } | null> {
 	const folder = join(snapshot, repo);
@@ -429,6 +443,8 @@ export async function openEarlierIssues(github: GitHub, earlier: CompileReport):
 		}
 		if (state === "open") open.push(record);
 	}
+	// REP-50: an earlier compile read from `.compiles/` has no issue bodies. The prompt and CMP-80 need them.
+	await fillIssueBodies(github, open);
 	return open;
 }
 
@@ -455,6 +471,9 @@ function earlierIssuesText(issues: IssueRecord[]): string {
 export function compilePrompt(params: {
 	snapshot: string;
 	projectFolder: string;
+	/** The code snapshot, and what each repository in it was read at (CMP-10, CMP-84). */
+	codeSnapshot: string;
+	code: CodeRead[];
 	head: string;
 	from: string | null;
 	revisions: Revision[];
@@ -463,24 +482,32 @@ export function compilePrompt(params: {
 	/** For a recompile: the earlier compile's issues that are still open (CMP-76). `from` is then that compile's start. */
 	earlier?: IssueRecord[];
 }): string {
-	const { snapshot, projectFolder, head, from, revisions, diff, instructions, earlier } = params;
+	const { snapshot, projectFolder, codeSnapshot, code, head, from, revisions, diff, instructions, earlier } = params;
 	const instructionList = instructions
 		.map((i) => `### ${i.repo} (${i.path} in the model directory)\n\n${i.text.trim()}`)
 		.join("\n\n");
 	return `You are compiling a theoretical model into a plan of work.
 
-The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to read the model and the code in the project folder (the current directory), and plan the work that makes the code match the model. You don't change any code: the plugin creates your plan as GitHub issues, and a later build writes the code, one issue at a time.
+The theoretical model is a set of notes, written only by humans, that describes a software ecosystem: what it does and why. Your job is to read the model and the code in the code snapshot (the current directory), and plan the work that makes the code match the model. You don't change any code: the plugin creates your plan as GitHub issues, and a later build writes the code, one issue at a time.
 
 The model at revision ${head} is in this directory: ${snapshot}
 
 ${repoListText(projectFolder)}
+
+${
+		code.length > 0
+			? `The code is in this directory, one folder per repository under the same name: ${codeSnapshot}
+It is each repository's default branch as \`origin\` has it, read at:
+${code.map((read) => `- ${codeReadText(read)}`).join("\n")}`
+			: `The code snapshot is empty, because the project folder has no git repositories yet: ${codeSnapshot}`
+	}
 
 Rules:
 - The model is read-only. Never create, edit, move or delete anything in the model directory, and never write to the Obsidian vault it came from. Writing to the model is forbidden.
 - The model is the source of truth. If the code disagrees with the model, the code changes.
 - A note whose front matter has \`realized: false\` is written ahead of the code. Don't plan what it describes yet, and don't count it as a mismatch.
 - If the model is unclear, incomplete or contradicts itself, don't guess. Add a question to \`questions\`, naming the model files it is about with paths relative to the model directory. Give it \`anchors\` pointing at the rule that needs updating: the model file, the heading it sits under, and a short quote of the rule copied exactly from the note. Carry on with the parts that are clear.
-- Read the code in the project folder to plan the work. Never change a file anywhere: you can only read, search and list.
+- Read the code only in the code snapshot. It is each repository's default branch as \`origin\` has it. Never change a file anywhere: you can only read, search and list.
 - Notes at the root of the model directory describe the whole system. Notes in a folder named after a repository describe that repository only.
 - Before planning work in a repository, read its AGENTS.md (and CLAUDE.md, if there is one) and \`instructions.md\` in that repository's folder in the model directory, so the issues fit how that repository is built and tested.
 - Plan one issue, or an epic with sub-issues. It is one issue when all the work changes one repository and carries one intent. Otherwise it is an epic, with one sub-issue for each repository and intent. Leave \`plan.issues\` empty when the code already matches the model.
@@ -945,6 +972,9 @@ export async function requireGitHub(github: GitHub, cwd: string, repos: { name: 
 	}
 }
 
+/** The problem when the code snapshot changed while the agent ran (INV-14). */
+export const CODE_SNAPSHOT_CHANGED = "Claude tried to change the code snapshot. Those changes were thrown away.";
+
 /** Each repository's branch and commit, to check a compile changed none of them (CMP-69). */
 async function codeState(projectFolder: string): Promise<Map<string, string>> {
 	const state = new Map<string, string>();
@@ -975,8 +1005,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	}
 
 	const head = await headCommit(vaultPath);
-	const marker = await tagCommit(vaultPath);
-	if (marker === head || (await pendingRevisionCount(vaultPath)) === 0) {
+	// The marker as the shared reports set it after the pull before this compile (CMP-90), or the local tag with
+	// Share compile reports off (CFG-44).
+	const sharing = options.shareReports !== false;
+	const marker = await markerCommit(vaultPath, sharing);
+	if (marker === head || (await pendingRevisionCount(vaultPath, sharing)) === 0) {
 		throw new NothingToCompileError("Every committed revision is already compiled.");
 	}
 	// Claude plans from the committed code, never from the engineer's unfinished work (CMP-36).
@@ -1000,15 +1033,30 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	const revisions = await revisionsBetween(vaultPath, from, head);
 	const diff = await modelDiff(vaultPath, from, head);
 	const notes = await changedNotes(vaultPath, from, head);
-	const snapshot = await createSnapshot(vaultPath, head);
-	const guard = await guardModel(vaultPath, snapshot);
 	const codeBefore = await codeState(projectFolder);
-
+	// Claude reads each repository's default branch as origin has it, never the checkout (CMP-84). Throws when one
+	// can't be read, before anything else is made (CMP-88).
+	const fetched = new Set(options.fetched ?? repos.map((r) => r.path));
+	const code: CodeSnapshot = await createCodeSnapshot(repos, github, fetched);
+	let snapshot: string | null = null;
+	let guard: ModelGuard;
+	let codeHash: string;
 	const instructions: { repo: string; path: string; text: string }[] = [];
-	for (const repo of repos) {
-		const file = await modelInstructions(snapshot, repo.name);
-		if (file) instructions.push({ repo: repo.name, ...file });
+	try {
+		snapshot = await createSnapshot(vaultPath, head);
+		guard = await guardModel(vaultPath, snapshot);
+		codeHash = await hashTree(code.dir);
+		for (const repo of repos) {
+			const file = await modelInstructions(snapshot, repo.name);
+			if (file) instructions.push({ repo: repo.name, ...file });
+		}
+	} catch (error) {
+		// Both snapshots go whatever the outcome (INV-7, CMP-89).
+		if (snapshot) await removeSnapshot(snapshot);
+		await removeSnapshot(code.dir);
+		throw error;
 	}
+	const modelSnapshot = snapshot;
 
 	const report: CompileReport = {
 		id: `${Date.now()}`,
@@ -1020,23 +1068,39 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			: {}),
 		toCommit: head,
 		revisions,
+		code: code.code,
 		summary: "",
 		changes: [],
 		questions: [],
 		problems: [],
 		log: [],
 		author: options.author,
+		...(options.authorEmail ? { authorEmail: options.authorEmail } : {}),
 		...(agent === "acp" ? { agent } : {}),
+		model: agent === "acp" ? (options.agentModel ?? "") : options.model,
+		effort: agent === "acp" ? (options.agentThinkingLevel ?? "") : options.effort,
 	};
 
 	let session: AgentSession;
 	try {
 		session = startSession({
 			settings: options,
-			cwd: projectFolder,
-			snapshot,
-			protectedPaths: [vaultPath, snapshot],
-			prompt: compilePrompt({ snapshot, projectFolder, head, from, revisions, diff, instructions, earlier: openEarlier }),
+			// The agent runs in the code snapshot, whichever agent it is (CMP-13), and may write to none of these (INV-4, INV-14).
+			cwd: code.dir,
+			snapshot: modelSnapshot,
+			protectedPaths: [vaultPath, modelSnapshot, code.dir],
+			prompt: compilePrompt({
+				snapshot: modelSnapshot,
+				projectFolder,
+				codeSnapshot: code.dir,
+				code: code.code,
+				head,
+				from,
+				revisions,
+				diff,
+				instructions,
+				earlier: openEarlier,
+			}),
 			schema: COMPILE_SCHEMA,
 			readOnly: true,
 			what: "compile",
@@ -1045,7 +1109,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			onPermissionRequest: options.onPermissionRequest,
 		});
 	} catch (error) {
-		await removeSnapshot(snapshot);
+		await removeSnapshot(modelSnapshot);
+		await removeSnapshot(code.dir);
 		throw error;
 	}
 	const agentName = agent === "acp" ? "The agent" : "Claude Code";
@@ -1053,7 +1118,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 	let cancelled = false;
 	// Set while the report waits for Retry or Discard (CMP-68).
 	let choose: ((choice: "retry" | "discard" | "stop") => void) | null = null;
-	const markCompiled = () => git(vaultPath, ["tag", "-f", COMPILED_TAG, head]);
+	// The marker moves when the shared report is committed with `markerMoved: true` (CMP-22, REP-49).
+	const markCompiled = () => {
+		report.markerMoved = true;
+	};
+	const share = async () => {
+		await options.share?.(report, { model: modelSnapshot, code: code.dir }).catch(() => {});
+	};
 
 	const done = (async () => {
 		const outcome = await session.done;
@@ -1062,10 +1133,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 		const dropSnapshot = async () => {
 			if (snapshotGone) return;
 			snapshotGone = true;
-			await removeSnapshot(snapshot);
+			await removeSnapshot(modelSnapshot);
 		};
 		try {
 			const checked = await checkModel(guard);
+			// The code snapshot is checked as the model snapshot is, after every run in which the agent started (INV-14).
+			const codeIntact = (await hashTree(code.dir).catch(() => "")) === codeHash;
+			if (!codeIntact) checked.problems.push(plainProblem(CODE_SNAPSHOT_CHANGED));
 			// A compile never changes code (CMP-69): anything that did is the agent's own shell, and the engineer must hear.
 			const codeAfter = await codeState(projectFolder).catch(() => codeBefore);
 			const changedRepos = [...codeBefore.keys()].filter((name) => codeBefore.get(name) !== codeAfter.get(name));
@@ -1117,13 +1191,13 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				report.problems.push(plainProblem(noAnswerProblem(outcome, options)));
 			}
 
-			const { intact } = checked;
-			// Anchors are only checked against a snapshot that is still the compiled revision.
-			report.problems.push(...(await checkProblems(intact ? snapshot : null, claimedProblems)));
+			// Anchors are only checked when neither snapshot changed (INV-5, INV-14).
+			const intact = checked.intact && codeIntact;
+			report.problems.push(...(await checkProblems(intact ? modelSnapshot : null, claimedProblems)));
 			report.problems.push(...planProblems.map(plainProblem));
 			// The engineer must know which steps didn't run, whatever Claude reported.
 			report.problems.push(...outcome.skipped.map(plainProblem));
-			report.questions = await checkedQuestions(structured, intact ? snapshot : null);
+			report.questions = await checkedQuestions(structured, intact ? modelSnapshot : null);
 			if (!intact || changedRepos.length > 0) verdict = "failed";
 			report.problems.unshift(...checked.problems, ...codeProblems);
 			await dropSnapshot();
@@ -1131,7 +1205,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			if (verdict !== "succeeded" || !plan) {
 				// A failed compile creates no issue, and the marker still moves (CMP-17, CMP-22).
 				report.status = "failed";
-				await markCompiled();
+				markCompiled();
 				return report;
 			}
 
@@ -1143,9 +1217,11 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 			if (report.issues.length === 0 && !report.closing?.length) {
 				// Nothing to build: the code already matches the model. No issue, no Build, and the marker moves (CMP-71).
 				report.status = "succeeded";
-				await markCompiled();
+				markCompiled();
 				return report;
 			}
+			// Claude ran, so a compile's marker moves (CMP-22). A recompile's moves once every step is done (CMP-81).
+			if (!earlier) markCompiled();
 			onUpdate(report);
 			const what = earlier ? "recompile" : "compile";
 			for (;;) {
@@ -1156,8 +1232,14 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				} catch (failure) {
 					const prefix = failure instanceof SyncError ? SYNC_FAILURE[failure.step] : SYNC_FAILURE.create;
 					report.issueFailure = `${prefix}: ${failure instanceof Error ? failure.message : String(failure)}`;
+					const answered = cancelled
+						? Promise.resolve<"stop">("stop")
+						: new Promise<"retry" | "discard" | "stop">((resolve) => (choose = resolve));
 					onUpdate(report);
-					const choice = cancelled ? "stop" : await new Promise<"retry" | "discard" | "stop">((resolve) => (choose = resolve));
+					// The compile Claude ran is shared while it waits; Retry and Discard update it (REP-46). A recompile
+					// is shared once it ends.
+					if (!earlier && !cancelled) await share();
+					const choice = await answered;
 					choose = null;
 					if (choice === "retry" && !cancelled) continue;
 					const reason = report.issueFailure;
@@ -1165,6 +1247,7 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					if (!canDiscard(report.issues, report.closing)) {
 						// An edit on GitHub can't be undone, so nothing is closed, and the marker waits for every step (CMP-81).
 						const left = stepsLeft(report.issues, report.closing);
+						report.markerMoved = false;
 						report.status = cancelled ? "cancelled" : "failed";
 						if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
 						report.problems.push(
@@ -1174,6 +1257,8 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 					}
 					// A GitHub failure says nothing about the model: the revisions stay pending (CMP-68).
 					const notClosed = await discardIssues(github, report.issues);
+					// Discard commits the report again with `markerMoved: false` (CMP-22, CMP-68).
+					report.markerMoved = false;
 					report.status = cancelled ? "cancelled" : "failed";
 					if (cancelled) report.summary = `You cancelled this ${what}. The last compile marker didn't move.`;
 					report.problems.push(
@@ -1184,11 +1269,15 @@ export async function startCompile(options: CompileOptions, onUpdate: (report: C
 				}
 			}
 			report.status = "succeeded";
-			await markCompiled();
+			markCompiled();
 			return report;
 		} finally {
 			report.finishedAt = new Date().toISOString();
 			await dropSnapshot();
+			// The code snapshot goes whatever the outcome (CMP-89).
+			await removeSnapshot(code.dir).catch(() => {});
+			// The compile ended: its shared report is committed when Claude ran (REP-46).
+			await share();
 			onUpdate(report);
 		}
 	})();

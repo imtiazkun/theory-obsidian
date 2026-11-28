@@ -393,9 +393,12 @@ describe("the pull before a compile", () => {
 		);
 	});
 
-	it("stops the compile when a repository not on a compile branch can't fast-forward", () => {
-		const gate = compileGate({ kind: "synced", ahead: 0 }, [repo({ name: "api", stuck: true }), repo({ name: "web" }), repo({ name: "cli", stuck: true })]);
-		expect(gate.error).toBe("Pull these repositories first: api, cli.");
+	it("never stops a compile or a build for a code repository that is behind, on any branch (PULL-16)", () => {
+		const repos = [repo({ name: "api", stuck: true }), repo({ name: "web" }), repo({ name: "cli", stuck: true })];
+		expect(compileGate({ kind: "synced", ahead: 0 }, repos)).toEqual({ error: null, offline: false });
+		expect(compileGate({ kind: "synced", ahead: 0 }, repos, "recompile")).toEqual({ error: null, offline: false });
+		// A build checks its default branches itself (BLD-7).
+		expect(compileGate({ kind: "synced", ahead: 0 }, repos, "build")).toEqual({ error: null, offline: false });
 	});
 
 	it("carries on offline when a fetch fails", () => {
@@ -472,6 +475,17 @@ describe("Puller", () => {
 		// Only one pull was waiting.
 		await puller.compileEnded();
 		expect(runs).toEqual(["now"]);
+	});
+
+	it("pulls before a shared report is written, but never during a compile, and none waits for it (REP-50, PULL-4)", async () => {
+		let compiling = true;
+		const { puller, runs } = fakePuller({ compiling: () => compiling, automatic: false });
+		expect(await puller.pull("share")).toBeNull();
+		compiling = false;
+		await puller.compileEnded();
+		expect(runs).toEqual([]);
+		expect(await puller.pull("share")).not.toBeNull();
+		expect(runs).toEqual(["share"]);
 	});
 
 	it("skips a focus pull within 30 seconds of the last pull", async () => {

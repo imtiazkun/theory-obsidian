@@ -134,6 +134,18 @@ export async function branchPullRequest(
 	return null;
 }
 
+/**
+ * A pull request already opened from this `branch` that Create PR shows instead of opening another (REP-58): open,
+ * draft or merged. A closed one doesn't count, so a new pull request can replace it. Null when gh can't tell.
+ */
+export async function existingPullRequest(
+	repoPath: string,
+	branch: string,
+): Promise<{ url: string; state: PullRequestState } | null> {
+	const found = await branchPullRequest(repoPath, branch);
+	return found && found.state !== "closed" ? found : null;
+}
+
 /** Branch names on `origin`, as git last saw them. Never fetches. */
 export async function remoteBranches(repoPath: string): Promise<string[]> {
 	try {
@@ -209,6 +221,8 @@ export interface GitHub {
 	authProblem(cwd: string): Promise<string | null>;
 	/** `owner/name` of the repository's GitHub `origin`, or null when it has none. */
 	repoName(repoPath: string): Promise<string | null>;
+	/** The branch GitHub names as the repository's default (CMP-84). */
+	defaultBranch(repoPath: string): Promise<string>;
 	/** Throws with the reason when the GitHub Project can't be reached. */
 	checkProject(projectUrl: string, cwd: string): Promise<void>;
 	/** Creates the label in the repository when it is missing. */
@@ -225,6 +239,8 @@ export interface GitHub {
 	commentIssue(repoPath: string, number: number, body: string): Promise<void>;
 	closeIssue(repoPath: string, number: number, reason: "completed" | "not planned"): Promise<void>;
 	issueState(repoPath: string, number: number): Promise<"open" | "closed">;
+	/** The issue's body on GitHub. */
+	issueBody(repoPath: string, number: number): Promise<string>;
 	/** Opens a pull request for a branch already pushed. Returns its web address. */
 	openPullRequest(repoPath: string, pr: { head: string; base: string; title: string; body: string }): Promise<string>;
 	/** Merges the pull request with a merge commit. */
@@ -255,6 +271,12 @@ export const ghGitHub: GitHub = {
 	async repoName(repoPath) {
 		const url = await githubOrigin(repoPath);
 		return url ? url.replace("https://github.com/", "") : null;
+	},
+	async defaultBranch(repoPath) {
+		const { stdout } = await gh(repoPath, ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+		const name = stdout.trim();
+		if (!name) throw new Error("GitHub named no default branch.");
+		return name;
 	},
 	async checkProject(projectUrl, cwd) {
 		const { owner, number } = projectOf(projectUrl);
@@ -311,6 +333,10 @@ export const ghGitHub: GitHub = {
 	async issueState(repoPath, number) {
 		const { stdout } = await gh(repoPath, ["issue", "view", String(number), "--json", "state"]);
 		return JSON.parse(stdout).state === "OPEN" ? "open" : "closed";
+	},
+	async issueBody(repoPath, number) {
+		const { stdout } = await gh(repoPath, ["issue", "view", String(number), "--json", "body"]);
+		return String(JSON.parse(stdout).body ?? "");
 	},
 	async openPullRequest(repoPath, pr) {
 		const { stdout } = await gh(repoPath, ["pr", "create", "--head", pr.head, "--base", pr.base, "--title", pr.title, "--body", pr.body]);

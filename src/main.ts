@@ -17,8 +17,29 @@ import {
 	withAllowedRules,
 } from "./compile";
 import { failedPrefix, startFailure } from "./recompile";
+import {
+	COMPILED_MEANWHILE,
+	type ShareMoment,
+	type SharedFile,
+	compileMoment,
+	type ImportResult,
+	importMarker,
+	keptReports,
+	notSharedNotice,
+	readSharedFolder,
+	shareReport,
+	sharedBuild,
+} from "./shared-report";
+import { type ReportEntry, absorbSharedFiles, listReports, listedReports } from "./report-list";
 import { CompileReportView, REPORT_VIEW_TYPE } from "./report-view";
-import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings } from "./settings";
+import { DEFAULT_SETTINGS, TheorySettingTab, TheorySettings, confirmChoice } from "./settings";
+import {
+	corePluginsNotice,
+	corePluginsQuestion,
+	missingStartersNotice,
+	runFirstLoad,
+} from "./first-load";
+import { useTheoryWorkspace } from "./workspace-setup";
 import { CommitHistoryView, HISTORY_VIEW_TYPE } from "./history-view";
 import { plainProblem } from "./anchor";
 import { FailureOverlay } from "./overlay";
@@ -35,9 +56,13 @@ import { EXPAND_VIEW_TYPE, ExpandView } from "./expand-view";
 import { projectRepos } from "./branches";
 import { PullRequestStates, RefreshReason } from "./pr-states";
 import { PULL_INTERVALS, PullOutcome, PullReason, Puller, compileGate, pulledNotice } from "./pull";
-import { REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
+import { NewRepositoryModal, REPOSITORIES_VIEW_TYPE, RepositoriesView } from "./repositories-view";
+import { THEORY_COMMANDS, THEORY_RIBBON, type TheoryCommandId } from "./commands";
+import { findProjectRepos } from "./project";
+import { newRepositoryProblem } from "./repositories";
 import { WELCOME_PATH, starterFiles } from "./starter";
 import { loadToolPath } from "./tool-path";
+import { firstLoadInWindow, leafViewType, noteTabTarget, openLaunchLayout, runsLaunchLayout, windowSessionStorage } from "./launch";
 import {
 	Hooks,
 	buildEndDetails,
@@ -78,8 +103,12 @@ const MAX_REPORTS = 20;
 
 export default class TheoryPlugin extends Plugin {
 	settings: TheorySettings = { ...DEFAULT_SETTINGS };
-	/** Compile reports, newest first. */
+	/** Compile reports in plugin data, newest first. The shared ones from other machines are in `reportEntries()`. */
 	reports: CompileReport[] = [];
+	// The files in `.compiles/` as last read; null until read (REP-51, REP-52).
+	private sharedFiles: SharedFile[] | null = null;
+	// The list last drawn, so a shared report keeps the pull request states asked of GitHub.
+	private entries: ReportEntry[] = [];
 	private commitButtons = new CommitButtons(this);
 	private compileButton = new CompileButton(this);
 	overlay = new FailureOverlay(this);
@@ -87,7 +116,8 @@ export default class TheoryPlugin extends Plugin {
 	private ruleCounts = new RuleCounts(this);
 	ruleAuthors = new RuleAuthorsOverlay(this);
 	private hiddenFolders = new HiddenFolders(this);
-	private entryFiles = new EntryFiles(this);
+	/** The entry file and model folder icons in the file explorer; the Repositories page refreshes them (UI-42). */
+	readonly entryFiles = new EntryFiles(this);
 	private changeDots = new ChangeDots(this);
 	comments = new Comments(this);
 	/** The engineer's own commands, run after events and never awaited (HOOK-4). */
@@ -106,11 +136,13 @@ export default class TheoryPlugin extends Plugin {
 	private buildRun: BuildRun | null = null;
 	// True from the click until the compile runs or fails to start, so a second click can't start another.
 	private compileStarting = false;
+	/** True from Build's click until its run starts, so the button says "Building…" during the pull (BLD-4). */
+	private buildStarting = false;
 	// At most one Expand per repository at a time, keyed by its name.
 	private expandRuns = new Map<string, ExpandRun>();
 	private statusBar: HTMLElement | null = null;
 	private pullRequestStates = new PullRequestStates({
-		reports: () => this.reports,
+		reports: () => this.allReports(),
 		check: (pr) => pullRequestState(pr.repoPath, pr.url),
 		changed: async () => {
 			await this.saveSettings();
@@ -136,7 +168,7 @@ export default class TheoryPlugin extends Plugin {
 	});
 	private pullTimer: number | null = null;
 	private settingTab: TheorySettingTab | null = null;
-	// Set by scripts/install.sh on a first install: run Setup vault once, on the first load.
+	// Set by scripts/install.sh on a first install: run the first load once (SET-20).
 	private setupOnLoad = false;
 
 	async onload() {
@@ -146,74 +178,48 @@ export default class TheoryPlugin extends Plugin {
 		this.settingTab = new TheorySettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);
 
-		this.addCommand({
-			id: "setup-vault",
-			name: "Setup vault",
-			callback: () => this.setUpVault(),
-		});
+		// Exactly the commands UI-10 lists, and only the Repositories ribbon button (UI-8, CMP-1).
+		const commands: Record<TheoryCommandId, () => unknown> = {
+			"setup-vault": () => this.setUpVault(),
+			"show-commit-history": () => this.showHistoryView(true),
+			compile: () => this.compile(),
+			build: () => this.build(),
+			"show-compile-report": () => this.showReportView(),
+			"commit-current-note": () => this.openCommitPage(this.app.workspace.getActiveFile()),
+			"show-repositories": () => this.showRepositories(),
+			"pull-now": () => this.pullNow(),
+			"comment-on-selection": () => this.comments.commentOnSelection(),
+			"show-comments": () => this.showComments(null),
+			"use-core-plugins": () => this.useCorePlugins(),
+			"new-repository": () => this.newRepository(),
+		};
+		for (const { id, name } of THEORY_COMMANDS) this.addCommand({ id, name, callback: () => commands[id]() });
+		for (const { icon, title, command } of THEORY_RIBBON) this.addRibbonIcon(icon, title, () => commands[command]());
 
 		this.registerView(HISTORY_VIEW_TYPE, (leaf) => new CommitHistoryView(leaf, this));
-		this.addCommand({
-			id: "show-commit-history",
-			name: "Show commit history",
-			callback: () => this.showHistoryView(true),
-		});
 		this.registerView(COMMIT_VIEW_TYPE, (leaf) => new CommitView(leaf, this));
 		this.registerView(PAST_COMMIT_VIEW_TYPE, (leaf) => new PastCommitView(leaf, this));
 		this.registerView(COMPILE_HISTORY_VIEW_TYPE, (leaf) => new CompileHistoryView(leaf, this));
 		this.registerView(REPORT_VIEW_TYPE, (leaf) => new CompileReportView(leaf, this));
-		this.addCommand({
-			id: "compile",
-			name: "Compile",
-			callback: () => this.compile(),
-		});
-		this.addCommand({
-			id: "build",
-			name: "Build",
-			callback: () => this.build(),
-		});
-		this.addCommand({
-			id: "show-compile-report",
-			name: "Show compile report",
-			callback: () => this.showReportView(),
-		});
-		this.addRibbonIcon("hammer", "Compile the model", () => this.compile());
 		this.registerView(CREATE_PR_VIEW_TYPE, (leaf) => new CreatePullRequestView(leaf, this));
 		this.registerView(EXPAND_VIEW_TYPE, (leaf) => new ExpandView(leaf, this));
 		this.registerView(REPOSITORIES_VIEW_TYPE, (leaf) => new RepositoriesView(leaf, this));
-		this.addCommand({
-			id: "show-repositories",
-			name: "Show repositories",
-			callback: () => this.showRepositories(),
-		});
-		this.addRibbonIcon("folder-git-2", "Show repositories", () => this.showRepositories());
-		this.addCommand({
-			id: "pull-now",
-			name: "Pull now",
-			callback: () => this.pullNow(),
-		});
 		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsView(leaf, this));
-		this.addCommand({
-			id: "comment-on-selection",
-			name: "Comment on selection",
-			callback: () => this.comments.commentOnSelection(),
-		});
-		this.addCommand({
-			id: "show-comments",
-			name: "Show comments",
-			callback: () => this.showComments(null),
-		});
 		this.statusBar = this.addStatusBarItem();
 		this.statusBar.addClass("theory-status");
 		this.statusBar.hide();
 
 		// The layout is already ready when the plugin is turned on mid-session; only act on launch.
 		const launching = !this.app.workspace.layoutReady;
+		// Graph view and both sidebars, once per launch and never when the vault is reopened in the same window (UI-33).
+		const launchLayout = runsLaunchLayout(!launching, firstLoadInWindow(windowSessionStorage(), this.getVaultPath()));
 		this.app.workspace.onLayoutReady(async () => {
-			if (launching) await this.openIndex();
+			await this.loadSharedReports();
 			await this.showHistoryView(false);
 			await this.showCompileHistoryView();
 			await this.showCommentsView();
+			// Before first load, so Setup vault's note opens after Graph view (UI-35).
+			if (launchLayout) await openLaunchLayout(this.app, { commentsViewType: COMMENTS_VIEW_TYPE, openIndex: () => this.openIndex() });
 			await this.comments.refresh();
 			await this.commitButtons.sync();
 			this.compileButton.attach();
@@ -227,8 +233,11 @@ export default class TheoryPlugin extends Plugin {
 			if (this.setupOnLoad) await this.setUpOnFirstLoad();
 			// The sync status shows "No remote" or "Not pulled yet" even when no pull runs (PULL-9).
 			await this.puller.checkOrigin();
-			if (launching) this.puller.pull("launch");
+			const launchPull = launching ? this.puller.pull("launch") : Promise.resolve(null);
 			this.restartPullTimer();
+			// CFG-45: after the launch pull, so a teammate's shared marker is seen before the tag is carried over.
+			this.markerImport = launchPull.catch(() => null).then(() => this.importMarkerOnce());
+			await this.markerImport;
 		});
 		// A file explorer opened later gets the same sorting and the same entry files.
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.hiddenFolders.attach()));
@@ -288,11 +297,6 @@ export default class TheoryPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on("file-open", syncOverlay));
 		this.registerEvent(this.app.vault.on("modify", debounce(syncOverlay, 1000, true)));
 
-		this.addCommand({
-			id: "commit-current-note",
-			name: "Commit current note",
-			callback: () => this.openCommitPage(this.app.workspace.getActiveFile()),
-		});
 		const syncButtons = () => this.commitButtons.sync();
 		const syncButtonsSoon = debounce(syncButtons, 1000, true);
 		this.registerEvent(this.app.workspace.on("layout-change", syncButtons));
@@ -337,6 +341,8 @@ export default class TheoryPlugin extends Plugin {
 
 	/** After a pull: names what changed in the vault (PULL-8) and redraws what shows git state. Code pulls stay silent. */
 	private async pulled(outcome: PullOutcome, reason: PullReason) {
+		// A pull may bring a teammate's compile, or their build of one (REP-50, REP-51).
+		if (outcome.vault?.kind === "pulled" || this.sharedFiles === null) await this.loadSharedReports();
 		if (outcome.vault?.kind === "pulled") {
 			new Notice(pulledNotice(outcome.vault), 8000);
 			this.refreshGitState();
@@ -433,7 +439,7 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	isBuilding(): boolean {
-		return this.buildRun !== null;
+		return this.buildRun !== null || this.buildStarting;
 	}
 
 	/** The report of the compile or build running now, or null. */
@@ -451,7 +457,8 @@ export default class TheoryPlugin extends Plugin {
 	 * lock applies as for any compile, and CMP-73 is checked again once the other checks pass (CMP-75).
 	 */
 	async recompile(reportId: string) {
-		const earlier = this.reports.find((r) => r.id === reportId);
+		// Any engineer may recompile any shared report (REP-50).
+		const earlier = this.adoptReport(reportId);
 		if (!earlier) return;
 		await this.startCompileRun(earlier);
 	}
@@ -463,6 +470,8 @@ export default class TheoryPlugin extends Plugin {
 			return;
 		}
 		this.compileStarting = true;
+		// The button shows the compile from the click, through the pull before it (CMP-48, UI-3).
+		this.compileButton.refresh();
 		try {
 			await this.runCompile(earlier);
 		} finally {
@@ -475,21 +484,29 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	private async runCompile(earlier?: CompileReport) {
+		// A compile never starts from the empty marker the one-time import is about to fill (CFG-45).
+		await this.markerImport;
 		// "Recompile failed" for a recompile, as BLD-5 does for a build (CMP-75).
 		const recompile = earlier !== undefined;
 		const failed = failedPrefix(recompile);
 		let vaultPath: string;
 		let author: string;
+		let authorEmail: string;
+		let fetched: string[];
 		try {
 			vaultPath = this.getVaultPath();
 			// The newest model into the newest code, even when automatic pulls are off (PULL-15).
 			const pull = await this.puller.pull("compile");
+			// The code of a repository this pull didn't fetch is read as of its last fetch (CMP-87).
+			fetched = (pull?.repos ?? []).filter((r) => r.fetchError === null).map((r) => r.path);
 			const gate = compileGate(pull?.vault ?? null, pull?.repos ?? [], earlier ? "recompile" : "compile");
 			if (gate.error) {
 				new Notice(`${failed}: ${gate.error}`, 10000);
 				return;
 			}
-			if (gate.offline) new Notice("Couldn't reach the remote, so this compile uses the local vault and code.", 8000);
+			if (gate.offline) {
+				new Notice("Couldn't reach the remote, so this compile uses the local vault and code. Code is read as of the last fetch.", 8000);
+			}
 			if (!this.isVaultSetUp()) {
 				new Notice("Set up the vault before compiling.");
 				return;
@@ -499,13 +516,13 @@ export default class TheoryPlugin extends Plugin {
 				const count = uncommitted.length;
 				new Notice(`${count} uncommitted ${count === 1 ? "file isn't" : "files aren't"} part of this compile.`);
 			}
-			author = (await requireIdentity(vaultPath)).name;
+			({ name: author, email: authorEmail } = await requireIdentity(vaultPath));
 		} catch (error) {
 			new Notice(startFailure(recompile, error), 10000);
 			return;
 		}
 
-		const { projectFolder, githubProject } = this.settings;
+		const { projectFolder, githubProject, shareReports } = this.settings;
 		// Read once: a change to the row applies from the next compile (CFG-19, CMP-13).
 		const agentSettings = taskAgentSettings(this.settings, "compile");
 		let run: CompileRun;
@@ -516,8 +533,17 @@ export default class TheoryPlugin extends Plugin {
 					projectFolder,
 					...agentSettings,
 					author,
+					authorEmail,
 					githubProject,
-					...(earlier ? { recompile: earlier, reports: this.reports } : {}),
+					fetched,
+					// Each compile Claude ran is shared in `.compiles/` (REP-10, REP-46). With Share compile reports off,
+					// it stays in the data file and the local tag is the marker (CFG-44).
+					shareReports,
+					share: async (report, snapshots) => {
+						const moment = compileMoment(report);
+						if (moment) await this.shareReport(report, moment, snapshots, shareReports);
+					},
+					...(earlier ? { recompile: earlier, reports: this.allReports() } : {}),
 					onPermissionRequest: (request) => {
 						this.hooks.fire("permission-request", permissionDetails(request));
 						const who = request.sessionOnly ? "The agent" : "Claude";
@@ -541,7 +567,7 @@ export default class TheoryPlugin extends Plugin {
 		this.compileRun = run;
 		this.compileStarting = false;
 		this.hooks.fire("compile-start", compileStartDetails(run.report));
-		this.reports = [run.report, ...this.reports].slice(0, MAX_REPORTS);
+		this.reports = keptReports([run.report, ...this.reports], MAX_REPORTS);
 		this.statusBar?.setText("Compiling…");
 		this.statusBar?.show();
 		this.compileButton.refresh();
@@ -596,16 +622,22 @@ export default class TheoryPlugin extends Plugin {
 			await this.showReportView();
 			return;
 		}
-		const report = reportId ? this.reports.find((r) => r.id === reportId) : buildableReport(this.reports);
-		if (!report?.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) {
+		// Any engineer may build from any shared report (REP-50).
+		const found = reportId ? this.findReport(reportId) : buildableReport(this.allReports());
+		if (!found?.issues?.some((i) => i.kind === "issue" && i.number !== undefined)) {
 			new Notice("No compile has created issues to build yet. Compile first.");
 			return;
 		}
+		const report = this.adoptReport(found.id) ?? found;
 		this.compileStarting = true;
+		this.buildStarting = true;
+		// The button shows the build from the click, through the pull before it (BLD-4, UI-3).
+		this.compileButton.refresh();
 		try {
 			await this.runBuild(report);
 		} finally {
 			this.compileStarting = false;
+			this.buildStarting = false;
 			this.buildRun = null;
 			this.compileButton.refresh();
 			this.refreshReportViews();
@@ -648,7 +680,7 @@ export default class TheoryPlugin extends Plugin {
 					},
 				},
 				report,
-				this.reports,
+				this.allReports(),
 				() => {
 					this.refreshReportViews();
 					this.compileButton.render();
@@ -671,6 +703,11 @@ export default class TheoryPlugin extends Plugin {
 
 		await run.done;
 		this.buildRun = null;
+		// The shared report changes only once the build ended (REP-46, REP-47).
+		const builder = await gitIdentity(vaultPath).catch(() => null);
+		const entry = sharedBuild(report, builder?.kind === "found" ? { name: builder.name, email: builder.email } : { name: "", email: "" });
+		if (entry) report.builds = [...(report.builds ?? []), entry];
+		await this.shareReport(report, "build");
 		this.hooks.fire("build-end", buildEndDetails(report));
 		this.statusBar?.hide();
 		await this.saveSettings();
@@ -681,6 +718,126 @@ export default class TheoryPlugin extends Plugin {
 			new Notice(text);
 		}
 		else if (status === "stopped") new Notice("Build stopped. See the compile report.", 10000);
+	}
+
+	// Shared reports commit one at a time.
+	private shareQueue: Promise<unknown> = Promise.resolve();
+
+	/**
+	 * Writes and commits a compile's shared report at one of the REP-46 moments, then pushes (CMT-31). When the commit
+	 * or the push fails, the report stays in the data file with a notice (REP-48). With Share compile reports off, it
+	 * stays in the data file and a compile that moved the marker moves the local tag (CFG-44). Never throws.
+	 */
+	async shareReport(
+		report: CompileReport,
+		moment: ShareMoment,
+		snapshots?: { model: string; code: string },
+		sharing = this.settings.shareReports,
+	): Promise<void> {
+		const run = async () => {
+			const vaultPath = this.getVaultPath();
+			const { projectFolder } = this.settings;
+			const logPaths = snapshots ? { projectFolder, ...snapshots } : undefined;
+			// REP-50: pull before writing to a shared report, except during a compile, when no pull runs (PULL-4).
+			const pull = async () => (this.isCompiling() ? null : ((await this.puller.pull("share"))?.vault ?? null));
+			return shareReport({ vaultPath, reports: this.allReports(), logPaths, projectFolder, pull, push: () => this.push(), sharing }, report, moment);
+		};
+		const next = this.shareQueue.then(run, run);
+		this.shareQueue = next.catch(() => {});
+		const meanwhile = report.compiledMeanwhile;
+		try {
+			const result = await next;
+			if (result.kind === "not-shared") new Notice(notSharedNotice(result.reason), 10000);
+			// REP-50: nothing was written, and the report says why.
+			else if (result.kind === "refused") new Notice(result.reason, 10000);
+		} catch (error) {
+			report.notShared = errorMessage(error);
+			new Notice(notSharedNotice(errorMessage(error)), 10000);
+		}
+		if (report.compiledMeanwhile && report.compiledMeanwhile !== meanwhile) new Notice(COMPILED_MEANWHILE, 15000);
+		await this.saveSettings();
+		await this.loadSharedReports();
+		this.refreshGitState();
+	}
+
+	/**
+	 * Reads `.compiles/` again (REP-51, REP-52), takes in what teammates added to the shared reports in plugin data
+	 * (REP-50), and redraws the report and the compile history. Never throws.
+	 */
+	async loadSharedReports(): Promise<void> {
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+		} catch {
+			return;
+		}
+		this.sharedFiles = await readSharedFolder(vaultPath).catch(() => []);
+		const before = JSON.stringify(this.reports);
+		absorbSharedFiles(this.reports, this.sharedFiles, this.settings.projectFolder, this.activeReportId());
+		if (JSON.stringify(this.reports) !== before) await this.saveSettings();
+		this.refreshReportViews();
+	}
+
+	// The one-time import of the old tag (CFG-45). Settled once it ended, or when it doesn't run.
+	private markerImport: Promise<void> = Promise.resolve();
+
+	/**
+	 * The first load with shared reports carries the local tag `theory/compiled` over as a marker-only shared report,
+	 * when none in `.compiles/` moved the marker yet (CFG-45). It runs once: a load that couldn't commit tries again
+	 * on the next. Only while Share compile reports is on. A compile waits for it (`runCompile`). Never throws.
+	 */
+	private async importMarkerOnce(): Promise<void> {
+		if (this.settings.markerImported || !this.settings.shareReports) return;
+		let vaultPath: string;
+		try {
+			vaultPath = this.getVaultPath();
+			if (!this.isVaultSetUp()) return;
+		} catch {
+			return;
+		}
+		const result = await importMarker({ vaultPath, push: () => this.push() }).catch(
+			(error): ImportResult => ({ kind: "not-shared", reason: errorMessage(error), committed: false }),
+		);
+		if (result.kind === "not-shared") new Notice(notSharedNotice(result.reason), 10000);
+		if (result.kind !== "not-shared" || result.committed) {
+			this.settings.markerImported = true;
+			await this.saveSettings();
+		}
+		if (result.kind !== "skipped") {
+			await this.loadSharedReports();
+			this.refreshGitState();
+		}
+	}
+
+	/** The reports in plugin data and the shared reports in `.compiles/` together, newest first (REP-51). */
+	reportEntries(): ReportEntry[] {
+		this.entries = listReports(this.reports, this.sharedFiles, this.settings.projectFolder, this.entries);
+		return this.entries;
+	}
+
+	/** Every report this machine lists: those in plugin data and the shared ones, newest first. */
+	allReports(): CompileReport[] {
+		return listedReports(this.reportEntries());
+	}
+
+	/** A report by its id, from plugin data or `.compiles/`. */
+	findReport(id: string): CompileReport | undefined {
+		return this.reports.find((r) => r.id === id) ?? this.allReports().find((r) => r.id === id);
+	}
+
+	/**
+	 * A report to work on (REP-50): one from another machine's compile joins plugin data first, so its build, pull
+	 * requests and permission answers are kept. It is shared, so the data file never drops it (REP-11).
+	 */
+	adoptReport(id: string): CompileReport | undefined {
+		const own = this.reports.find((r) => r.id === id);
+		if (own) return own;
+		const shared = this.allReports().find((r) => r.id === id);
+		if (!shared) return undefined;
+		const at = this.reports.findIndex((r) => Date.parse(r.startedAt) < Date.parse(shared.startedAt));
+		if (at < 0) this.reports.push(shared);
+		else this.reports.splice(at, 0, shared);
+		return shared;
 	}
 
 	/** Permission requests from the running build that are waiting for an answer. A compile never asks (CMP-13). */
@@ -735,6 +892,8 @@ export default class TheoryPlugin extends Plugin {
 
 	/** Opens the Create PR page for one compile in a new tab. */
 	async openCreatePullRequests(reportId: string) {
+		// Any engineer may open pull requests for any shared report (REP-50).
+		this.adoptReport(reportId);
 		const leaf = this.app.workspace.getLeaf("tab");
 		await leaf.setViewState({ type: CREATE_PR_VIEW_TYPE, active: true, state: { reportId } });
 		await this.app.workspace.revealLeaf(leaf);
@@ -763,6 +922,28 @@ export default class TheoryPlugin extends Plugin {
 			await leaf.setViewState({ type: REPOSITORIES_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+	}
+
+	/**
+	 * The command "New repository" (REPO-14): opens the form, unless the project folder can't take a new
+	 * repository; then it shows what the Repositories page says, as a notice (REPO-9).
+	 */
+	newRepository() {
+		const folder = this.settings.projectFolder;
+		const problem = newRepositoryProblem(folder, findProjectRepos(folder));
+		if (problem !== null) {
+			new Notice(problem);
+			return;
+		}
+		new NewRepositoryModal(this.app, this, () => this.refreshRepositoriesViews()).open();
+	}
+
+	/** Redraws every open Repositories page, and the model folder icons with them (UI-42). */
+	private refreshRepositoriesViews() {
+		this.entryFiles.sync();
+		for (const leaf of this.app.workspace.getLeavesOfType(REPOSITORIES_VIEW_TYPE)) {
+			if (leaf.view instanceof RepositoriesView) void leaf.view.refresh(false);
+		}
 	}
 
 	private reportViews(): CompileReportView[] {
@@ -911,7 +1092,9 @@ export default class TheoryPlugin extends Plugin {
 		if (existing) {
 			workspace.setActiveLeaf(existing, { focus: true });
 		} else {
-			await workspace.getLeaf(false).openFile(note);
+			// A note opens after Graph view, in its own tab, instead of replacing it (UI-35).
+			const active = leafViewType(workspace.getMostRecentLeaf(workspace.rootSplit));
+			await workspace.getLeaf(noteTabTarget(active) === "new" ? "tab" : false).openFile(note);
 		}
 	}
 
@@ -1068,21 +1251,43 @@ export default class TheoryPlugin extends Plugin {
 	}
 
 	/**
-	 * Sets up a freshly installed vault, once. The request is dropped from plugin data first, so a failed
-	 * setup is never retried on its own; Setup vault in the command palette does that.
+	 * The first load after install.sh, once (SET-20): the core plugins, then Setup vault. The request is dropped
+	 * from plugin data first, so a failed step is never retried on its own; the command "Use theory.md's core
+	 * plugins" and Setup vault do that.
 	 */
 	private async setUpOnFirstLoad() {
-		this.setupOnLoad = false;
-		await this.saveSettings();
-		if (!this.isVaultSetUp()) {
-			await this.setUpVault();
-			return;
-		}
-		// A vault that already has git is left as it is.
-		const missing = await this.missingStarters();
-		if (missing.files.length > 0 || missing.gitignoreLines.length > 0) {
-			new Notice("theory.md is installed. This vault already uses git, so it was left as it is. Settings → theory.md can add the missing starter files.", 10000);
-		}
+		await runFirstLoad({
+			dropRequest: async () => {
+				this.setupOnLoad = false;
+				await this.saveSettings();
+			},
+			setCorePlugins: async () => {
+				await this.applyCorePlugins();
+			},
+			setUpVault: async () => {
+				if (!this.isVaultSetUp()) {
+					await this.setUpVault();
+					return;
+				}
+				// A vault that already has git is left as it is (SET-2).
+				const notice = missingStartersNotice(await this.missingStarters());
+				if (notice) new Notice(notice, 10000);
+			},
+		});
+	}
+
+	/** Sets the core plugins, the ribbon order and the graph colour groups, and says what changed (SET-21 to SET-24). */
+	private async applyCorePlugins(): Promise<boolean> {
+		const { turnedOff, failed } = await useTheoryWorkspace(this.app, this.manifest.id);
+		const notice = corePluginsNotice(turnedOff, failed);
+		if (notice) new Notice(notice, 10000);
+		return notice !== null;
+	}
+
+	/** The command "Use theory.md's core plugins": SET-21 at any time, after asking (SET-25). */
+	private async useCorePlugins() {
+		if (!(await confirmChoice(this.app, "Use theory.md's core plugins", corePluginsQuestion(), "Turn off"))) return;
+		if (!(await this.applyCorePlugins())) new Notice("theory.md's core plugins are already the only ones on.");
 	}
 
 	/** Runs the commit hooks for the vault's newest commit, made outside the Commit page. */

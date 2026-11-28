@@ -1,13 +1,15 @@
-import { join } from "path";
-import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync, readdirSync } from "fs";
+import { basename, join } from "path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-	COMPILED_TAG,
+	CODE_SNAPSHOT_CHANGED,
 	CompileOptions,
 	CompileReport,
 	GH_LOGIN,
 	NO_PROJECT,
 	READ_ONLY_TOOLS,
 	claudeArgs,
+	pendingRevisionCount,
 	startCompile,
 } from "../src/compile";
 import { IssueRecord, PLAN_SCHEMA, canDiscard, compileFinishedText, epicRepo, issueBody, readPlan, readyText, shortNameProblem, stepsLeft, titleProblem } from "../src/plan";
@@ -24,10 +26,12 @@ import {
 	recompiledReport,
 	startFailure,
 } from "../src/recompile";
-import { IdentityError } from "../src/vault";
+import { IdentityError, git } from "../src/vault";
 import { FakeGitHub } from "./fake-github";
 import { fakeClaude } from "./fake-claude";
-import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
+import { commitFiles, initRepo, markCompiled, out, tempFolder, write } from "./helpers";
+import { compileMoment, fromSharedReport, markerCommit, shareReport } from "../src/shared-report";
+import { pushVault } from "../src/push";
 
 const PROJECT_URL = "https://github.com/orgs/team/projects/1";
 
@@ -51,6 +55,13 @@ async function setup(repos = ["api", "web"]) {
 	const github = new FakeGitHub();
 	const claude = fakeClaude([{ answer: answer({ issues: [issue("api", "one")] }) }]);
 	const options = (extra: Partial<CompileOptions> = {}): CompileOptions => ({
+		// Each compile Claude ran is shared and committed, as the plugin does (REP-46).
+		share: async (report, snapshots) => {
+			const moment = compileMoment(report);
+			if (!moment) return;
+			const reports = [report, ...(extra.reports ?? [])];
+			await shareReport({ vaultPath: vault, reports, logPaths: { projectFolder: project, ...snapshots }, push: () => pushVault(vault) }, report, moment);
+		},
 		vaultPath: vault,
 		projectFolder: project,
 		claudeCommand: claude.command,
@@ -64,7 +75,8 @@ async function setup(repos = ["api", "web"]) {
 		github,
 		...extra,
 	});
-	const marker = () => out(vault, ["tag", "--list", COMPILED_TAG]);
+	// "moved" once a committed shared report moved the marker (REP-49).
+	const marker = async () => ((await markerCommit(vault)) === null ? "" : "moved");
 	return { root, vault, project, github, claude, options, marker };
 }
 
@@ -174,10 +186,186 @@ describe("a read-only compile (CMP-13, CMP-69)", () => {
 		expect(report.status).toBe("succeeded");
 		expect(await state()).toEqual(before);
 		const [call] = s.claude.calls();
-		expect(call.cwd).toBe(s.project);
+		// Claude runs in the code snapshot, never in the project folder (CMP-13, CMP-84).
+		expect(call.cwd).not.toBe(s.project);
+		expect(basename(call.cwd)).toMatch(/^theory-code-/);
 		expect(call.args[call.args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep");
+		expect(call.prompt).toContain("Read the code only in the code snapshot. It is each repository's default branch as `origin` has it.");
 		expect(call.prompt).toContain("Never change a file anywhere");
 		expect(call.prompt).toContain("Never create issues, branches or pull requests, and never touch GitHub.");
+	});
+});
+
+describe("the code snapshot (CMP-84 to CMP-89, INV-14)", () => {
+	// Each test gets its own temp folder for snapshots, so it can see that every one was deleted (CMP-89).
+	let temp: string | undefined;
+	let saved: string | undefined;
+	beforeEach(() => {
+		saved = process.env.TMPDIR;
+		temp = tempFolder();
+		process.env.TMPDIR = temp;
+	});
+	afterEach(() => {
+		if (saved === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = saved;
+	});
+	const codeSnapshots = () => readdirSync(temp as string).filter((name) => name.startsWith("theory-code-"));
+
+	/** Gives the repository a bare `origin` holding its main, as a clone would have it. Returns a second clone to push from. */
+	async function addOrigin(root: string, repo: string): Promise<string> {
+		const name = basename(repo);
+		const bare = join(root, `${name}.git`);
+		await git(root, ["init", "--bare", "-b", "main", bare]);
+		await git(repo, ["remote", "add", "origin", bare]);
+		await git(repo, ["push", "--quiet", "-u", "origin", "main"]);
+		await git(repo, ["remote", "set-head", "origin", "main"]);
+		const teammate = join(root, `${name}-teammate`);
+		await git(root, ["clone", "--quiet", bare, teammate]);
+		return teammate;
+	}
+
+	/** Everything in a repository a compile must never change (CMP-85): refs, HEAD, working tree, stashes and config. */
+	const repoState = async (repo: string) => [
+		await out(repo, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+		await out(repo, ["symbolic-ref", "-q", "HEAD"]).catch(() => "detached"),
+		await out(repo, ["status", "--porcelain", "--untracked-files=all", "--ignored"]),
+		await out(repo, ["stash", "list"]),
+		readFileSync(join(repo, ".git", "config"), "utf8"),
+	];
+
+	it("holds origin's default branch: not the checkout, an unpushed commit or an ignored file, and the agent runs in it", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const teammate = await addOrigin(s.root, api);
+		// The team merged more; the pull before the compile fetched it, but the checkout can't fast-forward.
+		const merged = await commitFiles(teammate, { "merged.ts": "merged\n" }, "Merged work");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		await commitFiles(api, { "unpushed.ts": "mine\n" }, "Not pushed");
+		await git(api, ["fetch", "--quiet"]);
+		// The checkout sits on an old compile branch, with an ignored file the engineer keeps.
+		await git(api, ["checkout", "--quiet", "-b", "theory/1-old"]);
+		await commitFiles(api, { "old.ts": "old\n" }, "Old compile work");
+		write(api, { ".gitignore": "secret.env\n" });
+		await git(api, ["add", ".gitignore"]);
+		await git(api, ["commit", "--quiet", "-m", "Ignore secrets"]);
+		write(api, { "secret.env": "KEY=1\n" });
+		const before = await repoState(api);
+
+		const report = await compile(s.options({ fetched: [api] }));
+		expect(report.status).toBe("succeeded");
+		const [call] = s.claude.calls();
+		expect(basename(call.cwd)).toMatch(/^theory-code-/);
+		expect(call.cwd.startsWith(s.project)).toBe(false);
+		expect(call.files).toEqual(["api/README.md", "api/merged.ts"]);
+		expect(call.prompt).toContain(`one folder per repository under the same name: ${call.cwd}`);
+		expect(call.prompt).toContain(`- api: main at ${merged.slice(0, 7)}\n`);
+		// Every write to it is denied (INV-14).
+		expect(call.args).toContain(`Write(//${call.cwd.replace(/^\//, "")}/**)`);
+		expect(report.code).toEqual([
+			{ repo: "api", branch: "main", commit: merged, source: "origin", url: `https://github.com/team/api/commit/${merged}` },
+		]);
+		// Nothing in the repository changed (CMP-85), and the snapshot is gone (CMP-89).
+		expect(await repoState(api)).toEqual(before);
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("uses the branch GitHub names as the default", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const teammate = await addOrigin(s.root, api);
+		await git(teammate, ["checkout", "--quiet", "-b", "trunk"]);
+		const trunk = await commitFiles(teammate, { "trunk.ts": "trunk\n" }, "Trunk work");
+		await git(teammate, ["push", "--quiet", "origin", "trunk"]);
+		await git(api, ["fetch", "--quiet"]);
+		s.github.defaultBranches.set("api", "trunk");
+		const report = await compile(s.options({ fetched: [api] }));
+		expect(report.code?.[0]).toMatchObject({ branch: "trunk", commit: trunk, source: "origin" });
+		expect(s.claude.calls()[0].files).toContain("api/trunk.ts");
+	});
+
+	it("reads the last fetch when the fetch failed, and the local default branch when never fetched (CMP-87)", async () => {
+		const s = await setup(["api", "web"]);
+		s.claude.setSteps([{ listFiles: true, answer: answer({ issues: [issue("api", "one")] }) }]);
+		const api = join(s.project, "api");
+		const web = join(s.project, "web");
+		const teammate = await addOrigin(s.root, api);
+		const fetchedCommit = await commitFiles(teammate, { "fetched.ts": "f\n" }, "Fetched");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		await git(api, ["fetch", "--quiet"]);
+		// Pushed after the last fetch, which this compile's pull couldn't repeat.
+		await commitFiles(teammate, { "unseen.ts": "u\n" }, "Not fetched");
+		await git(teammate, ["push", "--quiet", "origin", "main"]);
+		// web was never fetched: it has no origin/main at all.
+		const local = await commitFiles(web, { "web.ts": "w\n" }, "Local web");
+		s.github.offline = true;
+
+		const report = await compile(s.options({ fetched: [] }));
+		expect(report.status).toBe("succeeded");
+		expect(report.code?.map((c) => [c.repo, c.branch, c.commit, c.source])).toEqual([
+			["api", "main", fetchedCommit, "last-fetch"],
+			["web", "main", local, "local"],
+		]);
+		const [call] = s.claude.calls();
+		expect(call.files).toEqual(["api/README.md", "api/fetched.ts", "web/README.md", "web/web.ts"]);
+		expect(call.prompt).toContain(`- api: main at ${fetchedCommit.slice(0, 7)} (origin/main as of the last fetch)`);
+		expect(call.prompt).toContain(`- web: main at ${local.slice(0, 7)} (the local main: it was never fetched)`);
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("doesn't start when the default branch can't be read, and the marker stays (CMP-88)", async () => {
+		const s = await setup(["api", "web"]);
+		const before = await repoState(join(s.project, "web"));
+		s.github.defaultBranches.set("web", "trunk");
+		await expect(startCompile(s.options(), () => {})).rejects.toThrow("Couldn't read trunk of web: Neither origin/trunk nor trunk is in it");
+		expect(startFailure(false, new Error("Couldn't read trunk of web: x"))).toBe("Compile failed: Couldn't read trunk of web: x");
+		expect(s.claude.calls()).toEqual([]);
+		expect(await s.marker()).toBe("");
+		expect(await repoState(join(s.project, "web"))).toEqual(before);
+		// Neither snapshot is left behind.
+		expect(readdirSync(temp as string).filter((name) => /^theory-(model|code)-/.test(name))).toEqual([]);
+	});
+
+	it("is deleted when the compile fails or is cancelled (CMP-89)", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{}]);
+		expect((await compile(s.options())).status).toBe("failed");
+		expect(codeSnapshots()).toEqual([]);
+
+		s.claude.setSteps([{ hang: true }]);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnother rule.\n" }, "Another rule");
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(codeSnapshots()).toHaveLength(1);
+		run.cancel();
+		expect((await run.done).status).toBe("cancelled");
+		expect(codeSnapshots()).toEqual([]);
+	});
+
+	it("fails the compile when the code snapshot changed, and says so after a cancel too (INV-14)", async () => {
+		const s = await setup(["api"]);
+		s.claude.setSteps([{ tamper: "api/evil.ts", answer: answer({ issues: [issue("api", "one")] }) }]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("failed");
+		expect(CODE_SNAPSHOT_CHANGED).toBe("Claude tried to change the code snapshot. Those changes were thrown away.");
+		expect(report.problems.map((p) => p.text)).toContain(CODE_SNAPSHOT_CHANGED);
+		expect(report.issues).toBeUndefined();
+		expect(s.github.calls.filter((c) => c.startsWith("createIssue"))).toEqual([]);
+		expect(existsSync(join(s.project, "api", "evil.ts"))).toBe(false);
+		expect(codeSnapshots()).toEqual([]);
+
+		// INV-12: checked after a cancelled run too, which stays cancelled.
+		s.claude.setSteps([{ tamper: "api/evil.ts", hang: true }]);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnother rule.\n" }, "Another rule");
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		run.cancel();
+		const cancelled = await run.done;
+		expect(cancelled.status).toBe("cancelled");
+		expect(cancelled.problems.map((p) => p.text)).toContain(CODE_SNAPSHOT_CHANGED);
+		expect(codeSnapshots()).toEqual([]);
 	});
 });
 
@@ -269,7 +457,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 			expect(report.problems.map((p) => p.text)).toContain(problem);
 			expect(s.github.issues).toEqual([]);
 			expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
-			expect(await s.marker()).toBe(COMPILED_TAG);
+			expect(await s.marker()).toBe("moved");
 		});
 	}
 
@@ -280,7 +468,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		expect(report.status).toBe("failed");
 		expect(report.problems.map((p) => p.text)).toContain("The plan has several issues and no epic. Several pieces of work need an epic.");
 		expect(s.github.issues).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("creates nothing when Claude reports failed, and the marker moves (CMP-17)", async () => {
@@ -289,7 +477,7 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		const report = await compile(s.options());
 		expect(report.status).toBe("failed");
 		expect(s.github.issues).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 });
 
@@ -303,7 +491,7 @@ describe("nothing to build (CMP-15, CMP-71)", () => {
 		expect(report.problems).toEqual([]);
 		expect(s.github.issues).toEqual([]);
 		expect(s.github.calls.filter((c) => /^(createLabel|createIssue|addSubIssue|addToProject)/.test(c))).toEqual([]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 		expect(compileFinishedText(report.issues ?? [], 0)).toBe("Compile finished. The code already matches the model.");
 	});
 
@@ -332,11 +520,12 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		expect(s.github.issues.map((i) => [i.repo, i.title, i.labels, i.inProject])).toEqual([["web", "Add one thing", [], PROJECT_URL]]);
 		expect(s.github.calls.some((c) => c.startsWith("ensureLabel"))).toBe(false);
 		// The body ends with the revisions it was planned from (CMP-67).
-		const revision = (await out(s.vault, ["rev-parse", "--short=7", "HEAD"])).trim();
+		// HEAD is now the commit of the shared report, so the revision compiled is the one before it.
+		const revision = report.toCommit.slice(0, 7);
 		expect(s.github.issues[0].body).toBe(`Build one.\n\nRules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:\n- ${revision} Initial commit`);
 		expect(report.issues?.map((i) => [i.kind, i.repo, i.number, i.inProject])).toEqual([["issue", "web", 1, true]]);
 		expect(readyText(report.issues ?? [])).toBe("1 issue is ready to build.");
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("creates the epic first with the epic label, links each sub-issue to it, and adds every issue to the project", async () => {
@@ -383,7 +572,12 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		expect(report.issueFailure).toBeUndefined();
 		expect(s.github.issues.map((i) => i.title)).toEqual(["Ship the big thing", "Change first", "Change second"]);
 		expect(s.github.issues.map((i) => i.parent ?? null)).toEqual([null, "api#1", "api#1"]);
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
+		// The Retry updates the report shared while it waited, with every issue (REP-46).
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Update compile ${report.shared!.shortId}`);
+		const shared = JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]));
+		expect(shared.issues.map((i: { number: number }) => i.number)).toEqual([1, 2, 3]);
+		expect(shared.status).toBe("succeeded");
 	});
 
 	it("stays running while Retry or Discard waits, so the report can offer them, and succeeds once every issue exists", async () => {
@@ -400,7 +594,7 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 		const report = await run.done;
 		expect(statuses).toEqual(["running"]);
 		expect(report.status).toBe("succeeded");
-		expect(await s.marker()).toBe(COMPILED_TAG);
+		expect(await s.marker()).toBe("moved");
 	});
 
 	it("Cancel while Retry or Discard waits discards the issues and cancels the compile", async () => {
@@ -434,6 +628,11 @@ describe("creating the issues (CMP-63 to CMP-68)", () => {
 			"Couldn't create the issues: HTTP 403 The issues already created were closed as not planned, and the last compile marker didn't move.",
 		);
 		expect(await s.marker()).toBe("");
+		// Shared once creating an issue failed, then committed again with markerMoved false (REP-46, CMP-22).
+		const id = report.shared!.shortId;
+		expect((await out(s.vault, ["log", "--format=%s", "-2"])).split("\n")).toEqual([`Update compile ${id}`, expect.stringMatching(/^Compile start\.\.[0-9a-f]{7}$/)]);
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]))).toMatchObject({ markerMoved: false, status: "failed" });
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD~1:${report.shared!.file}`]))).toMatchObject({ markerMoved: true });
 	});
 });
 
@@ -443,7 +642,7 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 	it("starts the revisions and the diff where the earlier compile started, and lists its open issues in the prompt (CMP-10, CMP-76)", async () => {
 		const s = await setup();
 		const start = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
-		await out(s.vault, ["tag", COMPILED_TAG, start]);
+		await markCompiled(s.vault, start);
 		const first = await commitFiles(s.vault, { "Note.md": "# Note\n\nThe first rule.\n" }, "Write the first rule");
 		s.claude.setSteps([
 			{ answer: answer({ epic, issues: [issue("api", "one"), issue("web", "two")] }) },
@@ -482,6 +681,35 @@ describe("a recompile (CMP-76 to CMP-79)", () => {
 		expect(recompile).toContain("### #1: Ship the big thing\n\n- Repository: api\n- Kind: epic\n- Rules: R-1, R-2\n- Short name: big-thing\n\nSeveral pieces.");
 		expect(recompile).toContain("### #2: Change one\n\n- Repository: api\n- Kind: issue\n- Rules: R-1\n- Short name: one\n\nBuild one.");
 		expect(recompile).not.toContain("Change two");
+	});
+
+	it("recompiles another engineer's shared report, with its open issues' bodies read from GitHub (REP-50)", async () => {
+		const s = await setup();
+		const start = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
+		await markCompiled(s.vault, start);
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nThe first rule.\n" }, "Write the first rule");
+		s.claude.setSteps([
+			{ answer: answer({ epic, issues: [issue("api", "one"), issue("web", "two")] }) },
+			{ answer: answer({ epic: { ...epic, continues: 1 }, issues: [{ ...issue("api", "one"), continues: 2 }, { ...issue("web", "two"), continues: 3 }] }) },
+		]);
+		const earlier = await compile(s.options());
+		await commitFiles(s.vault, { "Note.md": "# Note\n\nThe answered rule.\n" }, "Answer the question");
+		// As another engineer reads it from `.compiles/`: no issue bodies.
+		const file = earlier.shared!.file;
+		const theirs = fromSharedReport(JSON.parse(readFileSync(join(s.vault, file), "utf8")), file, s.project);
+		expect(theirs.issues?.map((i) => i.body)).toEqual(["", "", ""]);
+
+		const report = await compile(s.options({ recompile: theirs, reports: [theirs] }));
+		expect(report.status).toBe("succeeded");
+		expect(report.recompileOf).toBe(file);
+		const recompile = s.claude.calls()[1].prompt;
+		expect(recompile).toContain("- Short name: big-thing\n\nSeveral pieces.");
+		expect(recompile).toContain("- Short name: one\n\nBuild one.");
+		expect(recompile).not.toContain("Planned by theory.md");
+		// Claude's bodies didn't change, so no continued issue gets the CMP-79 comment (CMP-80).
+		expect(s.github.calls.filter((c) => c.startsWith("commentIssue"))).toEqual([]);
+		// The earlier report's file now links the recompile (REP-41, REP-46).
+		expect(JSON.parse(readFileSync(join(s.vault, file), "utf8")).recompiledBy).toBe(report.shared?.file);
 	});
 
 	it("lets the plan's epic and issues name the issue they continue and what changed (CMP-15)", () => {
@@ -612,7 +840,7 @@ describe("bringing GitHub in line with a recompile (CMP-64, CMP-80 to CMP-83)", 
 		const head = (await out(s.vault, ["rev-parse", "HEAD"])).trim();
 		/** Where the marker is now: "earlier" where the first compile left it, "head" once moved. */
 		const marker = async () => {
-			const at = (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+			const at = (await markerCommit(s.vault)) ?? "";
 			return at === head ? "head" : at === first.toCommit ? "earlier" : at;
 		};
 		return { s, first, before, revision, marker };
@@ -1058,7 +1286,7 @@ describe("the checks before a recompile (CMP-75)", () => {
 		expect(first.status).toBe("succeeded");
 		await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
 		s.github.calls = [];
-		const markerAt = async () => (await out(s.vault, ["rev-parse", `${COMPILED_TAG}^{commit}`])).trim();
+		const markerAt = async () => (await markerCommit(s.vault)) ?? "";
 		const before = await markerAt();
 		const recompile = (extra: Partial<CompileOptions> = {}) => s.options({ recompile: first, reports: [first], ...extra });
 		/** The notice a recompile that can't start shows, as runCompile builds it. */
@@ -1165,5 +1393,98 @@ describe("the checks before a recompile (CMP-75)", () => {
 		const report = await compile(c.recompile());
 		expect(report.status).toBe("succeeded");
 		expect(report.recompileOf).toBe(c.first.id);
+	});
+});
+
+describe("the shared report of a compile (REP-46, CMP-22, CMP-90)", () => {
+	const filesIn = async (vault: string) => (await out(vault, ["show", "--name-only", "--format=", "HEAD"])).split("\n").filter(Boolean).sort();
+
+	it("commits the report and its Activity log once when a compile ends, which moves the marker", async () => {
+		const s = await setup();
+		const compiled = await out(s.vault, ["rev-parse", "HEAD"]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const file = report.shared!.file;
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Compile start..${compiled.slice(0, 7)}`);
+		expect(await out(s.vault, ["rev-list", "--count", `${compiled}..HEAD`])).toBe("1");
+		expect(await filesIn(s.vault)).toEqual([file.replace(/\.json$/, ".activity.log"), file].sort());
+		expect(await markerCommit(s.vault)).toBe(compiled);
+		// The shared report's own commit is in a dot folder, so nothing is pending (INV-13).
+		expect(await pendingRevisionCount(s.vault)).toBe(0);
+		await expect(startCompile(s.options(), () => {})).rejects.toThrow("Every committed revision is already compiled.");
+	});
+
+	it("with Share compile reports off, writes no shared file and moves the local tag instead (CFG-44)", async () => {
+		const s = await setup();
+		const compiled = await out(s.vault, ["rev-parse", "HEAD"]);
+		// As the plugin does with the setting off: the same share, told not to share.
+		const local = (extra: Partial<CompileOptions> = {}) =>
+			s.options({
+				shareReports: false,
+				share: async (report) => {
+					const moment = compileMoment(report);
+					if (moment) await shareReport({ vaultPath: s.vault, reports: [report], push: () => pushVault(s.vault), sharing: false }, report, moment);
+				},
+				...extra,
+			});
+		const report = await compile(local());
+		expect(report.status).toBe("succeeded");
+		expect(report.markerMoved).toBe(true);
+		expect(report.shared).toBeUndefined();
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(compiled);
+		expect(await out(s.vault, ["rev-parse", "refs/tags/theory/compiled"])).toBe(compiled);
+		expect(await markerCommit(s.vault, false)).toBe(compiled);
+		expect(await markerCommit(s.vault)).toBeNull();
+		await expect(startCompile(local(), () => {})).rejects.toThrow("Every committed revision is already compiled.");
+
+		// The next compile starts from the tag.
+		const next = await commitFiles(s.vault, { "Note.md": "# Note\n\nChanged.\n" }, "Change the rule");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "two")] }) }]);
+		const second = await compile(local());
+		expect(second.fromCommit).toBe(compiled);
+		expect(await out(s.vault, ["rev-parse", "refs/tags/theory/compiled"])).toBe(next);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+	});
+
+	it("commits nothing when the compile can't start", async () => {
+		const s = await setup();
+		const head = await out(s.vault, ["rev-parse", "HEAD"]);
+		await expect(startCompile(s.options({ githubProject: "" }), () => {})).rejects.toThrow(NO_PROJECT);
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(head);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+	});
+
+	it("commits nothing when the compile is cancelled while Claude runs, and the marker stays (CMP-23, REP-10)", async () => {
+		const s = await setup(["api"]);
+		const head = await out(s.vault, ["rev-parse", "HEAD"]);
+		s.claude.setSteps([{ hang: true }]);
+		const run = await startCompile(s.options(), () => {});
+		while (s.claude.calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+		run.cancel();
+		const report = await run.done;
+		expect(report.status).toBe("cancelled");
+		expect(report.shared).toBeUndefined();
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(head);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+		expect(await markerCommit(s.vault)).toBeNull();
+	});
+
+	it("commits both reports of a recompile in one commit, and the recompile moves the marker", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ answer: answer({ issues: [issue("api", "one")] }) },
+			{ answer: answer({ issues: [{ ...issue("api", "one"), continues: 1, changed: "Now says more." }] }) },
+		]);
+		const first = await compile(s.options());
+		const answered = await commitFiles(s.vault, { "Note.md": "# Note\n\nAnswered.\n" }, "Answer the question");
+		const second = await compile(s.options({ recompile: first, reports: [first] }));
+		expect(second.status).toBe("succeeded");
+		expect(await out(s.vault, ["log", "-1", "--format=%s"])).toBe(`Recompile ${first.shared!.shortId}`);
+		const files = await filesIn(s.vault);
+		expect(files).toContain(first.shared!.file);
+		expect(files).toContain(second.shared!.file);
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${first.shared!.file}`])).recompiledBy).toBe(second.shared!.file);
+		expect(await markerCommit(s.vault)).toBe(answered);
 	});
 });

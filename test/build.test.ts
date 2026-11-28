@@ -20,8 +20,9 @@ import {
 	pullRequestCandidates,
 	startBuild,
 } from "../src/build";
-import { COMPILED_TAG, CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
-import type { IssueRecord } from "../src/plan";
+import { CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
+import { fromSharedReport, markerCommit, sharedBuild, toSharedReport } from "../src/shared-report";
+import { type IssueRecord, fillIssueBodies, plannedBody } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { FakeStep, fakeClaude, repoWithOrigin } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -250,6 +251,7 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
 		expect(buildPromptText(report)).toBe("1 issue is ready. Build it now?");
 		const mainBefore = await out(s.api.repo, ["rev-parse", "main"]);
+		const markerBefore = await markerCommit(s.vault);
 		await build(s, report);
 
 		const [issue] = report.issues ?? [];
@@ -270,7 +272,8 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 		// The engineer merges it: the issue stays open and main doesn't move.
 		expect(s.github.issues[0].state).toBe("open");
 		expect(await remoteHead(s.api.bare, "main")).toBe(mainBefore);
-		expect(await out(s.vault, ["tag", "--list", COMPILED_TAG])).toBe("");
+		// A build never moves the marker (CMP-43, BLD-25).
+		expect(await markerCommit(s.vault)).toBe(markerBefore);
 	});
 });
 
@@ -292,6 +295,7 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 			true,
 		);
 		const mains = [await remoteHead(s.api.bare, "main"), await remoteHead(s.web.bare, "main")];
+		const markerBefore = await markerCommit(s.vault);
 		await build(s, report);
 
 		const epicBranch = "theory/epic-1-big-thing";
@@ -323,7 +327,8 @@ describe("building an epic (BLD-15, BLD-16, BLD-25)", () => {
 		// Nothing reached a default branch.
 		expect([await remoteHead(s.api.bare, "main"), await remoteHead(s.web.bare, "main")]).toEqual(mains);
 		expect(report.build?.message).toBe(`Epic #1 is built on ${epicBranch}. Open a pull request into main when you're ready.`);
-		expect(await out(s.vault, ["tag", "--list", COMPILED_TAG])).toBe("");
+		// A build never moves the marker (CMP-43, BLD-25).
+		expect(await markerCommit(s.vault)).toBe(markerBefore);
 	});
 });
 
@@ -504,6 +509,61 @@ describe("when a build goes wrong (BLD-22, BLD-23)", () => {
 });
 
 describe("continuing a build of the same compile (BLD-8, BLD-9, BLD-12, BLD-27, BLD-28)", () => {
+	it("continues a teammate's build of a shared report on its epic branch, with the bodies from GitHub (REP-50)", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "first.txt", answer: built("First.") }, { answer: failed }]);
+		const report = await planned(
+			s,
+			[
+				{ repo: "api", shortName: "first" },
+				{ repo: "api", shortName: "second" },
+			],
+			true,
+		);
+		await build(s, report, { answer: () => "stop" });
+		const entry = sharedBuild(report, { name: "Ana Lee", email: "ana@example.com" });
+		report.builds = entry ? [entry] : [];
+		// The issue's body on GitHub, as the compile created it (CMP-67).
+		s.github.issues[2].body = "Build second.\n\nRules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:\n- abc1234 Write it";
+
+		// Another engineer reads the report from `.compiles/`: no issue bodies, no epic branches of its own.
+		const file = ".compiles/2026-11-28T09-00-00Z-ana111.json";
+		report.shared = { file, shortId: "ana111" };
+		const theirs = fromSharedReport(toSharedReport(report, [report]), file, s.project);
+		expect(theirs.issues?.map((i) => i.body)).toEqual(["", "", ""]);
+		s.claude.setSteps([{ commit: "second.txt", answer: built("Second.") }]);
+		await build(s, theirs, { reports: [theirs] });
+
+		const epicBranch = "theory/epic-1-big-thing";
+		expect(theirs.build?.status).toBe("finished");
+		expect(theirs.build?.epicBranches?.map((b) => [b.branch, b.base])).toEqual([[epicBranch, "main"]]);
+		expect((await branches(s.api.repo)).filter((b) => b.startsWith("theory/epic-"))).toEqual([epicBranch]);
+		const [, call] = s.claude.calls().slice(1);
+		expect(call.prompt).toContain("Issue: #3");
+		expect(call.prompt).toContain("\nBuild second.\n");
+		expect(call.prompt).not.toContain("Planned by theory.md");
+		expect(s.github.pullRequests.map((p) => [p.head, p.base])).toEqual([
+			["theory/2-first", epicBranch],
+			["theory/3-second", epicBranch],
+		]);
+	});
+
+	it("reads an issue's body back from GitHub without what the plugin added (CMP-67, REP-50)", async () => {
+		expect(plannedBody("Build one.\n\nRules: R-1, R-2\n\n---\nPlanned by theory.md from these revisions of the model:\n- abc1234 Write it")).toBe("Build one.");
+		expect(plannedBody("Build one.\r\n\r\n---\r\nPlanned by theory.md from these revisions of the model:\r\n- abc1234 Write it")).toBe("Build one.");
+		expect(plannedBody("Rules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:")).toBe("");
+		expect(plannedBody("Written by hand.\n\n---\nA footer.")).toBe("Written by hand.\n\n---\nA footer.");
+		const s = await setup();
+		const records = (await planned(s, [{ repo: "api", shortName: "one" }])).issues ?? [];
+		records[0].body = "";
+		s.github.issues[0].body = "From GitHub.";
+		await fillIssueBodies(s.github, records);
+		expect(records[0].body).toBe("From GitHub.");
+		records[0].body = "";
+		s.github.failNext("issueBody", "offline");
+		await expect(fillIssueBodies(s.github, records)).rejects.toThrow("Couldn't read api#1 on GitHub: offline");
+	});
+
 	it("reuses the epic branch in every repository, builds only the rest in order, and keeps the built one built", async () => {
 		const s = await setup();
 		s.claude.setSteps([{ commit: "first.txt", answer: built("First.") }, { answer: failed }]);

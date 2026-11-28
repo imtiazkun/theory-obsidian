@@ -1,8 +1,8 @@
 import { chmodSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ghGitHub, parseJsonList } from "../src/github";
-import { tempFolder } from "./helpers";
+import { existingPullRequest, ghGitHub, parseJsonList } from "../src/github";
+import { commitFiles, initRepo, out, tempFolder } from "./helpers";
 
 const originalPath = process.env.PATH;
 afterEach(() => {
@@ -45,6 +45,37 @@ describe("the epic label (CMP-65)", () => {
 		const calls = fakeGh(["Epic"]);
 		await ghGitHub.ensureLabel(tempFolder(), "epic");
 		expect(calls()).toEqual(["label list --search epic --json name --limit 100"]);
+	});
+});
+
+describe("a pull request already on GitHub (REP-58)", () => {
+	/** A repository with `branch`, and a fake gh whose `pr list` prints one pull request from its head. */
+	async function repoWithPullRequest(state: string) {
+		const repo = tempFolder();
+		await initRepo(repo);
+		await out(repo, ["switch", "-c", "theory/epic-41-signup"]);
+		const head = await commitFiles(repo, { "a.txt": "a\n" }, "Add a");
+		const bin = tempFolder();
+		const listed = JSON.stringify([{ url: "https://github.com/o/r/pull/498", state, isDraft: false, headRefOid: head }]);
+		writeFileSync(join(bin, "gh"), `#!/bin/sh\nif [ "$1 $2" = "pr list" ]; then printf '%s' '${listed}'; fi\nexit 0\n`);
+		chmodSync(join(bin, "gh"), 0o755);
+		process.env.PATH = `${bin}:${originalPath}`;
+		return repo;
+	}
+
+	it("is found when it was merged", async () => {
+		const repo = await repoWithPullRequest("MERGED");
+		expect(await existingPullRequest(repo, "theory/epic-41-signup")).toEqual({ url: "https://github.com/o/r/pull/498", state: "merged" });
+	});
+
+	it("is found when it is open", async () => {
+		const repo = await repoWithPullRequest("OPEN");
+		expect((await existingPullRequest(repo, "theory/epic-41-signup"))?.state).toBe("open");
+	});
+
+	it("doesn't count when it was closed, so a new one can replace it", async () => {
+		const repo = await repoWithPullRequest("CLOSED");
+		expect(await existingPullRequest(repo, "theory/epic-41-signup")).toBeNull();
 	});
 });
 

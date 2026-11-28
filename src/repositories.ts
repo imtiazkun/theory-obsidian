@@ -4,13 +4,40 @@ import { join } from "path";
 import { TFile, TFolder } from "obsidian";
 import { CodeRepo, currentBranch, uncommittedCount } from "./branches";
 import { openBuildBranch } from "./build";
-import { COMPILED_TAG, type CompileReport } from "./compile";
+import type { CompileReport } from "./compile";
+import { filesSinceMarker } from "./shared-report";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
 import { REALIZED_KEY } from "./note-status";
+import type { ProjectRepos } from "./project";
 import { NO_PROMPT_ENV, repoPullState } from "./pull";
 import { type TemplateFields, modelFolderTexts } from "./templates";
 import { commit, git, identityArgs } from "./vault";
+
+/** What the Repositories page says when no project folder is set; it shows Open settings with it (REPO-9). */
+export const NO_PROJECT_FOLDER = "Choose the project folder in theory.md settings first.";
+
+/** What the Repositories page says when the project folder is itself a git repository (REPO-9). */
+export const SINGLE_REPOSITORY =
+	"The project folder is a single repository. Choose a folder that holds repositories side by side to add more.";
+
+/** What the Repositories page says with no repositories (REPO-8). The page has no New repository button (REPO-25). */
+export const NO_REPOSITORIES = "No repositories yet. Run New repository from the command palette to create one.";
+
+/** Why the Repositories page can't show the project folder at all, or null when it can. */
+export function projectFolderProblem(folder: string, found: ProjectRepos): string | null {
+	if (!folder) return NO_PROJECT_FOLDER;
+	if (found.kind === "missing") return `The project folder doesn't exist: ${folder}`;
+	return null;
+}
+
+/**
+ * Why the command "New repository" opens no form, as the notice it shows, or null to open the form (REPO-9,
+ * REPO-14): the page's own text when there is no project folder, or when it is a single repository.
+ */
+export function newRepositoryProblem(folder: string, found: ProjectRepos): string | null {
+	return projectFolderProblem(folder, found) ?? (found.kind === "root" ? SINGLE_REPOSITORY : null);
+}
 
 /** The repository's model folder: the folder at the vault root with exactly its name. */
 export function modelFolder(plugin: TheoryPlugin, name: string): TFolder | null {
@@ -63,21 +90,19 @@ async function aheadBehind(repoPath: string, branch: string | null): Promise<{ a
 }
 
 /** Vault paths changed since the last compile, or "all" when nothing has been compiled. */
-async function pendingPaths(vaultPath: string): Promise<{ tracked: Set<string>; pending: Set<string> | "all" }> {
+async function pendingPaths(vaultPath: string, sharing: boolean): Promise<{ tracked: Set<string>; pending: Set<string> | "all" }> {
 	const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 	const tracked = new Set(files.split("\0").filter(Boolean));
-	try {
-		const { stdout } = await git(vaultPath, ["diff", "--name-only", "-z", `refs/tags/${COMPILED_TAG}`, "HEAD"]);
-		return { tracked, pending: new Set(stdout.split("\0").filter(Boolean)) };
-	} catch {
-		return { tracked, pending: "all" };
-	}
+	// The marker as the shared reports set it (REP-49), or the local tag with sharing off (CFG-44). No marker yet means
+	// every file is pending.
+	const pending = await filesSinceMarker(vaultPath, sharing).catch(() => null);
+	return { tracked, pending: pending ? new Set(pending) : "all" };
 }
 
 /** Works out every card's numbers. Never fetches, and asks GitHub nothing, so it is fast and works offline. */
 export async function repoKpis(plugin: TheoryPlugin, repos: CodeRepo[]): Promise<RepoKpis[]> {
 	const { reports } = plugin;
-	const vaultState = plugin.isVaultSetUp() ? await pendingPaths(plugin.getVaultPath()).catch(() => null) : null;
+	const vaultState = plugin.isVaultSetUp() ? await pendingPaths(plugin.getVaultPath(), plugin.settings.shareReports).catch(() => null) : null;
 	const result: RepoKpis[] = [];
 	for (const repo of repos) {
 		const branch = await currentBranch(repo.path);

@@ -6,14 +6,17 @@ import { findProjectRepos } from "./project";
 import { fastForwardRepo } from "./pull";
 import { PR_STATE_TEXT, STATUS_TEXT } from "./report-view";
 import {
+	NO_REPOSITORIES,
 	NewRepository,
 	RepoKpis,
+	SINGLE_REPOSITORY,
 	addModelFolder,
 	createRepository,
 	fetchAll,
 	modelFolder,
 	modelIndex,
 	nameProblem,
+	projectFolderProblem,
 	repoKpis,
 } from "./repositories";
 
@@ -59,6 +62,9 @@ export class RepositoriesView extends ItemView {
 		const folder = this.plugin.settings.projectFolder;
 		const found = findProjectRepos(folder);
 		const repos = projectRepos(folder);
+		// The model folder icons follow the repositories this page shows: on Refresh, and after New repository and
+		// Add model folder, which both redraw it (UI-42).
+		this.plugin.entryFiles.sync();
 
 		if (fetch && repos.length > 0) {
 			contentEl.empty();
@@ -73,31 +79,21 @@ export class RepositoriesView extends ItemView {
 		if (id !== this.drawId) return;
 		contentEl.empty();
 
-		if (!folder) {
-			contentEl.createDiv({ cls: "theory-report-empty", text: "Choose the project folder in theory.md settings first." });
-			contentEl
-				.createEl("button", { cls: "mod-cta", text: "Open settings" })
-				.addEventListener("click", () => this.plugin.openSettings());
-			return;
-		}
-		if (found.kind === "missing") {
-			contentEl.createDiv({ cls: "theory-report-empty", text: `The project folder doesn't exist: ${folder}` });
+		const problem = projectFolderProblem(folder, found);
+		if (problem !== null) {
+			contentEl.createDiv({ cls: "theory-report-empty", text: problem });
+			if (!folder) {
+				contentEl
+					.createEl("button", { cls: "mod-cta", text: "Open settings" })
+					.addEventListener("click", () => this.plugin.openSettings());
+			}
 			return;
 		}
 
-		const toolbar = contentEl.createDiv({ cls: "theory-report-toolbar" });
-		const create = toolbar.createEl("button", { cls: "mod-cta", text: "New repository" });
-		create.disabled = found.kind === "root";
-		create.addEventListener("click", () => new NewRepositoryModal(this.app, this.plugin, () => this.refresh(false)).open());
-
-		if (found.kind === "root") {
-			contentEl.createDiv({
-				cls: "theory-report-meta",
-				text: "The project folder is a single repository. Choose a folder that holds repositories side by side to add more.",
-			});
-		}
+		// No New repository button: the form opens only from the command "New repository" (REPO-25, REPO-14).
+		if (found.kind === "root") contentEl.createDiv({ cls: "theory-report-meta", text: SINGLE_REPOSITORY });
 		if (kpis.length === 0) {
-			contentEl.createDiv({ cls: "theory-report-empty", text: "No repositories yet. Create one to start." });
+			contentEl.createDiv({ cls: "theory-report-empty", text: NO_REPOSITORIES });
 			return;
 		}
 		const cards = contentEl.createDiv({ cls: "theory-repo-cards" });
@@ -199,8 +195,8 @@ export class RepositoriesView extends ItemView {
 	}
 }
 
-/** The New repository form. Its text goes into the files exactly as typed. */
-class NewRepositoryModal extends Modal {
+/** The New repository form, opened by the command "New repository" (REPO-14). Its text goes into the files exactly as typed. */
+export class NewRepositoryModal extends Modal {
 	private form: NewRepository = {
 		name: "",
 		description: "",

@@ -3,13 +3,17 @@ import { basename } from "path";
 import type { PullRequestState } from "./github";
 import { timeAgo } from "./history-view";
 import type TheoryPlugin from "./main";
+import { ONLY_HERE } from "./report-list";
 import { PR_STATE_TEXT, STATUS_ICON, STATUS_TEXT } from "./report-view";
 
 export const COMPILE_HISTORY_VIEW_TYPE = "theory-compile-history";
 
 const count = new Intl.NumberFormat();
 
-/** Past compiles, newest first, beside the commit history in the right sidebar. Read from the reports in plugin data. */
+/**
+ * Past compiles, newest first, beside the commit history in the right sidebar: the reports in plugin data and the
+ * shared reports in `.compiles/` together (REP-51).
+ */
 export class CompileHistoryView extends ItemView {
 	plugin: TheoryPlugin;
 
@@ -34,6 +38,8 @@ export class CompileHistoryView extends ItemView {
 		this.addAction("refresh-cw", "Refresh pull request states", () => this.plugin.refreshPullRequestStates("action"));
 		this.refresh();
 		this.plugin.refreshPullRequestStates("history");
+		// Teammates' compiles may have arrived since `.compiles/` was last read (REP-51).
+		await this.plugin.loadSharedReports();
 	}
 
 	refresh() {
@@ -41,14 +47,16 @@ export class CompileHistoryView extends ItemView {
 		contentEl.empty();
 		contentEl.addClass("theory-history");
 
-		const reports = this.plugin.reports;
-		if (reports.length === 0) {
+		const entries = this.plugin.reportEntries().filter((e) => e.kind === "report");
+		if (entries.length === 0) {
 			contentEl.createDiv({ cls: "theory-history-empty", text: "No compiles yet." });
 			return;
 		}
 
 		const list = contentEl.createDiv({ cls: "theory-history-list" });
-		for (const report of reports) {
+		for (const entry of entries) {
+			if (entry.kind !== "report") continue;
+			const { report } = entry;
 			const started = new Date(report.startedAt);
 			const item = list.createDiv({ cls: `theory-history-item theory-compile-history-item is-${report.status}` });
 			item.setAttr("title", `${started.toLocaleString()}\nClick to open the report.`);
@@ -61,7 +69,12 @@ export class CompileHistoryView extends ItemView {
 			const meta = item.createDiv({ cls: "theory-history-meta" });
 			meta.createSpan({ text: timeAgo(started) });
 			meta.createSpan({ text: " · " });
+			// REP-51: who compiled it, and whether it is only on this machine.
 			meta.createSpan({ text: report.author || "Unknown author" });
+			if (entry.onlyHere) {
+				meta.createSpan({ text: " · " });
+				meta.createSpan({ cls: "theory-history-only-here", text: ONLY_HERE });
+			}
 			// An ACP agent reports how full its context is, not the tokens used, so there is no count (AGT-20).
 			if (report.agent !== "acp") {
 				meta.createSpan({ text: " · " });

@@ -19,7 +19,7 @@ The theoretical model is an Obsidian vault that describes the product:
 - It is mostly Markdown text, with SVG and image assets for diagrams.
 - It says *what* the system does and *why*: concepts, behaviour, rules, decisions.
 - It lives in **its own git repository**, separate from the code it describes.
-- `Index.md` at the vault root is the entry point. theory.md opens it on launch.
+- `Index.md` at the vault root is the entry point. On launch theory.md opens Graph view, which shows the whole model and how its notes link, or `Index.md` when Graph view is turned off.
 - `Instructions.md` at the vault root holds the human-only rules and the writing syntax rules for the model. It is for humans and isn't sent to Claude.
 
 ### Humans only
@@ -52,12 +52,13 @@ theory.md enforces this in three ways:
 
 ## Status
 
-theory.md runs on each engineer's own machine, and a **team shares one model** through the vault's git remote. Every commit is signed and pushed, and every engineer pulls the others' revisions. The issues and pull requests a compile and build create are shared on GitHub. Hooks can post comments, commits and compiles to a shared channel, like Slack, so the team discusses each decision where everyone sees it. Until the server comes, the last-compile marker and the compile lock stay on each machine, so the team agrees who compiles.
+theory.md runs on each engineer's own machine, and a **team shares one model** through the vault's git remote. Every commit is signed and pushed, and every engineer pulls the others' revisions. The issues and pull requests a compile and build create are shared on GitHub. Hooks can post comments, commits and compiles to a shared channel, like Slack, so the team discusses each decision where everyone sees it. The last-compile marker is shared through the compile reports in `.compiles/`. Until the server comes, the compile lock stays on each machine, so the team agrees who compiles.
 
 | Feature | Status |
 | --- | --- |
 | Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the templates in `_templates/`, and an initial commit | Done |
 | Install with a coding agent: `INSTALL.md` and `scripts/install.sh` download and check the latest release, turn the plugin on, and on a first install run Setup vault on the first load | Done |
+| First load after `scripts/install.sh`: turns on only the core plugins theory.md uses (Command palette, File recovery, Files, Graph view, Note composer, Page preview, Quick switcher, Search, Templates and Word count), puts Graph view, Quick switcher, Insert template, Command palette and Repositories at the top of the ribbon, and colours templates grey, index files blue and instructions files green in Graph view, keeping your own colour groups. The command **Use theory.md's core plugins** does the same at any time, after asking | Done |
 | Create missing files: a vault set up by an older version, or missing a starter file, gets only the missing files and `.gitignore` lines from the settings, committed on their own | Done |
 | Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
 | Author: commits are signed with the name and email git uses (the vault's git config, else the global one). The settings show them as plain text, explain how to set what is missing, and can write a name and email saved by an older version into the vault's git config | Done |
@@ -66,12 +67,15 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Past commits: clicking a commit in commit history shows it read-only with its diff | Done |
 | Generate the commit message with Claude (sparkle button on the Commit page) | Done |
 | Commit history view in the right sidebar | Done |
-| Compile history view in the right sidebar: when, who and tokens spent | Done |
-| Open `Index.md` on launch | Done |
+| Compile history view in the right sidebar: when, who and tokens spent, for your compiles and your teammates' | Done |
+| On launch: Graph view as the active tab (or `Index.md` when Graph view is off), both sidebars expanded with the file explorer on the left and the Comments view on the right. Once per launch, never when the plugin is turned on mid-session or the vault is reopened in the same window | Done |
 | Compile: send revisions since the last compile to Claude Code, which only reads and plans the work; theory.md creates it on GitHub as one issue, or an epic with sub-issues, added to your GitHub Project | Done |
 | Build: Claude Code writes the code for each issue on its own branch; one issue becomes a pull request you merge, an epic's sub-issues are merged into an epic branch you merge; Retry, Skip and Stop when an issue fails; building the same compile again continues it on the same branches | Done |
 | Recompile in a compile report: plans that compile's work again with the answers you committed since, continuing its issues where it can. Offered while no later compile succeeded, nothing of it was built and it wasn't recompiled; disabled until a revision is pending. The two reports link to each other, and Build then builds from the new one | Done |
-| Last compile marker (local `theory/compiled` tag) | Done |
+| Last compile marker (shared reports in `.compiles/`) | Done |
+| Share compile reports setting: off keeps every report on your machine with the local `theory/compiled` tag as the marker; upgrading carries the old tag over as a shared marker once | Done |
+| Shared reports: the report dropdown and the compile history list your teammates' compiles from `.compiles/` with yours, newest first, with who compiled each; a report only in your data file is marked "Only on this machine", and a file that can't be read shows as "Can't read {file}". A shared report's Activity comes from its shared log | Done |
+| Work on any shared report: build, recompile or open pull requests for a teammate's compile. theory.md pulls first, keeps every engineer's builds, and writes nothing when someone else changed the report and your vault can't fast-forward. When a teammate compiled the same revisions while you did, the report says so | Done |
 | Compile lock within the app, so only one compile or build runs at a time | Done |
 | Compile report view, with questions linking to the notes and a Reply button that opens the note at the rule that needs updating | Done |
 | Suggest on each question: Claude, with no tools, offers text to copy and write into the note in your own words. Never saved, never written to a note | Done |
@@ -87,9 +91,10 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Build branches: `theory/{issue}-{short name}` for an issue, `theory/epic-{epic}-{short name}` for an epic, with `-2` when a name is taken | Done |
 | Create PR: once an epic is built, open pull requests for its epic branches with `gh`, with a sparkle to write the body; the report, compile history and Repositories page show their state, refreshed when they open, on the compile history's Refresh and when Obsidian gets focus back | Done |
 | Expand: on a model folder's `index.md`, Claude suggests which notes the model is missing. Create note makes an empty note you write yourself; never committed | Done |
-| Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
+| Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder. The command **New repository** creates a repository with its model folder | Done |
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
+| Model folder icon: in the file explorer, each folder named exactly like a repository in the project folder shows the history icon left of its name | Done |
 | Hooks: your own shell commands run after a comment, a commit, a push, a compile or build starting or ending, or a permission request, with the event as JSON on stdin, like posting to Slack | Done |
 | Server: team-wide marker and compile lock | Planned |
 
@@ -136,10 +141,10 @@ To update, replace the three files with the ones from a newer release.
 ## Disclosures
 
 - **Network use.** theory.md makes no network requests itself and has no telemetry. It runs two command-line tools that do:
-  - The [Claude Code CLI](https://claude.com/claude-code), for Compile, Suggest, Expand and the sparkle buttons that write commit messages and pull request bodies. These send Anthropic the model's text and diffs, and Compile also sends whatever Claude reads in the project folder.
+  - The [Claude Code CLI](https://claude.com/claude-code), for Compile, Suggest, Expand and the sparkle buttons that write commit messages and pull request bodies. These send Anthropic the model's text and diffs, and Compile also sends whatever Claude reads of each repository's default branch.
   - The [GitHub CLI](https://cli.github.com) (`gh`) and `git push`, for the issues a compile creates, Build's branches and pull requests, Create PR, pull request states and New repository.
 - **Accounts.** The Claude features need Claude Code signed in to an Anthropic account, which is a paid service. The GitHub features, Compile and Build included, need `gh` signed in to GitHub with access to your GitHub Project (`gh auth refresh -s project`). Commits, history and the rest of the plugin work without either.
-- **Files outside the vault.** theory.md reads and writes the project folder you pick in the settings: Compile only reads it, Build creates `theory/*` branches there, pushes them and Claude edits the code on them, and New repository creates a folder with a `README.md` and an `AGENTS.md`. Compile also copies the model into a temp folder (`$TMPDIR/theory-model-*`) and deletes it afterwards.
+- **Files outside the vault.** theory.md reads and writes the project folder you pick in the settings: Compile only reads it, Build creates `theory/*` branches there, pushes them and Claude edits the code on them, and New repository creates a folder with a `README.md` and an `AGENTS.md`. Compile also copies the model into a temp folder (`$TMPDIR/theory-model-*`), and each repository's default branch as `origin` has it into another (`$TMPDIR/theory-code-*`), and deletes both afterwards. Claude reads the code only there, so a checkout on another branch, unpushed commits and uncommitted work never shape a compile, and the compile report lists the commit each repository was read at.
 - **License.** theory.md is open source under the [GPL-3.0](LICENSE).
 
 ## Install for development
@@ -160,14 +165,14 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 
 ## First use
 
-If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email.
+If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email. That first load also turns off the core plugins theory.md doesn't use (turn any back on in Settings → Core plugins), sets the ribbon order and adds Graph view colour groups for templates, index files and instructions files. It never does this again; run **theory.md: Use theory.md's core plugins** to do it yourself, for example after installing by hand or with BRAT.
 
 1. Make sure git knows your name and email: `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`. Settings → theory.md → Author shows what git signs with.
 2. Run **theory.md: Setup vault** from the command palette.
 3. In Settings → theory.md → Vault, click **Browse…** next to **Project folder** and pick the folder holding the code. It can be one repository, or a folder with several repositories side by side (a whole ecosystem). theory.md lists the git repositories it finds, or warns when there are none. Then, under Compile, add the commands Claude may run to **Allowed commands**, for example `Bash(npm run *)`.
 4. Setup vault creates `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine), and the templates `_templates/index.md` and `_templates/instructions.md`, each unless the vault already has it. `Instructions.md` is for humans; Compile doesn't send it to Claude. When the new vault has Obsidian's `Welcome.md`, Setup replaces it with `_welcome.md`, which says where to start, and opens it. Delete it once read; notes whose name starts with `_` are never sent to Claude. Edit the templates to change how new model folders start. When a vault is missing any of these, the settings offer Create missing files.
 5. Edit a note and click the commit button in its header.
-6. Click **Compile** at the bottom right of the editor. The button shows how many revisions are waiting, and turns accent-coloured when there's something to compile. You can also use the hammer in the ribbon or **theory.md: Compile** in the command palette. The compile report opens in a new tab.
+6. Click **Compile** at the bottom right of the editor. The button shows how many revisions are waiting, and turns accent-coloured when there's something to compile. You can also run **theory.md: Compile** from the command palette. The compile report opens in a new tab.
 
 ### Compile settings
 
@@ -189,11 +194,12 @@ If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are
 | GitHub Project | The URL of the GitHub Project every issue a compile creates is added to, like `https://github.com/orgs/team/projects/1`. Empty by default; Compile and Build don't start while it is empty. |
 | Hooks | A list of shell commands, each tied to one event: `comment`, `commit`, `push`, `compile-start`, `compile-end`, `build-start`, `build-end` or `permission-request`. A hook runs after its event, in the vault folder with the login PATH, and gets the event as JSON on stdin: `event`, `vault`, `author`, `time` and `details` (the note and comment text, the commit hash and subject, the push status, the compile status, summary, number of questions and issues, the issues a build builds and how it ended, or the permission request). It never stops or delays what triggered it, is stopped after 10 seconds, and shows "Hook for {event} failed: {reason}" when it fails. **Test** sends it a sample event. Hooks live in the plugin's data, never in the vault, so they can hold secrets like a webhook URL. |
 | Also pull code repositories | On by default. Each pull also fetches the project folder's repositories and fast-forwards those not on a compile branch, with no uncommitted changes and nothing of their own. |
+| Share compile reports | On by default, whether or not the vault's repo is public. Each compile's report is committed and pushed in `.compiles/`, so teammates see why each issue exists and start from the same last compile. Off is for a public vault that describes private code: every report stays on your machine, and the last compile marker is the local tag `theory/compiled`, as before shared reports. Turning it off asks first: "Teammates won't see your compiles, and may compile the same revisions again. Turn off?" |
 
 ## Compile rules
 
 - **What gets compiled.** Only committed revisions. Uncommitted edits are left out, and theory.md says how many when you click Compile.
-- **Last compile marker.** theory.md records the last compile in two places. In the vault repo, it moves the `theory/compiled` git tag to the compiled commit, so nothing is written into the notes. Once there is a server, the tag will be pushed so every engineer sees the same marker. In the code repositories, every commit a build makes names the vault commit it was built from and the issue it builds.
+- **Last compile marker.** theory.md records the last compile in two places. In the vault repo, each compile Claude ran gets a shared report in the `.compiles/` dot folder (`{UTC start}-{short id}.json`, plus its Activity log), committed and pushed by itself, so nothing is written into the notes. The marker is the newest revision such a committed report moved it to, so every engineer gets the same marker with the next pull. When the commit or push fails, the notice says "Compile report saved but not shared: {reason}" and the next commit of that report carries it. Any engineer may build from, recompile or open pull requests for any shared report. Before writing to it, theory.md pulls the vault; when that report changed on the remote and the vault can't fast-forward, it writes nothing and says "Someone else changed this compile. Pull with rebase in git, then try again." When two engineers compile the same revisions at once, the one whose report can't be pushed sees "Someone else compiled these revisions while you did. Check both reports before you build." With **Share compile reports** off, nothing goes to `.compiles/`, and the marker is the local tag `theory/compiled`. **Upgrading:** on the first load with shared reports, the old `theory/compiled` tag is carried over as a marker-only report ("Imported", "Marker carried over from {you}'s machine"), committed as "Share the compile marker", unless a shared report moved the marker already; your earlier reports stay in your data file, marked "Only on this machine", and the tag stays where it was. In the code repositories, every commit a build makes names the vault commit it was built from and the issue it builds.
 - **Compile plans, Build writes the code.** A compile never changes a code repository. Claude reads the model and the code and plans one issue, or an epic with sub-issues in build order, each in one repository with the rule IDs it covers. theory.md creates them with `gh`, adds them to the GitHub Project, and when that fails asks Retry or Discard (Discard closes them as not planned and the marker stays). Compile needs `gh` signed in, a GitHub `origin` in every repository, the GitHub Project set, and no uncommitted changes.
 - **Build.** Click Build in the report, or run the command Build. One issue gets `theory/{number}-{short name}` from the default branch, and a pull request into the default branch that closes it. An epic gets `theory/epic-{number}-{short name}` in every repository with a sub-issue; each sub-issue is built on its own branch from it, merged into it with a pull request, and closed. You merge the result into the default branch; theory.md never does, never pushes with force and never moves the marker. A build refuses to start while a repository has uncommitted changes, its default branch and upstream both have new commits, or an earlier build's pull request or epic branch is still open.
 - **One compile or build at a time.** While one runs, clicking Compile or Build again only tells you one is already running. For now the lock lives inside the app. With a server it will move to the shared remote, so a second engineer waits too.
