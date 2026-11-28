@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import { basename } from "path";
 import { SAME, TASK_NAMES, type BuildRow, type ClaudeRow, type CompileRow, type TaskRows, agentName, defaultTaskRows, resolveTask } from "./agent-rows";
 import type { CompileAgent, CompileEffort, CompileModel, PermissionMode } from "./compile";
@@ -6,6 +6,7 @@ import { hasOrigin } from "./github";
 import { HOOK_EVENTS, HOOK_EVENT_NAMES, type Hook, type HookEvent } from "./hooks";
 import { findProjectRepos, pickFolder } from "./project";
 import { PULL_INTERVALS, originUrl, remoteUrlProblem, saveOrigin } from "./pull";
+import { shareToggleQuestion } from "./shared-report";
 import type TheoryPlugin from "./main";
 import {
 	GIT_MISSING,
@@ -35,6 +36,13 @@ export interface TheorySettings extends SavedAuthor {
 	pullInterval: number;
 	/** Each pull also pulls the code repositories (CFG-27). */
 	pullCodeRepos: boolean;
+	/**
+	 * Share compile reports in `.compiles/`, where they set the marker (CFG-44). Off: every report stays in the data
+	 * file, and the marker is the local tag `theory/compiled`. On by default, whether or not the vault's repo is public.
+	 */
+	shareReports: boolean;
+	/** Set once the one-time import of the old tag as a shared marker is done (CFG-45). Not shown in the settings. */
+	markerImported: boolean;
 	/** The engineer's own commands run on events (HOOK-1). In plugin data only, never in the vault (HOOK-8). */
 	hooks: Hook[];
 	/** The GitHub Project every issue a compile creates is added to, as its URL (CFG-40). Empty by default. */
@@ -54,6 +62,8 @@ export const DEFAULT_SETTINGS: TheorySettings = {
 	pullAutomatically: true,
 	pullInterval: 5,
 	pullCodeRepos: true,
+	shareReports: true,
+	markerImported: false,
 	hooks: [],
 	githubProject: "",
 };
@@ -327,6 +337,26 @@ export class TheorySettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.pullCodeRepos).onChange(async (value) => {
 					this.plugin.settings.pullCodeRepos = value;
 					await this.plugin.saveSettings();
+				}),
+			);
+
+		// CFG-44: on by default. Turning it off asks first, and staying on puts the toggle back.
+		new Setting(containerEl)
+			.setName("Share compile reports")
+			.setDesc(
+				"Commit and push each compile's report in .compiles/, so teammates see why each issue exists and start from the same last compile. Off keeps every report on this machine, and the last compile is the local tag theory/compiled.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.shareReports).onChange(async (value) => {
+					if (value === this.plugin.settings.shareReports) return;
+					const question = shareToggleQuestion(value);
+					if (question && !(await confirmChoice(this.app, "Share compile reports", question, "Turn off"))) {
+						toggle.setValue(this.plugin.settings.shareReports);
+						return;
+					}
+					this.plugin.settings.shareReports = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshGitState();
 				}),
 			);
 	}
@@ -708,5 +738,52 @@ export class TheorySettingTab extends PluginSettingTab {
 			row.createSpan({ cls: "theory-project-repo-name", text: basename(repo) });
 			row.setAttr("title", repo);
 		}
+	}
+}
+
+/** Asks a yes or no question in a modal. Resolves true only when the engineer clicks `yes`. */
+function confirmChoice(app: App, title: string, question: string, yes: string): Promise<boolean> {
+	return new Promise((resolve) => new ConfirmModal(app, title, question, yes, resolve).open());
+}
+
+class ConfirmModal extends Modal {
+	private answered = false;
+
+	constructor(
+		app: App,
+		private title: string,
+		private question: string,
+		private yes: string,
+		private onAnswer: (yes: boolean) => void,
+	) {
+		super(app);
+	}
+
+	onOpen() {
+		this.setTitle(this.title);
+		this.contentEl.createEl("p", { text: this.question });
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+			.addButton((button) =>
+				button
+					.setButtonText(this.yes)
+					.setWarning()
+					.onClick(() => {
+						this.answer(true);
+						this.close();
+					}),
+			);
+	}
+
+	private answer(yes: boolean) {
+		if (this.answered) return;
+		this.answered = true;
+		this.onAnswer(yes);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		// Closing the modal any other way keeps the setting as it was.
+		this.answer(false);
 	}
 }

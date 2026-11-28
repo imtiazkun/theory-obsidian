@@ -1414,6 +1414,39 @@ describe("the shared report of a compile (REP-46, CMP-22, CMP-90)", () => {
 		await expect(startCompile(s.options(), () => {})).rejects.toThrow("Every committed revision is already compiled.");
 	});
 
+	it("with Share compile reports off, writes no shared file and moves the local tag instead (CFG-44)", async () => {
+		const s = await setup();
+		const compiled = await out(s.vault, ["rev-parse", "HEAD"]);
+		// As the plugin does with the setting off: the same share, told not to share.
+		const local = (extra: Partial<CompileOptions> = {}) =>
+			s.options({
+				shareReports: false,
+				share: async (report) => {
+					const moment = compileMoment(report);
+					if (moment) await shareReport({ vaultPath: s.vault, reports: [report], push: () => pushVault(s.vault), sharing: false }, report, moment);
+				},
+				...extra,
+			});
+		const report = await compile(local());
+		expect(report.status).toBe("succeeded");
+		expect(report.markerMoved).toBe(true);
+		expect(report.shared).toBeUndefined();
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+		expect(await out(s.vault, ["rev-parse", "HEAD"])).toBe(compiled);
+		expect(await out(s.vault, ["rev-parse", "refs/tags/theory/compiled"])).toBe(compiled);
+		expect(await markerCommit(s.vault, false)).toBe(compiled);
+		expect(await markerCommit(s.vault)).toBeNull();
+		await expect(startCompile(local(), () => {})).rejects.toThrow("Every committed revision is already compiled.");
+
+		// The next compile starts from the tag.
+		const next = await commitFiles(s.vault, { "Note.md": "# Note\n\nChanged.\n" }, "Change the rule");
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "two")] }) }]);
+		const second = await compile(local());
+		expect(second.fromCommit).toBe(compiled);
+		expect(await out(s.vault, ["rev-parse", "refs/tags/theory/compiled"])).toBe(next);
+		expect(existsSync(join(s.vault, ".compiles"))).toBe(false);
+	});
+
 	it("commits nothing when the compile can't start", async () => {
 		const s = await setup();
 		const head = await out(s.vault, ["rev-parse", "HEAD"]);

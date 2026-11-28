@@ -64,18 +64,19 @@ async function aheadBehind(repoPath: string, branch: string | null): Promise<{ a
 }
 
 /** Vault paths changed since the last compile, or "all" when nothing has been compiled. */
-async function pendingPaths(vaultPath: string): Promise<{ tracked: Set<string>; pending: Set<string> | "all" }> {
+async function pendingPaths(vaultPath: string, sharing: boolean): Promise<{ tracked: Set<string>; pending: Set<string> | "all" }> {
 	const { stdout: files } = await git(vaultPath, ["ls-files", "-z"]);
 	const tracked = new Set(files.split("\0").filter(Boolean));
-	// The marker as the shared reports set it (REP-49). No marker yet means every file is pending.
-	const pending = await filesSinceMarker(vaultPath).catch(() => null);
+	// The marker as the shared reports set it (REP-49), or the local tag with sharing off (CFG-44). No marker yet means
+	// every file is pending.
+	const pending = await filesSinceMarker(vaultPath, sharing).catch(() => null);
 	return { tracked, pending: pending ? new Set(pending) : "all" };
 }
 
 /** Works out every card's numbers. Never fetches, and asks GitHub nothing, so it is fast and works offline. */
 export async function repoKpis(plugin: TheoryPlugin, repos: CodeRepo[]): Promise<RepoKpis[]> {
 	const { reports } = plugin;
-	const vaultState = plugin.isVaultSetUp() ? await pendingPaths(plugin.getVaultPath()).catch(() => null) : null;
+	const vaultState = plugin.isVaultSetUp() ? await pendingPaths(plugin.getVaultPath(), plugin.settings.shareReports).catch(() => null) : null;
 	const result: RepoKpis[] = [];
 	for (const repo of repos) {
 		const branch = await currentBranch(repo.path);
