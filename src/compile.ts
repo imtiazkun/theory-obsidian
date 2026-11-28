@@ -516,7 +516,7 @@ Rules:
 - Every issue changes exactly one repository. Name it in \`repo\` as it is named above.
 - In a recompile, continue an earlier issue whenever the same work is still asked for in the same repository, even when its title, body or rules change: plan all the work again, then match it to the earlier issues. To continue one, set \`continues\` to its number, and say in \`changed\`, in one sentence, what changed and why, like "Now names the description of each check, answered in STAT-10." An epic continues only an earlier epic, and an issue (a sub-issue too) only an earlier issue in the same repository. Each earlier issue is continued at most once. A new issue is only for work no earlier issue covers. Outside a recompile, never set \`continues\`.
 - A title is a short sentence in the imperative, under 70 characters, like "Show a diff for each file on the Commit page".
-- A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it.
+- A short name says what changes, like \`commit-page-diffs\`. It uses lowercase letters, digits and dashes only, and has at most 40 characters. Branches are named from it. No two short names in one plan are the same, the epic's included.
 - Put anything that went wrong (steps you couldn't do) in \`problems\`.
 - When a problem comes from something in the model, give it \`anchors\`: the model file, the heading it sits under, and a short quote copied exactly from the note (under 200 characters). Engineers see these as highlights in the note. Leave \`anchors\` empty when the problem isn't about the model.
 - Set \`status\` to "failed" if you can't plan the work.

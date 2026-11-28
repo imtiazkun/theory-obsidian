@@ -9,6 +9,7 @@ import {
 	NO_PROJECT,
 	READ_ONLY_TOOLS,
 	claudeArgs,
+	compilePrompt,
 	pendingRevisionCount,
 	startCompile,
 } from "../src/compile";
@@ -438,6 +439,21 @@ describe("the plan (CMP-59 to CMP-62)", () => {
 		expect(readPlan({ epic, issues: [issue("api", "big-thing"), issue("web", "b")] }, repos).problems).toEqual([
 			'The short name "big-thing" is used more than once in the plan: The epic "Ship the big thing", The issue "Change big-thing".',
 		]);
+	});
+
+	it("tells Claude that no two short names in a plan may be the same, as the plan check refuses them (CMP-61, CMP-70)", () => {
+		const prompt = compilePrompt({
+			snapshot: "/model",
+			projectFolder: "/project",
+			codeSnapshot: "/code",
+			code: [],
+			head: "abc1234",
+			from: null,
+			revisions: [],
+			diff: "",
+			instructions: [],
+		});
+		expect(prompt).toContain("Branches are named from it. No two short names in one plan are the same, the epic's included.");
 	});
 
 	for (const [name, plan, problem] of [
