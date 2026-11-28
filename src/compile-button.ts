@@ -5,6 +5,7 @@ import { pendingRevisionCount, timeLeft } from "./compile";
 import { expandRepoFor } from "./expand";
 import type TheoryPlugin from "./main";
 import { syncMenu, syncStatus } from "./pull";
+import { CHECKING_LABEL, CHECKING_TOOLTIP } from "./question-pass";
 import { changedFiles } from "./vault";
 
 type CompileState =
@@ -316,6 +317,8 @@ export class CompileButton {
 					);
 				} else {
 					if (this.plugin.isBuilding()) this.show("loader", "Building…", "A build is running. Click to follow it.");
+					// UI-3: the question pass shows before Compiling… (CMP-99).
+					else if (this.plugin.isCheckingModel()) this.show("loader", CHECKING_LABEL, CHECKING_TOOLTIP);
 					else this.show("loader", "Compiling…", "A compile is running. Click to follow it.");
 				}
 				break;
