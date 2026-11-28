@@ -8,6 +8,8 @@ export const STATUS_TEXT: Record<CompileStatus, string> = {
 	cancelled: "Cancelled",
 	// The marker-only report that carried the old tag over (CFG-45).
 	imported: "Imported",
+	// The question pass stopped the compile before the compile proper (CMP-101, REP-55).
+	questions: "Questions before compiling",
 };
 
 /** How a report kept only in the data file is marked (REP-51). */

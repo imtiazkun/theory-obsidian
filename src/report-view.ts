@@ -22,6 +22,7 @@ import { issueFate, issueOrigin, recompileButton, recompiledBy, recompiledReport
 import { startSuggest, type SuggestRun } from "./suggest";
 import { ONLY_HERE, STATUS_TEXT, type ReportEntry, entryId, entryLabel } from "./report-list";
 import { COMPILED_MEANWHILE, NO_ACTIVITY_LOG, readActivityLog } from "./shared-report";
+import { CHECKING_LABEL, checkingModel, compileAnywayShown, questionPassLine } from "./question-pass";
 
 export const REPORT_VIEW_TYPE = "theory-compile-report";
 
@@ -33,6 +34,7 @@ export const STATUS_ICON:Record<CompileStatus, string> = {
 	failed: "alert-triangle",
 	cancelled: "x-circle",
 	imported: "import",
+	questions: "message-circle-question",
 };
 
 /** An issue's build state as the report shows it (BLD-3). */
@@ -172,6 +174,14 @@ export class CompileReportView extends ItemView {
 		const compile = toolbar.createEl("button", { cls: "mod-cta", text: "Compile" });
 		compile.disabled = this.plugin.isCompiling();
 		compile.addEventListener("click", () => this.plugin.compile());
+		// REP-55: beside the Compile button, on a report the question pass stopped or ended (CMP-102, CMP-109).
+		if (entry?.kind === "report" && compileAnywayShown(entry.report, this.plugin.allReports())) {
+			const anyway = toolbar.createEl("button", { text: "Compile anyway" });
+			anyway.disabled = this.plugin.isCompiling();
+			setTooltip(anyway, "Compile these revisions without answering the questions first. Claude gets the questions with the prompt.");
+			const id = entry.report.id;
+			anyway.addEventListener("click", () => this.plugin.compileAnyway(id));
+		}
 
 		if (entry?.kind === "broken") {
 			// REP-52: never overwritten, and never counted for the marker.
@@ -204,7 +214,8 @@ export class CompileReportView extends ItemView {
 
 		const header = contentEl.createDiv({ cls: `theory-report-status is-${report.status}` });
 		setIcon(header.createSpan({ cls: "theory-report-status-icon" }), STATUS_ICON[report.status]);
-		header.createSpan({ text: STATUS_TEXT[report.status] });
+		// UI-3: while the question pass runs, the report says so (CMP-99).
+		header.createSpan({ text: checkingModel(report) ? CHECKING_LABEL : STATUS_TEXT[report.status] });
 		header.createSpan({
 			cls: "theory-report-range",
 			text: `${shortHash(report.fromCommit)} → ${shortHash(report.toCommit)}`,
@@ -246,11 +257,16 @@ export class CompileReportView extends ItemView {
 		}
 
 		if (report.summary) contentEl.createEl("p", { cls: "theory-report-summary", text: report.summary });
+		const passLine = questionPassLine(report.questionPass);
+		if (passLine) contentEl.createDiv({ cls: "theory-report-meta", text: passLine });
+		// REP-55: a report the question pass stopped shows its questions first, and has no Issues section.
+		const questionsFirst = report.status === "questions";
+		if (questionsFirst) this.renderQuestions(report);
 
 		this.renderRecompileLinks(report);
 		this.renderIssueFailure(report);
 		this.renderBuild(report);
-		this.renderIssues(report);
+		if (!questionsFirst) this.renderIssues(report);
 
 		if (report.pullRequests?.length) {
 			const section = this.section("Pull requests", report.pullRequests.length);
@@ -282,6 +298,19 @@ export class CompileReportView extends ItemView {
 			this.anchorLinks(section, report.suspectNotes.map((path) => ({ path })));
 		}
 
+		if (!questionsFirst) this.renderQuestions(report);
+
+		if (report.changes.length > 0) {
+			const section = this.section("Changes to the code", report.changes.length);
+			const list = section.createEl("ul");
+			for (const change of report.changes) list.createEl("li", { text: change });
+		}
+
+		this.renderRest(report, building);
+	}
+
+	/** "Questions about the model" (REP-6, REP-16, CMP-26): each with Reply, Suggest and its notes. */
+	private renderQuestions(report: CompileReport) {
 		if (report.questions.length > 0) {
 			const section = this.section("Questions about the model", report.questions.length);
 			report.questions.forEach((q, index) => {
@@ -311,13 +340,11 @@ export class CompileReportView extends ItemView {
 				this.suggestionBox(item, q, `${report.id}:${index}`);
 			});
 		}
+	}
 
-		if (report.changes.length > 0) {
-			const section = this.section("Changes to the code", report.changes.length);
-			const list = section.createEl("ul");
-			for (const change of report.changes) list.createEl("li", { text: change });
-		}
-
+	/** Revisions compiled, Code read and Activity. */
+	private renderRest(report: CompileReport, building: boolean) {
+		const { contentEl } = this;
 		const revisions = this.section("Revisions compiled", report.revisions.length);
 		for (const r of report.revisions) {
 			const item = revisions.createDiv({ cls: "theory-report-revision" });

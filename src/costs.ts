@@ -182,6 +182,8 @@ export function addCosts(a: Cost, b: Cost): Cost {
 /** What a report's tokens are read from: the compile's, and each build's (REP-56). */
 export interface CostedReport {
 	tokens?: unknown;
+	/** The question pass before the compile proper (CMP-99): its tokens count towards the compile's, at its own model. */
+	questionPass?: { tokens?: unknown };
 	/** The latest build, which may still run or have been cut short, so it may not be in `builds` yet. */
 	build?: { startedAt: string; tokens?: unknown };
 	/** Every build that ended. */
@@ -199,7 +201,8 @@ const sameTime = (a: string, b: string) => a === b || (Date.parse(a) === Date.pa
 
 /** A report's costs. Every build of the compile counts towards the build's cost, each at its own model's price. */
 export function reportCosts(report: CostedReport, prices: readonly ModelPrice[] = []): ReportCosts {
-	const compile = costOf(report.tokens, prices);
+	// The question pass is part of the compile (CMP-104), so its tokens count towards the compile's cost.
+	const compile = addCosts(costOf(report.tokens, prices), costOf(report.questionPass?.tokens, prices));
 	const builds = Array.isArray(report.builds) ? report.builds.filter((b) => b && typeof b === "object") : [];
 	const runs = [...builds];
 	// The latest build joins `builds` only once it ended; until then, or when Obsidian closed during it, it counts too.

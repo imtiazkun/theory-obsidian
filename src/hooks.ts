@@ -260,8 +260,9 @@ export function compileStartDetails(report: CompileReport): Record<string, unkno
 
 /**
  * The details of a `compile-end` event: the status, the summary, the number of questions and the issues it created
- * (HOOK-3). A recompile also names the earlier compile, and lists the issues it created, continued and closed, each
- * in its own list, as far as it got on GitHub. `issues` and `epic` are then every issue its report owns (CMP-83).
+ * (HOOK-3). When the question pass stopped the compile, the status is `questions` and `questionList` lists them. A
+ * recompile also names the earlier compile, and lists the issues it created, continued and closed, each in its own
+ * list, as far as it got on GitHub. `issues` and `epic` are then every issue its report owns (CMP-83).
  */
 export function compileEndDetails(report: CompileReport): Record<string, unknown> {
 	const owned = (report.issues ?? []).filter((i) => i.number !== undefined && !i.discarded);
@@ -272,6 +273,8 @@ export function compileEndDetails(report: CompileReport): Record<string, unknown
 		issues: owned.filter((i) => i.kind === "issue").map(issueDetails),
 		epic: owned.filter((i) => i.kind === "epic").map(issueDetails)[0] ?? null,
 	};
+	// HOOK-3: `compile-end` also fires when the question pass stopped the compile (CMP-101), and lists the questions.
+	if (report.status === "questions") details.questionList = report.questions.map((q) => ({ question: q.question, notes: q.notes }));
 	if (report.recompileOf === undefined) return details;
 	const withKind = (i: { kind: string; repo: string; number?: number; title: string; url?: string }) => ({
 		kind: i.kind,

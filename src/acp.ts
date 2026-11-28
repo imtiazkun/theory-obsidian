@@ -109,8 +109,9 @@ export const COMPILE_FIELDS = ["status", "summary", "plan", "questions", "proble
 export function structuredAnswer(value: unknown, required: string[] = COMPILE_FIELDS): StructuredAnswer | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const answer = value as Record<string, unknown>;
-	if (answer.status !== "succeeded" && answer.status !== "failed") return null;
-	if (typeof answer.summary !== "string") return null;
+	// The question pass answers with no status or summary (CMP-99), so they are checked only when required.
+	if (required.includes("status") && answer.status !== "succeeded" && answer.status !== "failed") return null;
+	if (required.includes("summary") && typeof answer.summary !== "string") return null;
 	for (const field of ["changes", "questions", "problems"]) {
 		if (required.includes(field) && !Array.isArray(answer[field])) return null;
 	}
@@ -260,6 +261,8 @@ export interface AcpOptions {
 	required?: string[];
 	/** True for a compile: every write and every request to run a command is refused without a card (CMP-13). */
 	readOnly?: boolean;
+	/** Folders whose files `fs/read_text_file` refuses: the code snapshot, for the question pass (CMP-99). */
+	unreadable?: string[];
 }
 
 /** The kinds of ACP tool call that only read. A read-only run allows these without a card, and denies the rest. */
@@ -335,7 +338,13 @@ export function runAcpAgent(options: AcpOptions, host: AgentHost): AgentRun {
 		try {
 			if (method === "session/request_permission") return handlePermission(id, params);
 			if (method === "fs/read_text_file") {
-				const text = await readFile(String(params?.path), "utf8");
+				const path = String(params?.path);
+				const file = isAbsolute(path) ? resolve(path) : resolve(options.projectFolder, path);
+				if ((options.unreadable ?? []).some((dir) => isInside(file, dir))) {
+					host.log(`Refused read: ${path}`);
+					return fail(id, "This check reads only the model, never the code.");
+				}
+				const text = await readFile(path, "utf8");
 				const line = typeof params?.line === "number" ? Math.max(1, params.line) : null;
 				const limit = typeof params?.limit === "number" ? params.limit : null;
 				if (line === null && limit === null) return respond(id, { content: text });

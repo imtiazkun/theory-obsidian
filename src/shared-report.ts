@@ -8,6 +8,7 @@ import type { CompileReport, CompileStatus } from "./compile";
 import type { CodeRead } from "./code-snapshot";
 import { type TokenUsage, readUsage } from "./costs";
 import type { PullRequest } from "./github";
+import type { QuestionPassRecord } from "./question-pass";
 import type { BuildState, IssueRecord } from "./plan";
 import { NO_PROMPT_ENV, type VaultPull } from "./pull";
 import { PUSH_REJECTED, type PushResult } from "./push";
@@ -64,6 +65,20 @@ export interface SharedReport {
 	tokens?: TokenUsage;
 	/** Set while creating an issue failed and the compile waits for Retry or Discard (CMP-68). */
 	issueFailure?: string;
+	/**
+	 * The question pass before the compile proper, when one ran (CMP-99): how it ended, its "some" or "none" and why,
+	 * whether it ended the compile as nothing to build (CMP-109), the Check row's agent, and its tokens (REP-56).
+	 */
+	questionPass?: {
+		state: string;
+		changesCode: string | null;
+		why: string | null;
+		skipped: boolean;
+		agent: string;
+		model: string | null;
+		effort: string | null;
+		tokens?: TokenUsage;
+	};
 	summary: string;
 	problems: { problem: string; anchors: { path: string; heading?: string; quote?: string }[] }[];
 	questions: { question: string; notes: string[]; anchors: { path: string; heading?: string; quote?: string }[] }[];
@@ -135,6 +150,39 @@ function sharedStatus(status: CompileStatus): Exclude<CompileStatus, "running"> 
 	return status === "running" ? "failed" : status;
 }
 
+/** The question pass as the shared report keeps it (CMP-99, REP-56). A pass still running counts as failed so far. */
+function sharedQuestionPass(pass: QuestionPassRecord): NonNullable<SharedReport["questionPass"]> {
+	const tokens = readUsage(pass.tokens);
+	return {
+		state: pass.state === "running" ? "failed" : pass.state,
+		changesCode: pass.changesCode ?? null,
+		why: pass.why ?? null,
+		skipped: pass.skipped === true,
+		agent: pass.agent ?? "claude",
+		model: pass.model || null,
+		effort: pass.effort || null,
+		...(tokens ? { tokens } : {}),
+	};
+}
+
+/** The question pass read from a shared report, or undefined when it has none or can't be read. */
+function readQuestionPass(value: unknown): QuestionPassRecord | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const v = value as Record<string, unknown>;
+	const state = (["answered", "failed", "cancelled"] as const).find((s) => s === v.state) ?? "failed";
+	const tokens = readUsage(v.tokens);
+	return {
+		state,
+		...(v.changesCode === "some" || v.changesCode === "none" ? { changesCode: v.changesCode } : {}),
+		...(typeof v.why === "string" ? { why: v.why } : {}),
+		...(v.skipped === true ? { skipped: true } : {}),
+		...(v.agent === "acp" ? { agent: "acp" as const } : {}),
+		model: typeof v.model === "string" ? v.model : "",
+		effort: typeof v.effort === "string" ? v.effort : "",
+		...(tokens ? { tokens } : {}),
+	};
+}
+
 /** One build as the shared report keeps it (REP-45): who built it, when, and each issue's state, branch and pull requests. */
 export function sharedBuild(report: CompileReport, builtBy: Person): SharedBuild | null {
 	const build = report.build;
@@ -179,6 +227,7 @@ export function toSharedReport(report: CompileReport, reports: CompileReport[]):
 		// An older report's single count has no parts, so it isn't shared (REP-56).
 		...(readUsage(report.tokens) ? { tokens: readUsage(report.tokens) } : {}),
 		...(report.issueFailure ? { issueFailure: report.issueFailure } : {}),
+		...(report.questionPass ? { questionPass: sharedQuestionPass(report.questionPass) } : {}),
 		summary: report.summary,
 		problems: report.problems.map((p) => ({ problem: p.text, anchors: anchorsOf(p.anchors) })),
 		questions: report.questions.map((q) => ({ question: q.question, notes: q.notes, anchors: anchorsOf(q.anchors) })),
@@ -736,7 +785,7 @@ export function absorbShared(report: CompileReport, shared: SharedReport, projec
  * `recompileOf` is the earlier report's file, which `listReports` turns into the id this machine knows it by.
  */
 export function fromSharedReport(shared: SharedReport, file: string, projectFolder: string): CompileReport {
-	const status = (["succeeded", "failed", "cancelled", "imported"] as const).find((s) => s === shared.status) ?? "failed";
+	const status = (["succeeded", "failed", "cancelled", "imported", "questions"] as const).find((s) => s === shared.status) ?? "failed";
 	const issues: IssueRecord[] = list(shared.issues).map((i) => ({
 		kind: i.kind === "epic" ? "epic" : "issue",
 		repo: i.repo,
@@ -773,6 +822,7 @@ export function fromSharedReport(shared: SharedReport, file: string, projectFold
 		markerMoved: shared.markerMoved,
 		...(readUsage(shared.tokens) ? { tokens: readUsage(shared.tokens) } : {}),
 		...(shared.issueFailure ? { issueFailure: shared.issueFailure } : {}),
+		...(readQuestionPass(shared.questionPass) ? { questionPass: readQuestionPass(shared.questionPass) } : {}),
 		issues,
 		shared: { file, shortId: shared.id || file.replace(/^.*-([^-/]+)\.json$/, "$1") },
 		fromShared: true,
