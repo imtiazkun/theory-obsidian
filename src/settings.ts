@@ -742,7 +742,7 @@ export class TheorySettingTab extends PluginSettingTab {
 }
 
 /** Asks a yes or no question in a modal. Resolves true only when the engineer clicks `yes`. */
-function confirmChoice(app: App, title: string, question: string, yes: string): Promise<boolean> {
+export function confirmChoice(app: App, title: string, question: string, yes: string): Promise<boolean> {
 	return new Promise((resolve) => new ConfirmModal(app, title, question, yes, resolve).open());
 }
 

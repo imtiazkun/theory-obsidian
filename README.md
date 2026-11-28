@@ -58,6 +58,7 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | --- | --- |
 | Setup vault: turns the vault into a git repo with a `.gitignore`, a starter `Index.md` and `Instructions.md`, the templates in `_templates/`, and an initial commit | Done |
 | Install with a coding agent: `INSTALL.md` and `scripts/install.sh` download and check the latest release, turn the plugin on, and on a first install run Setup vault on the first load | Done |
+| First load after `scripts/install.sh`: turns on only the core plugins theory.md uses (Command palette, File recovery, Files, Graph view, Note composer, Page preview, Quick switcher, Search, Templates and Word count), puts Graph view, Quick switcher, Insert template, Command palette and Repositories at the top of the ribbon, and colours templates grey, index files blue and instructions files green in Graph view, keeping your own colour groups. The command **Use theory.md's core plugins** does the same at any time, after asking | Done |
 | Create missing files: a vault set up by an older version, or missing a starter file, gets only the missing files and `.gitignore` lines from the settings, committed on their own | Done |
 | Templates: a new model folder's `index.md` and `instructions.md` start from `_templates/index.md` and `_templates/instructions.md`, with `{{name}}`, `{{description}}` and `{{purpose}}` filled in | Done |
 | Author: commits are signed with the name and email git uses (the vault's git config, else the global one). The settings show them as plain text, explain how to set what is missing, and can write a name and email saved by an older version into the vault's git config | Done |
@@ -163,7 +164,7 @@ Run the tests with `npm test` (Vitest). Run one file or one test with `npm test 
 
 ## First use
 
-If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email.
+If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are already done, as long as git knows your name and email. That first load also turns off the core plugins theory.md doesn't use (turn any back on in Settings → Core plugins), sets the ribbon order and adds Graph view colour groups for templates, index files and instructions files. It never does this again; run **theory.md: Use theory.md's core plugins** to do it yourself, for example after installing by hand or with BRAT.
 
 1. Make sure git knows your name and email: `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`. Settings → theory.md → Author shows what git signs with.
 2. Run **theory.md: Setup vault** from the command palette.
