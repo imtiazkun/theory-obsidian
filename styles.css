@@ -1269,3 +1269,11 @@ body button.theory-expand-fab[aria-disabled="true"] {
 .theory-report-build-status.is-cancelled {
 	color: var(--text-muted);
 }
+
+/* Pages in a tab leave room at the bottom, so the action bar never covers their last button (UI-45). */
+.theory-create-pr,
+.theory-report,
+.theory-commit-page,
+.theory-repositories {
+	padding-bottom: calc(40px + var(--size-4-4) * 3);
+}
