@@ -9,9 +9,35 @@ import { filesSinceMarker } from "./shared-report";
 import { PullRequestState, gh, ghProblem, githubOrigin, hasOrigin } from "./github";
 import type TheoryPlugin from "./main";
 import { REALIZED_KEY } from "./note-status";
+import type { ProjectRepos } from "./project";
 import { NO_PROMPT_ENV, repoPullState } from "./pull";
 import { type TemplateFields, modelFolderTexts } from "./templates";
 import { commit, git, identityArgs } from "./vault";
+
+/** What the Repositories page says when no project folder is set; it shows Open settings with it (REPO-9). */
+export const NO_PROJECT_FOLDER = "Choose the project folder in theory.md settings first.";
+
+/** What the Repositories page says when the project folder is itself a git repository (REPO-9). */
+export const SINGLE_REPOSITORY =
+	"The project folder is a single repository. Choose a folder that holds repositories side by side to add more.";
+
+/** What the Repositories page says with no repositories (REPO-8). The page has no New repository button (REPO-25). */
+export const NO_REPOSITORIES = "No repositories yet. Run New repository from the command palette to create one.";
+
+/** Why the Repositories page can't show the project folder at all, or null when it can. */
+export function projectFolderProblem(folder: string, found: ProjectRepos): string | null {
+	if (!folder) return NO_PROJECT_FOLDER;
+	if (found.kind === "missing") return `The project folder doesn't exist: ${folder}`;
+	return null;
+}
+
+/**
+ * Why the command "New repository" opens no form, as the notice it shows, or null to open the form (REPO-9,
+ * REPO-14): the page's own text when there is no project folder, or when it is a single repository.
+ */
+export function newRepositoryProblem(folder: string, found: ProjectRepos): string | null {
+	return projectFolderProblem(folder, found) ?? (found.kind === "root" ? SINGLE_REPOSITORY : null);
+}
 
 /** The repository's model folder: the folder at the vault root with exactly its name. */
 export function modelFolder(plugin: TheoryPlugin, name: string): TFolder | null {

@@ -91,7 +91,7 @@ theory.md runs on each engineer's own machine, and a **team shares one model** t
 | Build branches: `theory/{issue}-{short name}` for an issue, `theory/epic-{epic}-{short name}` for an epic, with `-2` when a name is taken | Done |
 | Create PR: once an epic is built, open pull requests for its epic branches with `gh`, with a sparkle to write the body; the report, compile history and Repositories page show their state, refreshed when they open, on the compile history's Refresh and when Obsidian gets focus back | Done |
 | Expand: on a model folder's `index.md`, Claude suggests which notes the model is missing. Create note makes an empty note you write yourself; never committed | Done |
-| Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder; New repository | Done |
+| Repositories page: one card per repository with code, compile, model and remote KPIs; Add model folder. The command **New repository** creates a repository with its model folder | Done |
 | Pull: the vault and the code repositories pull by themselves, fast-forward only, on launch, on focus, on a timer and before every compile; a sync status beside the commit button with a menu for when it last checked and pulled, and Pull now; the vault's remote set in the settings | Done |
 | Model folders: one folder per repository with its own `index.md` and `instructions.md` (sent to Claude), shown in bold in the file explorer | Done |
 | Model folder icon: in the file explorer, each folder named exactly like a repository in the project folder shows the history icon left of its name | Done |
@@ -172,7 +172,7 @@ If a coding agent or `scripts/install.sh` installed theory.md, steps 1 and 2 are
 3. In Settings → theory.md → Vault, click **Browse…** next to **Project folder** and pick the folder holding the code. It can be one repository, or a folder with several repositories side by side (a whole ecosystem). theory.md lists the git repositories it finds, or warns when there are none. Then, under Compile, add the commands Claude may run to **Allowed commands**, for example `Bash(npm run *)`.
 4. Setup vault creates `Index.md` ("Manifesting <vault name>"), `Instructions.md` (the human-only rules and the doctrine), and the templates `_templates/index.md` and `_templates/instructions.md`, each unless the vault already has it. `Instructions.md` is for humans; Compile doesn't send it to Claude. When the new vault has Obsidian's `Welcome.md`, Setup replaces it with `_welcome.md`, which says where to start, and opens it. Delete it once read; notes whose name starts with `_` are never sent to Claude. Edit the templates to change how new model folders start. When a vault is missing any of these, the settings offer Create missing files.
 5. Edit a note and click the commit button in its header.
-6. Click **Compile** at the bottom right of the editor. The button shows how many revisions are waiting, and turns accent-coloured when there's something to compile. You can also use the hammer in the ribbon or **theory.md: Compile** in the command palette. The compile report opens in a new tab.
+6. Click **Compile** at the bottom right of the editor. The button shows how many revisions are waiting, and turns accent-coloured when there's something to compile. You can also run **theory.md: Compile** from the command palette. The compile report opens in a new tab.
 
 ### Compile settings
 
