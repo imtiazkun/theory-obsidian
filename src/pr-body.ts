@@ -8,8 +8,8 @@ export interface PullRequestBodyOptions {
 	model: CompileModel;
 	effort: CompileEffort;
 	report: CompileReport;
-	/** The repositories the body is for: one for a repository's own body, all of them for the shared body. */
-	repos: string[];
+	/** The repository the body is for. Each pull request gets its own body (REP-26, REP-28). */
+	repo: string;
 	/** True when the project folder has several repositories, so changes start with "[repo]". */
 	several: boolean;
 }
@@ -19,15 +19,15 @@ export interface PullRequestBodyRun {
 	cancel(): void;
 }
 
-/** The changes for these repositories. With one repository, every change is about it. */
-function changesFor(report: CompileReport, repos: string[], several: boolean): string[] {
+/** The changes for this repository only (REP-28). With one repository, every change is about it. */
+export function changesFor(report: CompileReport, repo: string, several: boolean): string[] {
 	if (!several) return report.changes;
-	return report.changes.filter((change) => repos.some((repo) => change.startsWith(`[${repo}]`)));
+	return report.changes.filter((change) => change.startsWith(`[${repo}]`));
 }
 
 /** Everything Claude gets: the compile's summary, revisions, open problems and questions, and the changes. */
 function buildPrompt(options: PullRequestBodyOptions): string {
-	const { report, repos, several } = options;
+	const { report, repo, several } = options;
 	const list = (items: string[]) => (items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "(none)");
 	return `Write the body of a GitHub pull request for code changes that a compile made from a theoretical model: notes, written by humans, that describe a software system.
 
@@ -38,9 +38,9 @@ Rules:
 - Say what changed and why, drawn only from what is below. Don't invent anything.
 - Mention open problems and questions so a reviewer knows what is unfinished.
 
-## Repositories
+## Repository
 
-${list(repos)}
+${repo}
 
 ## Compile summary
 
@@ -52,7 +52,7 @@ ${list(report.revisions.map((r) => `${r.hash.slice(0, 7)} ${r.subject} (${r.auth
 
 ## Changes to the code
 
-${list(changesFor(report, repos, several))}
+${list(changesFor(report, repo, several))}
 
 ## Problems still open
 

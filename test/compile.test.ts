@@ -1574,3 +1574,30 @@ describe("the shared report of a compile (REP-46, CMP-22, CMP-90)", () => {
 		expect(await markerCommit(s.vault)).toBe(answered);
 	});
 });
+
+describe("a compile's tokens (REP-56)", () => {
+	it("keeps the tokens in four parts with the model that ran, in the report and in its shared file", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{
+				answer: answer({ issues: [issue("api", "one")] }),
+				model: "claude-opus-5-5",
+				usage: { input_tokens: 1200, output_tokens: 340, cache_creation_input_tokens: 5000, cache_read_input_tokens: 90000 },
+			},
+		]);
+		const report = await compile(s.options());
+		expect(report.status).toBe("succeeded");
+		const parts = { input: 1200, output: 340, cacheWrites: 5000, cacheReads: 90000, model: "claude-opus-5-5" };
+		expect(report.tokens).toEqual(parts);
+		// Teammates see the cost too (UI-16), so the parts are shared.
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`])).tokens).toEqual(parts);
+	});
+
+	it("keeps no tokens when Claude Code reports none, so the report says Not reported", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ answer: answer({ issues: [issue("api", "one")] }), usage: null }]);
+		const report = await compile(s.options());
+		expect(report.tokens).toBeUndefined();
+		expect(JSON.parse(await out(s.vault, ["show", `HEAD:${report.shared!.file}`]))).not.toHaveProperty("tokens");
+	});
+});

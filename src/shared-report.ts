@@ -6,6 +6,7 @@ import { join } from "path";
 import type { BuildRecord, BuildStatus, EpicBranch } from "./build";
 import type { CompileReport, CompileStatus } from "./compile";
 import type { CodeRead } from "./code-snapshot";
+import { type TokenUsage, readUsage } from "./costs";
 import type { PullRequest } from "./github";
 import type { BuildState, IssueRecord } from "./plan";
 import { NO_PROMPT_ENV, type VaultPull } from "./pull";
@@ -38,6 +39,8 @@ export interface SharedBuild {
 	finishedAt: string | null;
 	status: string;
 	issues: { repo: string; number: number; state: string; branch: string | null; pullRequests: string[] }[];
+	/** The build's tokens in four parts, with the model that ran (REP-56). Absent when the agent reported none. */
+	tokens?: TokenUsage;
 }
 
 /** The file in `.compiles/` (REP-45). Times are UTC in ISO 8601, revisions as full hashes. */
@@ -54,6 +57,11 @@ export interface SharedReport {
 	to: string;
 	markerMoved: boolean;
 	status: Exclude<CompileStatus, "running">;
+	/**
+	 * The compile's tokens in four parts, with the model that ran (REP-56), so teammates see its cost too (UI-16).
+	 * Absent when the agent reported none, and in files written before REP-56.
+	 */
+	tokens?: TokenUsage;
 	/** Set while creating an issue failed and the compile waits for Retry or Discard (CMP-68). */
 	issueFailure?: string;
 	summary: string;
@@ -145,6 +153,7 @@ export function sharedBuild(report: CompileReport, builtBy: Person): SharedBuild
 				branch: i.branch ?? null,
 				pullRequests: (report.pullRequests ?? []).filter((pr) => pr.repo === i.repo && i.branch && pr.branch === i.branch).map((pr) => pr.url),
 			})),
+		...(build.tokens ? { tokens: build.tokens } : {}),
 	};
 }
 
@@ -167,6 +176,8 @@ export function toSharedReport(report: CompileReport, reports: CompileReport[]):
 		to: report.toCommit,
 		markerMoved: report.markerMoved === true,
 		status: sharedStatus(report.status),
+		// An older report's single count has no parts, so it isn't shared (REP-56).
+		...(readUsage(report.tokens) ? { tokens: readUsage(report.tokens) } : {}),
 		...(report.issueFailure ? { issueFailure: report.issueFailure } : {}),
 		summary: report.summary,
 		problems: report.problems.map((p) => ({ problem: p.text, anchors: anchorsOf(p.anchors) })),
@@ -353,8 +364,9 @@ async function changedPaths(vaultPath: string, paths: string[]): Promise<boolean
 
 /**
  * Writes the report's file (and for a moment that ends a compile, its Activity log, once) and commits only those,
- * signed by the engineer, then pushes (REP-46, CMT-31). A file in `.compiles/` that can't be read is never
- * overwritten (REP-52). When the commit or the push fails, the report stays in the data file and the next commit of
+ * signed by the engineer, then pushes (REP-46, CMT-31). Writing the file is what moves the marker (CMP-22, REP-49):
+ * the commit and push only share the move. A file in `.compiles/` that can't be read is never overwritten (REP-52).
+ * When the commit or the push fails, the file stays written, the report is marked `notShared`, and the next commit of
  * it carries the change (REP-48). Never throws.
  */
 export async function shareReport(ctx: ShareContext, report: CompileReport, moment: ShareMoment): Promise<ShareResult> {
@@ -495,13 +507,28 @@ export async function committedSharedReports(vaultPath: string): Promise<Map<str
 }
 
 /**
- * The last compile marker. With Share compile reports on (REP-49, CMP-90): the `to` of the committed shared report
- * with `markerMoved: true` whose `to` comes last in the vault's history, never the tag. With it off (CFG-44): the
- * local tag `theory/compiled`, as before shared reports. Null when nothing moved it yet.
+ * The last compile marker. With Share compile reports on (REP-49, CMP-90): the `to` of the shared report in
+ * `.compiles/`, committed or not, with `markerMoved: true` whose `to` comes last in the vault's history, never the
+ * tag. The marker moves when the report is written (CMP-22), so a failed commit or push never makes the same revisions
+ * be planned twice (REP-48). With it off (CFG-44): the local tag `theory/compiled`, as before shared reports. Null
+ * when nothing moved it yet.
  */
 export async function markerCommit(vaultPath: string, sharing = true): Promise<string | null> {
 	if (!sharing) return tagMarker(vaultPath);
-	return (await markerOf(vaultPath, await committedSharedReports(vaultPath), "HEAD"))?.to ?? null;
+	return (await markerOf(vaultPath, await writtenSharedReports(vaultPath), "HEAD"))?.to ?? null;
+}
+
+/**
+ * The shared reports written in `.compiles/`, committed or not, by file (REP-49). A file that can't be read never
+ * counts (REP-52). A committed report deleted from the working tree still counts, so deleting a file never moves the
+ * marker back.
+ */
+export async function writtenSharedReports(vaultPath: string): Promise<Map<string, SharedReport>> {
+	const found = new Map<string, SharedReport>();
+	for (const f of await readSharedFolder(vaultPath).catch(() => [] as SharedFile[])) if (f.kind === "ok") found.set(f.file, f.report);
+	const committed = await committedSharedReports(vaultPath).catch(() => new Map<string, SharedReport>());
+	for (const [file, report] of committed) if (!found.has(file) && !existsSync(join(vaultPath, file))) found.set(file, report);
+	return found;
 }
 
 /** The local tag that is the marker while Share compile reports is off (CFG-44). It is never pushed (CMT-32). */
@@ -744,6 +771,7 @@ export function fromSharedReport(shared: SharedReport, file: string, projectFold
 		model: shared.model ?? "",
 		effort: shared.effort ?? "",
 		markerMoved: shared.markerMoved,
+		...(readUsage(shared.tokens) ? { tokens: readUsage(shared.tokens) } : {}),
 		...(shared.issueFailure ? { issueFailure: shared.issueFailure } : {}),
 		issues,
 		shared: { file, shortId: shared.id || file.replace(/^.*-([^-/]+)\.json$/, "$1") },

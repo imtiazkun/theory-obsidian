@@ -1,5 +1,6 @@
 import { resolveTask } from "./agent-rows";
 import { codeSourceText } from "./code-snapshot";
+import { reportCostPieces, reportCosts } from "./costs";
 import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type { Anchor } from "./anchor";
 import {
@@ -229,6 +230,13 @@ export class CompileReportView extends ItemView {
 		contentEl.createDiv({
 			cls: "theory-report-meta theory-report-origin",
 			text: onlyHere ? ONLY_HERE : report.author ? `Compiled by ${report.author}` : "Shared in .compiles/",
+		});
+		// REP-57: estimated costs in US dollars; hovering one shows its four token parts.
+		const cost = contentEl.createDiv({ cls: "theory-report-meta theory-report-cost" });
+		cost.createSpan({ text: "Estimated cost: " });
+		reportCostPieces(reportCosts(report, this.plugin.settings.modelPrices)).forEach((piece, i) => {
+			if (i > 0) cost.createSpan({ text: " · " });
+			cost.createSpan({ cls: "theory-cost", text: `${piece.label} ${piece.text}`, attr: { title: piece.title } });
 		});
 		// CMP-91: a teammate compiled the same revisions at the same time. The engineers decide which plan to build.
 		if (report.compiledMeanwhile) {

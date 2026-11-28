@@ -13,7 +13,6 @@ import {
 	epicBranchName,
 	epicPullRequestBody,
 	issueRef,
-	sharedEpicPullRequestBody,
 	interruptedBuild,
 	issueBranchName,
 	openBuildBranch,
@@ -344,17 +343,15 @@ describe("referring to issues across repositories (BLD-16, BLD-26, REP-27)", () 
 		);
 	});
 
-	it("gives the epic's repository, another repository and the shared Body their default bodies", async () => {
+	it("gives the epic's repository and another repository their default bodies", async () => {
 		const s = await setup();
 		const report = await planned(s, [{ repo: "web", shortName: "a" }, { repo: "api", shortName: "b" }], true);
 		const epic = report.issues?.find((i) => i.kind === "epic");
 		expect([epic?.repo, epic?.number]).toEqual(["api", 1]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// Not the local folder name when the epic's GitHub name is unknown.
 		expect(epicPullRequestBody(report, "team/web", null)).toBe(`Part of ${epic?.url}`);
-		expect(sharedEpicPullRequestBody(report, null)).toBe(`Part of ${epic?.url}`);
 	});
 
 	it("decides the sub-issue's 'Part of' by GitHub name, not by local folder", async () => {
@@ -391,7 +388,6 @@ describe("the epic's pull requests and open branches (REP-25, REP-27, REPO)", ()
 		]);
 		expect(epicPullRequestBody(report, "team/api", "team/api")).toBe("Closes #1");
 		expect(epicPullRequestBody(report, "team/web", "team/api")).toBe("Part of team/api#1");
-		expect(sharedEpicPullRequestBody(report, "team/api")).toBe("Part of team/api#1");
 		// A single issue's pull request comes from the build itself.
 		const single = { ...(await planned(s, [{ repo: "api", shortName: "c" }])), id: "2" };
 		single.build = { status: "finished", startedAt: "" };
@@ -766,5 +762,52 @@ describe("a build after Obsidian closed, and which compile Build builds (BLD-1, 
 		]);
 		// The issue the recompile closed was never built.
 		expect((await branches(s.web.repo)).filter((b) => b.includes("two"))).toEqual([]);
+	});
+});
+
+describe("a build's tokens (REP-56)", () => {
+	const usage = { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 300, cache_read_input_tokens: 4000 };
+
+	it("adds up every issue's tokens on the build's record, kept apart from the compile's, and shares them with the build", async () => {
+		const s = await setup();
+		s.claude.setSteps([
+			{ commit: "one.txt", answer: built(), model: "claude-sonnet-5-5", usage },
+			{ commit: "two.txt", answer: built(), model: "claude-sonnet-5-5", usage },
+		]);
+		const report = await planned(s, [
+			{ repo: "api", shortName: "one" },
+			{ repo: "web", shortName: "two" },
+		]);
+		report.tokens = { input: 5, output: 6, cacheWrites: 7, cacheReads: 8, model: "claude-opus-5-5" };
+		await build(s, report);
+
+		expect(report.build?.status).toBe("finished");
+		expect(report.build?.tokens).toEqual({ input: 200, output: 40, cacheWrites: 600, cacheReads: 8000, model: "claude-sonnet-5-5" });
+		// Before, a build's tokens were added to the compile's count.
+		expect(report.tokens).toEqual({ input: 5, output: 6, cacheWrites: 7, cacheReads: 8, model: "claude-opus-5-5" });
+		expect(sharedBuild(report, { name: "Ana", email: "ana@example.com" })?.tokens).toEqual(report.build?.tokens);
+	});
+
+	it("counts only its own tokens when it continues a build of the same compile (BLD-27)", async () => {
+		const s = await setup();
+		s.claude.setSteps([{ commit: "one.txt", answer: built(), model: "claude-sonnet-5-5", usage }]);
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		const earlier = { status: "stopped" as const, startedAt: "2026-11-27T09:00:00.000Z", tokens: { input: 9, output: 9, cacheWrites: 9, cacheReads: 9 } };
+		report.build = { ...earlier };
+		report.builds = [{ ...sharedBuild(report, { name: "Ana", email: "ana@example.com" })!, tokens: earlier.tokens }];
+		await build(s, report);
+		expect(report.build?.tokens).toEqual({ input: 100, output: 20, cacheWrites: 300, cacheReads: 4000, model: "claude-sonnet-5-5" });
+		expect(report.builds[0].tokens).toEqual(earlier.tokens);
+	});
+});
+
+describe("a pull request body's changes (REP-28)", () => {
+	it("are only that repository's, never another's", async () => {
+		const { changesFor } = await import("../src/pr-body");
+		const report = { changes: ["[web] Add the login page", "[api] Add the login route", "[web] Style it"] } as CompileReport;
+		expect(changesFor(report, "web", true)).toEqual(["[web] Add the login page", "[web] Style it"]);
+		expect(changesFor(report, "api", true)).toEqual(["[api] Add the login route"]);
+		// With one repository, every change is about it.
+		expect(changesFor(report, "web", false)).toEqual(report.changes);
 	});
 });

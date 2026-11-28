@@ -1,7 +1,16 @@
 import { chmodSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { SAME, TASKS, defaultTaskRows, resolveTask, savedTaskRows, taskAgentSettings } from "../src/agent-rows";
+import {
+	SAME,
+	TASKS,
+	claudeCodeOnlyWrites,
+	defaultTaskRows,
+	resolveTask,
+	savedAskQuestionsFirst,
+	savedTaskRows,
+	taskAgentSettings,
+} from "../src/agent-rows";
 import { generateCommitMessage } from "../src/commit-message";
 import { initRepo, tempFolder, write } from "./helpers";
 
@@ -128,6 +137,59 @@ describe("task rows: Expand and Writing (CFG-43, AGT-2)", () => {
 		const rows = savedTaskRows({ tasks: { expand: { agent: "acp", agentCommand: "x", model: "haiku" } } });
 		expect(rows.expand).toEqual({ model: "haiku", effort: SAME });
 		expect(resolveTask(rows, "expand").agent).toBe("claude");
+	});
+});
+
+describe("task rows: Check, the question pass (CFG-41, CFG-43, CFG-46)", () => {
+	it("is a row of its own, between Compile and Build", () => {
+		expect(TASKS).toEqual(["compile", "check", "build", "expand", "writing"]);
+	});
+
+	it("defaults to Same as Compile, also in data saved before it existed", () => {
+		expect(defaultTaskRows().check).toMatchObject({ agent: SAME, model: SAME, effort: SAME });
+		expect(savedTaskRows(OLD_DATA).check).toMatchObject({ agent: SAME, model: SAME, effort: SAME });
+		const saved = JSON.parse(JSON.stringify({ tasks: { ...defaultTaskRows(), check: undefined } }));
+		expect(savedTaskRows(saved).check).toEqual(defaultTaskRows().check);
+		expect(resolveTask(savedTaskRows(OLD_DATA), "check")).toEqual(savedTaskRows(OLD_DATA).compile);
+	});
+
+	it("may use an ACP agent like Compile and Build, kept apart from Build's", () => {
+		const rows = defaultTaskRows();
+		rows.check = { agent: "acp", agentCommand: "gemini --experimental-acp", agentModel: "flash", agentThinkingLevel: "low", model: SAME, effort: SAME };
+		expect(resolveTask(rows, "check")).toMatchObject({ agent: "acp", agentCommand: "gemini --experimental-acp", agentModel: "flash" });
+		expect(resolveTask(rows, "build").agent).toBe("claude");
+		const saved = savedTaskRows({ tasks: JSON.parse(JSON.stringify(rows)) });
+		expect(saved.check).toEqual(rows.check);
+		const settings = { tasks: rows, claudeCommand: "claude", permissionMode: "acceptEdits" as const, allowedTools: "" };
+		expect(taskAgentSettings(settings, "check")).toMatchObject({ agent: "acp", agentCommand: "gemini --experimental-acp", claudeCommand: "claude" });
+	});
+
+	it("may choose its own Claude Code model and effort, following Compile's field by field", () => {
+		const rows = defaultTaskRows();
+		rows.compile.effort = "high";
+		rows.check = { agent: "claude", agentCommand: "", agentModel: "", agentThinkingLevel: "", model: "haiku", effort: SAME };
+		expect(resolveTask(rows, "check")).toMatchObject({ agent: "claude", model: "haiku", effort: "high" });
+	});
+
+	it("keeps the Claude Code command for more than Expand and Writing while Check runs Claude Code (AGT-27)", () => {
+		const rows = defaultTaskRows();
+		expect(claudeCodeOnlyWrites(rows)).toBe(false);
+		rows.compile.agent = "acp";
+		expect(claudeCodeOnlyWrites(rows)).toBe(true);
+		rows.check.agent = "claude";
+		expect(claudeCodeOnlyWrites(rows)).toBe(false);
+		rows.check.agent = SAME;
+		expect(claudeCodeOnlyWrites(rows)).toBe(true);
+		rows.build.agent = "claude";
+		expect(claudeCodeOnlyWrites(rows)).toBe(false);
+	});
+});
+
+describe("Ask questions first (CFG-47)", () => {
+	it("is on by default, also in data saved before it existed, and stays off once turned off", () => {
+		expect(savedAskQuestionsFirst(undefined)).toBe(true);
+		expect(savedAskQuestionsFirst(true)).toBe(true);
+		expect(savedAskQuestionsFirst(false)).toBe(false);
 	});
 });
 

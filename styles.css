@@ -1277,3 +1277,30 @@ body button.theory-expand-fab[aria-disabled="true"] {
 .theory-repositories {
 	padding-bottom: calc(40px + var(--size-4-4) * 3);
 }
+
+/* An estimated cost: hovering it shows its four token parts (REP-57, UI-16). */
+.theory-cost {
+	cursor: help;
+	text-decoration: underline dotted;
+	text-underline-offset: 2px;
+}
+
+/* Model prices in the settings (CFG-48): a model name, then four narrow price fields. */
+.theory-model-price .setting-item-control {
+	flex-wrap: wrap;
+	justify-content: flex-start;
+}
+
+.theory-model-price .theory-model-price-number {
+	width: 7em;
+}
+
+.theory-model-price input.theory-invalid {
+	border-color: var(--text-error);
+}
+
+.theory-built-in-prices {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	padding-bottom: var(--size-4-3);
+}
