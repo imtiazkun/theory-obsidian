@@ -254,6 +254,15 @@ function projectOf(url: string): ProjectRef {
 	return project;
 }
 
+/**
+ * Whether `gh project item-add` failed only because the item is already in the project. A project's
+ * "Auto-add sub-issues" workflow adds a sub-issue as soon as it's linked to an epic, so the issue may be there
+ * before the plugin adds it (CMP-66).
+ */
+export function alreadyInProject(message: string): boolean {
+	return /content already exists in this project/i.test(message);
+}
+
 /** The GitHub the plugin uses: every call runs `gh`. */
 export const ghGitHub: GitHub = {
 	async authProblem(cwd) {
@@ -310,7 +319,13 @@ export const ghGitHub: GitHub = {
 	},
 	async addToProject(projectUrl, issueUrl, cwd) {
 		const { owner, number } = projectOf(projectUrl);
-		await gh(cwd, ["project", "item-add", String(number), "--owner", owner, "--url", issueUrl]);
+		try {
+			await gh(cwd, ["project", "item-add", String(number), "--owner", owner, "--url", issueUrl]);
+		} catch (error) {
+			// Already in the project is what this call wants, so it isn't a failure.
+			if (error instanceof Error && alreadyInProject(error.message)) return;
+			throw error;
+		}
 	},
 	async closeIssue(repoPath, number, reason) {
 		await gh(repoPath, ["issue", "close", String(number), "--reason", reason]);

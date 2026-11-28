@@ -78,3 +78,27 @@ describe("a pull request already on GitHub (REP-58)", () => {
 		expect(await existingPullRequest(repo, "theory/epic-41-signup")).toBeNull();
 	});
 });
+
+/** Puts a fake `gh` first on PATH that prints `stderr` and exits with 1, like a refused GraphQL call. */
+function failingGh(stderr: string) {
+	const bin = tempFolder();
+	writeFileSync(join(bin, "gh"), `#!/bin/sh\necho '${stderr}' >&2\nexit 1\n`);
+	chmodSync(join(bin, "gh"), 0o755);
+	process.env.PATH = `${bin}:${originalPath}`;
+}
+
+describe("adding an issue to the GitHub Project (CMP-66)", () => {
+	const project = "https://github.com/users/ana/projects/6";
+	const issue = "https://github.com/ana/app/issues/40";
+
+	it("counts an issue the project already has as added", async () => {
+		// A project's "Auto-add sub-issues" workflow adds a sub-issue as soon as it's linked to its epic.
+		failingGh("GraphQL: Content already exists in this project (addProjectV2ItemById)");
+		await expect(ghGitHub.addToProject(project, issue, tempFolder())).resolves.toBeUndefined();
+	});
+
+	it("still fails for any other reason", async () => {
+		failingGh("GraphQL: Resource not accessible by integration (addProjectV2ItemById)");
+		await expect(ghGitHub.addToProject(project, issue, tempFolder())).rejects.toThrow("Resource not accessible");
+	});
+});
