@@ -388,6 +388,31 @@ export function issueBody(record: IssueRecord, revisions: Revision[]): string {
 	return parts.filter(Boolean).join("\n\n");
 }
 
+/**
+ * Claude's body back from an issue's body on GitHub (CMP-67): without the rules and the revisions the plugin added.
+ * A shared report doesn't hold the body, so a build or recompile of another engineer's compile reads it here (REP-50).
+ */
+export function plannedBody(githubBody: string): string {
+	let body = githubBody.replace(/\r\n/g, "\n");
+	const footer = body.lastIndexOf("\n---\nPlanned by theory.md from these revisions of the model:");
+	if (footer >= 0) body = body.slice(0, footer);
+	else if (body.startsWith("---\nPlanned by theory.md from these revisions of the model:")) body = "";
+	body = body.trimEnd().replace(/(^|\n\n)Rules: [^\n]*$/, "");
+	return body.trim();
+}
+
+/** Fills in the bodies a shared report left empty (REP-50), from GitHub. Throws with the issue when GitHub can't answer. */
+export async function fillIssueBodies(github: GitHub, records: IssueRecord[]): Promise<void> {
+	for (const record of records) {
+		if (record.body || record.number === undefined) continue;
+		try {
+			record.body = plannedBody(await github.issueBody(record.repoPath, record.number));
+		} catch (error) {
+			throw new Error(`Couldn't read ${record.repo}#${record.number} on GitHub: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+}
+
 export const EPIC_LABEL = "epic";
 
 /**

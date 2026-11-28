@@ -227,6 +227,8 @@ export interface GitHub {
 	commentIssue(repoPath: string, number: number, body: string): Promise<void>;
 	closeIssue(repoPath: string, number: number, reason: "completed" | "not planned"): Promise<void>;
 	issueState(repoPath: string, number: number): Promise<"open" | "closed">;
+	/** The issue's body on GitHub. */
+	issueBody(repoPath: string, number: number): Promise<string>;
 	/** Opens a pull request for a branch already pushed. Returns its web address. */
 	openPullRequest(repoPath: string, pr: { head: string; base: string; title: string; body: string }): Promise<string>;
 	/** Merges the pull request with a merge commit. */
@@ -304,6 +306,10 @@ export const ghGitHub: GitHub = {
 	async issueState(repoPath, number) {
 		const { stdout } = await gh(repoPath, ["issue", "view", String(number), "--json", "state"]);
 		return JSON.parse(stdout).state === "OPEN" ? "open" : "closed";
+	},
+	async issueBody(repoPath, number) {
+		const { stdout } = await gh(repoPath, ["issue", "view", String(number), "--json", "body"]);
+		return String(JSON.parse(stdout).body ?? "");
 	},
 	async openPullRequest(repoPath, pr) {
 		const { stdout } = await gh(repoPath, ["pr", "create", "--head", pr.head, "--base", pr.base, "--title", pr.title, "--body", pr.body]);

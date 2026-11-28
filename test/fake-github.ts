@@ -165,6 +165,11 @@ export class FakeGitHub implements GitHub {
 		return this.issue(this.repo(repoPath), number).state;
 	}
 
+	async issueBody(repoPath: string, number: number) {
+		this.call("issueBody", `${this.repo(repoPath)}#${number}`);
+		return this.issue(this.repo(repoPath), number).body;
+	}
+
 	async openPullRequest(repoPath: string, pr: { head: string; base: string; title: string; body: string }) {
 		const repo = this.repo(repoPath);
 		this.call("openPullRequest", `${repo} ${pr.head} -> ${pr.base}`);

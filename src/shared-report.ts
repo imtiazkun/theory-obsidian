@@ -3,8 +3,12 @@ import { existsSync } from "fs";
 import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import type { BuildRecord, BuildStatus, EpicBranch } from "./build";
 import type { CompileReport, CompileStatus } from "./compile";
 import type { CodeRead } from "./code-snapshot";
+import type { PullRequest } from "./github";
+import type { BuildState, IssueRecord } from "./plan";
+import { NO_PROMPT_ENV, type VaultPull } from "./pull";
 import { PUSH_REJECTED, type PushResult } from "./push";
 import { recompiledBy } from "./recompile";
 import { commit, git } from "./vault";
@@ -179,8 +183,9 @@ export function toSharedReport(report: CompileReport, reports: CompileReport[]):
 			url: i.url ?? null,
 			continues: i.continued && i.number !== undefined ? i.number : null,
 		})),
-		recompileOf: earlier?.shared?.file ?? null,
-		recompiledBy: newer?.shared?.file ?? null,
+		// A link read from the file stays when this machine doesn't list the other report (REP-50).
+		recompileOf: earlier?.shared?.file ?? report.sharedLinks?.recompileOf ?? null,
+		recompiledBy: newer?.shared?.file ?? report.sharedLinks?.recompiledBy ?? null,
 		builds: report.builds ?? [],
 		pullRequests: (report.pullRequests ?? []).map((pr) => ({ repo: pr.repo, branch: pr.branch, base: pr.base, url: pr.url })),
 	};
@@ -305,13 +310,31 @@ export interface ShareContext {
 	logPaths?: LogPaths;
 	/** Pushes the vault's `main` as every commit does (CMT-30, CMT-31). */
 	push: () => Promise<PushResult>;
+	/**
+	 * Pulls the vault before writing to a report that is shared already (REP-50, PULL-7). Resolves to null when no
+	 * pull ran, for example during a compile (PULL-4). Unset means no pull.
+	 */
+	pull?: () => Promise<VaultPull | null>;
+	/** The project folder, for the repository paths of what a teammate added. Defaults to the one in `logPaths`. */
+	projectFolder?: string;
 }
 
 /**
  * How a share ended. `not-shared` is why the report stays only in the data file (REP-48). `local` is a report that
  * was never shared, like one from before shared reports: it stays only on this machine, and nothing is written.
  */
-export type ShareResult = { kind: "shared"; hash: string | null } | { kind: "not-shared"; reason: string } | { kind: "local" };
+export type ShareResult =
+	| { kind: "shared"; hash: string | null }
+	| { kind: "not-shared"; reason: string }
+	/** Nothing was written: the report changed on the remote and the vault can't fast-forward (REP-50). */
+	| { kind: "refused"; reason: string }
+	| { kind: "local" };
+
+/** What REP-50 says when a shared report changed on the remote and the vault can't fast-forward. */
+export const SOMEONE_ELSE_CHANGED = "Someone else changed this compile. Pull with rebase in git, then try again.";
+
+/** What the report says when a teammate compiled the same revisions at the same time (CMP-91). */
+export const COMPILED_MEANWHILE = "Someone else compiled these revisions while you did. Check both reports before you build.";
 
 /** The notice when a report couldn't be shared (REP-48). */
 export function notSharedNotice(reason: string): string {
@@ -338,7 +361,7 @@ export async function shareReport(ctx: ShareContext, report: CompileReport, mome
 	const reports = moment === "recompile" ? [report, ...relatedReports(report, ctx.reports)] : [report];
 	for (const r of reports) {
 		if (result.kind === "shared") delete r.notShared;
-		else if (result.kind === "not-shared") r.notShared = result.reason;
+		else if (result.kind === "not-shared" || result.kind === "refused") r.notShared = result.reason;
 	}
 	return result;
 }
@@ -356,8 +379,23 @@ async function shareReports(ctx: ShareContext, report: CompileReport, moment: Sh
 	const { vaultPath } = ctx;
 	const all = ctx.reports.includes(report) ? ctx.reports : [report, ...ctx.reports];
 	const writes: { file: string; text: string; once?: boolean }[] = [];
+	const reports = moment === "recompile" ? [report, ...relatedReports(report, all)] : [report];
+	// REP-50: a report shared already may have changed on another machine. Pull first, never write over what the vault
+	// can't fast-forward to, and take in what a teammate added, so their build or pull requests aren't lost.
+	const existing = reports.filter((r) => r.shared);
+	if (existing.length > 0) {
+		const files = existing.map((r) => sharedPlace(r).file);
+		const pulled = ctx.pull ? await ctx.pull().catch(() => null) : null;
+		if ((pulled?.kind === "diverged" || pulled?.kind === "waiting") && (await changedOnRemote(vaultPath, files))) {
+			return { kind: "refused", reason: SOMEONE_ELSE_CHANGED };
+		}
+		const projectFolder = ctx.projectFolder ?? ctx.logPaths?.projectFolder ?? "";
+		for (const r of existing) {
+			const read = await readSharedReportFile(vaultPath, sharedPlace(r).file).catch((): ReadShared => ({ kind: "broken" }));
+			if (read.kind === "ok") absorbShared(r, read.report, projectFolder);
+		}
+	}
 	try {
-		const reports = moment === "recompile" ? [report, ...relatedReports(report, all)] : [report];
 		for (const r of reports) {
 			const place = sharedPlace(r);
 			writes.push({ file: place.file, text: formatSharedReport(toSharedReport(r, all)) });
@@ -392,7 +430,15 @@ async function shareReports(ctx: ShareContext, report: CompileReport, moment: Sh
 		return { kind: "not-shared", reason: errorText(error) };
 	}
 	const push = await ctx.push().catch((error): PushResult => ({ kind: "failed", message: errorText(error) }));
-	if (push.kind === "rejected") return { kind: "not-shared", reason: `Couldn't push: ${PUSH_REJECTED}` };
+	if (push.kind === "rejected") {
+		// CMP-91: the remote moved while this compile ran. When a teammate's compile moved the marker past this one's
+		// `from`, both plans cover the same revisions, and the engineers must decide. The compile keeps its issues.
+		if (moment === "compile" || moment === "update" || moment === "recompile") {
+			const other = await compiledMeanwhile(vaultPath, report).catch(() => null);
+			if (other) report.compiledMeanwhile = other;
+		}
+		return { kind: "not-shared", reason: `Couldn't push: ${PUSH_REJECTED}` };
+	}
 	if (push.kind === "failed") return { kind: "not-shared", reason: `Couldn't push: ${push.message}` };
 	return { kind: "shared", hash };
 }
@@ -434,13 +480,62 @@ export async function committedSharedReports(vaultPath: string): Promise<Map<str
  * `to` comes last in the vault's history. Never a tag. Null when no shared report moved it.
  */
 export async function markerCommit(vaultPath: string): Promise<string | null> {
-	const reports = await committedSharedReports(vaultPath);
-	const candidates = new Set<string>();
-	for (const report of reports.values()) if (report.markerMoved && /^[0-9a-f]{40}$/.test(report.to)) candidates.add(report.to);
+	return (await markerOf(vaultPath, await committedSharedReports(vaultPath), "HEAD"))?.to ?? null;
+}
+
+/** The report among `reports` that sets the marker at `rev` (REP-49): markerMoved, and its `to` last in `rev`'s history. */
+async function markerOf(vaultPath: string, reports: Map<string, SharedReport>, rev: string): Promise<{ file: string; to: string } | null> {
+	const candidates = new Map<string, string>();
+	for (const [file, report] of reports) if (report.markerMoved && /^[0-9a-f]{40}$/.test(report.to)) candidates.set(report.to, file);
 	if (candidates.size === 0) return null;
-	const { stdout } = await git(vaultPath, ["rev-list", "--topo-order", "HEAD"]).catch(() => ({ stdout: "" }));
-	for (const hash of stdout.split("\n")) if (candidates.has(hash)) return hash;
+	const { stdout } = await git(vaultPath, ["rev-list", "--topo-order", rev]).catch(() => ({ stdout: "" }));
+	for (const hash of stdout.split("\n")) {
+		const file = candidates.get(hash);
+		if (file) return { file, to: hash };
+	}
 	return null;
+}
+
+const REMOTE_MAIN = "refs/remotes/origin/main";
+
+/** The shared reports in `.compiles/` at a revision, like `origin/main`, by file. Files that can't be read are left out (REP-52). */
+async function sharedReportsAt(vaultPath: string, rev: string): Promise<Map<string, SharedReport>> {
+	const found = new Map<string, SharedReport>();
+	const { stdout } = await git(vaultPath, ["ls-tree", "-z", "--name-only", rev, `${COMPILES_FOLDER}/`]).catch(() => ({ stdout: "" }));
+	for (const path of stdout.split("\0")) {
+		if (!path.endsWith(".json") || path.slice(COMPILES_FOLDER.length + 1).includes("/")) continue;
+		const text = await git(vaultPath, ["show", `${rev}:${path}`]).then((r) => r.stdout, () => null);
+		const report = text === null ? null : parseSharedReport(text);
+		if (report) found.set(path, report);
+	}
+	return found;
+}
+
+/**
+ * True when any of these files changed on `origin/main` since the vault and the remote parted, as the last fetch
+ * saw it (REP-50). False when the remote has no `main`.
+ */
+export async function changedOnRemote(vaultPath: string, files: string[]): Promise<boolean> {
+	const base = await git(vaultPath, ["merge-base", "refs/heads/main", REMOTE_MAIN]).then((r) => r.stdout.trim(), () => null);
+	if (!base) return false;
+	const { stdout } = await git(vaultPath, ["diff", "--name-only", base, REMOTE_MAIN, "--", ...files]);
+	return stdout.trim() !== "";
+}
+
+/**
+ * After this compile's shared report couldn't be pushed because the remote moved (CMP-91): fetches the remote, and
+ * when its newest report moved the marker past this compile's `from` (onto a descendant of it, or anywhere when this
+ * was the first compile), returns that report's file. Null otherwise, or when the remote can't be reached.
+ */
+export async function compiledMeanwhile(vaultPath: string, report: CompileReport): Promise<string | null> {
+	await git(vaultPath, ["fetch", "--quiet", "--no-tags", "origin"], NO_PROMPT_ENV);
+	const remote = await markerOf(vaultPath, await sharedReportsAt(vaultPath, REMOTE_MAIN), REMOTE_MAIN);
+	if (!remote || remote.file === report.shared?.file || remote.to === report.fromCommit) return null;
+	if (report.fromCommit) {
+		const past = await git(vaultPath, ["merge-base", "--is-ancestor", report.fromCommit, remote.to]).then(() => true, () => false);
+		if (!past) return null;
+	}
+	return remote.file;
 }
 
 /**
@@ -465,4 +560,161 @@ export function keptReports(reports: CompileReport[], max = 20): CompileReport[]
 		unshared++;
 		return unshared <= max;
 	});
+}
+
+/** What Activity says for a report from `.compiles/` whose log file is missing or can't be read (REP-54). */
+export const NO_ACTIVITY_LOG = "No activity log was shared for this compile.";
+
+/** A file in `.compiles/`: a report the plugin can read, or one it can't (REP-52). */
+export type SharedFile = { file: string; kind: "ok"; report: SharedReport } | { file: string; kind: "broken" };
+
+/** Every report file in `.compiles/`, as the working tree has it, sorted by name (REP-44, REP-51, REP-52). */
+export async function readSharedFolder(vaultPath: string): Promise<SharedFile[]> {
+	const names = await readdir(join(vaultPath, COMPILES_FOLDER)).catch(() => [] as string[]);
+	const files: SharedFile[] = [];
+	for (const name of names.filter((n) => n.endsWith(".json")).sort()) {
+		const file = `${COMPILES_FOLDER}/${name}`;
+		const read = await readSharedReportFile(vaultPath, file).catch((): ReadShared => ({ kind: "broken" }));
+		if (read.kind === "ok") files.push({ file, kind: "ok", report: read.report });
+		else if (read.kind === "broken") files.push({ file, kind: "broken" });
+	}
+	return files;
+}
+
+/** The lines of a shared report's Activity log (REP-53, REP-54), or null when the file is missing or can't be read. */
+export async function readActivityLog(vaultPath: string, file: string): Promise<string[] | null> {
+	const text = await readFile(join(vaultPath, activityLogName(file)), "utf8").catch(() => null);
+	if (text === null) return null;
+	return text.split("\n").filter((line, i, lines) => line !== "" || i < lines.length - 1);
+}
+
+/** When a compile started, from its file's name (REP-44), as ISO 8601; "" when the name doesn't say. */
+export function startedFromName(file: string): string {
+	const match = /(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z-[^/]*\.json$/.exec(file);
+	return match ? `${match[1]}T${match[2]}:${match[3]}:${match[4]}.000Z` : "";
+}
+
+function list<T>(value: T[] | undefined | null): T[] {
+	return Array.isArray(value) ? value : [];
+}
+
+function time(value: string | undefined | null): number {
+	const ms = value ? Date.parse(value) : NaN;
+	return Number.isNaN(ms) ? -Infinity : ms;
+}
+
+const BUILD_STATES: BuildState[] = ["waiting", "building", "built", "skipped", "failed"];
+const BUILD_STATUSES: BuildStatus[] = ["finished", "stopped", "cancelled"];
+
+/**
+ * The epic branches a build made, as far as the shared report tells (BLD-11, BLD-15): the base of a sub-issue's pull
+ * request, else the epic branch's name. Their base is the default branch the compile read the code at (REP-43).
+ */
+function sharedEpicBranches(report: CompileReport, repoPath: (repo: string) => string): EpicBranch[] | undefined {
+	const issues = report.issues ?? [];
+	const epic = issues.find((i) => i.kind === "epic" && i.number !== undefined);
+	if (!epic) return undefined;
+	const subs = issues.filter((i) => i.kind === "issue" && i.number !== undefined);
+	const merged = (report.pullRequests ?? []).find((pr) => subs.some((i) => i.repo === pr.repo && i.branch === pr.branch));
+	const branch = merged?.base ?? `theory/epic-${epic.number}-${epic.shortName}`;
+	const repos = [...new Set(subs.map((i) => i.repo))];
+	return repos.map((repo) => {
+		const read = report.code?.find((c) => c.repo === repo)?.branch;
+		const opened = (report.pullRequests ?? []).find((pr) => pr.repo === repo && pr.branch === branch)?.base;
+		return { repo, repoPath: repoPath(repo), branch, base: opened ?? read ?? "" };
+	});
+}
+
+/** Takes one build from the shared report as the report's latest build: its status, times and each issue's state. */
+function applySharedBuild(report: CompileReport, build: SharedBuild, repoPath: (repo: string) => string) {
+	for (const entry of list(build.issues)) {
+		const issue = report.issues?.find((i) => i.kind === "issue" && i.repo === entry.repo && i.number === entry.number);
+		if (!issue) continue;
+		if (BUILD_STATES.includes(entry.state as BuildState)) issue.build = entry.state as BuildState;
+		if (entry.branch) issue.branch = entry.branch;
+	}
+	// A build that ended elsewhere isn't running here (REP-47).
+	const status = BUILD_STATUSES.includes(build.status as BuildStatus) ? (build.status as BuildStatus) : "stopped";
+	const record: BuildRecord = { status, startedAt: build.startedAt, ...(build.finishedAt ? { finishedAt: build.finishedAt } : {}) };
+	const epicBranches = sharedEpicBranches(report, repoPath);
+	if (epicBranches) record.epicBranches = epicBranches;
+	report.build = record;
+}
+
+/**
+ * Takes in what the shared report's file holds that this machine may not know yet, because another engineer built
+ * from it or opened its pull requests (REP-50): every build, every pull request, and the newest build's issue states
+ * when it is newer than this machine's. Nothing this machine knows is dropped, and a build running here is left alone.
+ */
+export function absorbShared(report: CompileReport, shared: SharedReport, projectFolder: string): void {
+	const repoPath = (repo: string) => report.issues?.find((i) => i.repo === repo)?.repoPath ?? join(projectFolder, repo);
+	const key = (b: SharedBuild) => `${b.builtBy?.email ?? ""}\u0000${b.startedAt}`;
+	const builds = [...(report.builds ?? [])];
+	for (const build of list(shared.builds)) if (!builds.some((b) => key(b) === key(build))) builds.push(build);
+	builds.sort((a, b) => time(a.startedAt) - time(b.startedAt));
+	if (builds.length > 0) report.builds = builds;
+
+	const pullRequests: PullRequest[] = report.pullRequests ?? [];
+	for (const pr of list(shared.pullRequests)) {
+		if (pullRequests.some((p) => p.url === pr.url)) continue;
+		// Its state is asked of GitHub as REP-34 says. Until then it counts as open.
+		pullRequests.push({ repoPath: repoPath(pr.repo), repo: pr.repo, branch: pr.branch, base: pr.base, url: pr.url, state: "open" });
+	}
+	if (pullRequests.length > 0) report.pullRequests = pullRequests;
+
+	const latest = builds[builds.length - 1];
+	if (latest && report.build?.status !== "running" && time(latest.startedAt) > time(report.build?.startedAt)) {
+		applySharedBuild(report, latest, repoPath);
+	}
+	report.sharedLinks = { recompileOf: shared.recompileOf ?? null, recompiledBy: shared.recompiledBy ?? null };
+}
+
+/**
+ * A report from `.compiles/` as the plugin shows and works with it (REP-51, REP-50). Its id is its file. The issue
+ * bodies aren't shared, so they are empty until a build or recompile reads them from GitHub. A recompile's
+ * `recompileOf` is the earlier report's file, which `listReports` turns into the id this machine knows it by.
+ */
+export function fromSharedReport(shared: SharedReport, file: string, projectFolder: string): CompileReport {
+	const status = (["succeeded", "failed", "cancelled"] as const).find((s) => s === shared.status) ?? "failed";
+	const issues: IssueRecord[] = list(shared.issues).map((i) => ({
+		kind: i.kind === "epic" ? "epic" : "issue",
+		repo: i.repo,
+		repoPath: join(projectFolder, i.repo),
+		title: i.title ?? "",
+		body: "",
+		rules: list(i.rules),
+		shortName: i.shortName ?? "",
+		...(typeof i.number === "number" ? { number: i.number, linked: true, inProject: true } : {}),
+		...(i.url ? { url: i.url } : {}),
+		// Continued on GitHub already, by the engineer who recompiled (CMP-80).
+		...(typeof i.continues === "number" ? { continued: { title: i.title ?? "", body: "", updated: true, commented: true, touched: true } } : {}),
+	}));
+	const report: CompileReport = {
+		id: file,
+		status,
+		startedAt: shared.startedAt || startedFromName(file),
+		...(shared.finishedAt ? { finishedAt: shared.finishedAt } : {}),
+		fromCommit: shared.from,
+		toCommit: shared.to,
+		...(shared.recompileOf ? { recompileOf: shared.recompileOf } : {}),
+		revisions: list(shared.revisions),
+		summary: shared.summary ?? "",
+		code: list(shared.code),
+		changes: [],
+		questions: list(shared.questions).map((q) => ({ question: q.question, notes: list(q.notes), anchors: list(q.anchors) })),
+		problems: list(shared.problems).map((p) => ({ text: p.problem, anchors: list(p.anchors) })),
+		log: [],
+		author: shared.compiledBy?.name ?? "",
+		authorEmail: shared.compiledBy?.email ?? "",
+		...(shared.agent === "acp" ? { agent: "acp" as const } : {}),
+		model: shared.model ?? "",
+		effort: shared.effort ?? "",
+		markerMoved: shared.markerMoved,
+		...(shared.issueFailure ? { issueFailure: shared.issueFailure } : {}),
+		issues,
+		shared: { file, shortId: shared.id || file.replace(/^.*-([^-/]+)\.json$/, "$1") },
+		fromShared: true,
+	};
+	absorbShared(report, shared, projectFolder);
+	return report;
 }
