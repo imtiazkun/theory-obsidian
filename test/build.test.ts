@@ -21,7 +21,7 @@ import {
 } from "../src/build";
 import { CompileReport, GH_LOGIN, NO_PROJECT, startCompile } from "../src/compile";
 import { fromSharedReport, markerCommit, sharedBuild, toSharedReport } from "../src/shared-report";
-import { type IssueRecord, fillIssueBodies, plannedBody } from "../src/plan";
+import { type IssueRecord, fillIssueBodies, issueBody, plannedBody, plannedWhere } from "../src/plan";
 import { FakeGitHub } from "./fake-github";
 import { FakeStep, fakeClaude, repoWithOrigin } from "./fake-claude";
 import { commitFiles, initRepo, out, tempFolder, write } from "./helpers";
@@ -273,6 +273,34 @@ describe("building one issue (BLD-13, BLD-14)", () => {
 		expect(await remoteHead(s.api.bare, "main")).toBe(mainBefore);
 		// A build never moves the marker (CMP-43, BLD-25).
 		expect(await markerCommit(s.vault)).toBe(markerBefore);
+	});
+});
+
+describe("what Claude is told for each issue (BLD-20, BLD-29)", () => {
+	it("BLD-20: passes the issue's Where and says to start from it, searching only for what it doesn't cover", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		report.issues![0].where = ["src/serve.ts:10-20", "src/log.ts (new)"];
+		await build(s, report);
+		const [call] = s.claude.calls();
+		expect(call.prompt).toContain("\nBuild one.\n\n## Where to start\n\n- src/serve.ts:10-20\n- src/log.ts (new)\n");
+		expect(call.prompt).toContain('Start from the files and lines under "Where to start": the compile found them for this issue. Search only for what they don\'t cover.');
+	});
+
+	it("BLD-20: says so when the compile named no files, as an issue planned before CMP-107", async () => {
+		const s = await setup();
+		const report = await planned(s, [{ repo: "api", shortName: "one" }]);
+		await build(s, report);
+		expect(s.claude.calls()[0].prompt).toContain("## Where to start\n\nThe compile named no files for this issue, so find the code it changes yourself.");
+	});
+
+	it("BLD-29: tells Claude to cite rule IDs in short comments and to name tests after rules", async () => {
+		const s = await setup();
+		await build(s, await planned(s, [{ repo: "api", shortName: "one" }]));
+		const { prompt } = s.claude.calls()[0];
+		expect(prompt).toContain("Cite the rule ID in a short comment beside code that follows it, like `// The welcome note says what to do first (SET-10).`");
+		expect(prompt).toContain("not on every line");
+		expect(prompt).toContain("Name tests after the rules they check.");
 	});
 });
 
@@ -549,12 +577,28 @@ describe("continuing a build of the same compile (BLD-8, BLD-9, BLD-12, BLD-27, 
 		expect(plannedBody("Build one.\r\n\r\n---\r\nPlanned by theory.md from these revisions of the model:\r\n- abc1234 Write it")).toBe("Build one.");
 		expect(plannedBody("Rules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:")).toBe("");
 		expect(plannedBody("Written by hand.\n\n---\nA footer.")).toBe("Written by hand.\n\n---\nA footer.");
+		// CMP-108: the Where the plugin added comes off too, and is read back for the build (BLD-20).
+		const withWhere = issueBody(
+			{ kind: "issue", repo: "api", repoPath: "/api", title: "T", body: "Build one.", rules: ["R-1"], shortName: "one", where: ["src/a.ts:1-9", "src/b.ts (new)"] },
+			[{ hash: "abc1234def", author: "A", date: "", subject: "Write it" }],
+		);
+		expect(withWhere).toBe("Build one.\n\nRules: R-1\n\nWhere:\n- src/a.ts:1-9\n- src/b.ts (new)\n\n---\nPlanned by theory.md from these revisions of the model:\n- abc1234 Write it");
+		expect(plannedBody(withWhere)).toBe("Build one.");
+		expect(plannedWhere(withWhere)).toEqual(["src/a.ts:1-9", "src/b.ts (new)"]);
+		expect(plannedWhere("Build one.\n\nRules: R-1\n\n---\nPlanned by theory.md from these revisions of the model:")).toEqual([]);
+		// A body written by hand keeps its own list.
+		expect(plannedBody("Written by hand.\n\nWhere:\n- here")).toBe("Written by hand.\n\nWhere:\n- here");
+		expect(plannedWhere("Written by hand.\n\nWhere:\n- here")).toEqual([]);
 		const s = await setup();
 		const records = (await planned(s, [{ repo: "api", shortName: "one" }])).issues ?? [];
 		records[0].body = "";
 		s.github.issues[0].body = "From GitHub.";
 		await fillIssueBodies(s.github, records);
 		expect(records[0].body).toBe("From GitHub.");
+		records[0].body = "";
+		s.github.issues[0].body = withWhere;
+		await fillIssueBodies(s.github, records);
+		expect([records[0].body, records[0].where]).toEqual(["Build one.", ["src/a.ts:1-9", "src/b.ts (new)"]]);
 		records[0].body = "";
 		s.github.failNext("issueBody", "offline");
 		await expect(fillIssueBodies(s.github, records)).rejects.toThrow("Couldn't read api#1 on GitHub: offline");
